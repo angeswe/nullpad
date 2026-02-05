@@ -20,7 +20,7 @@ where
 {
     let key = format!("paste:{}", paste.id);
     let json = serde_json::to_string(paste)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON serialize", e.to_string())))?;
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON serialize", e.to_string())))?;
 
     // Store paste with TTL
     con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
@@ -50,7 +50,7 @@ where
     match json {
         Some(data) => {
             let paste = serde_json::from_str(&data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON deserialize", e.to_string())))?;
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
             Ok(Some(paste))
         }
         None => Ok(None),
@@ -85,7 +85,7 @@ where
     match json {
         Some(data) => {
             let paste = serde_json::from_str(&data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON deserialize", e.to_string())))?;
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
             Ok(Some(paste))
         }
         None => Ok(None),

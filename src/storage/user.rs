@@ -4,9 +4,15 @@
 //! - `user:{nanoid}` — individual user data (JSON)
 //! - `alias:{alias}` — alias lookup to user_id (STRING)
 //! - `invite:{token}` — invite data (JSON)
+//!
+//! ## Security: Zeroizing Sensitive Data
+//!
+//! This module uses the `zeroize` crate to securely clear sensitive data from memory
+//! after use, specifically for invite tokens and user data containing public keys.
 
 use crate::models::{StoredInvite, StoredUser};
 use redis::AsyncCommands;
+use zeroize::Zeroizing;
 
 /// Store a user in Redis with TTL.
 ///
@@ -23,7 +29,7 @@ where
     let alias_key = format!("alias:{}", user.alias);
 
     let json = serde_json::to_string(user)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON serialize", e.to_string())))?;
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON serialize", e.to_string())))?;
 
     // Store user with TTL
     con.set_ex::<_, _, ()>(&user_key, json, ttl_secs).await?;
@@ -35,6 +41,8 @@ where
 }
 
 /// Get a user by ID.
+///
+/// The user JSON is zeroized after deserialization.
 pub async fn get_user<C>(
     con: &mut C,
     id: &str,
@@ -47,8 +55,11 @@ where
 
     match json {
         Some(data) => {
-            let user = serde_json::from_str(&data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON deserialize", e.to_string())))?;
+            // Wrap the JSON string in Zeroizing to clear it after use
+            let zeroizing_data = Zeroizing::new(data);
+            let user = serde_json::from_str(&*zeroizing_data)
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
+            // zeroizing_data is automatically zeroized when dropped here
             Ok(Some(user))
         }
         None => Ok(None),
@@ -126,7 +137,7 @@ where
     let alias_key = format!("alias:{}", alias);
 
     let json = serde_json::to_string(&user)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON serialize", e.to_string())))?;
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON serialize", e.to_string())))?;
 
     // Store user without TTL (permanent)
     con.set::<_, _, ()>(&user_key, json).await?;
@@ -154,6 +165,7 @@ where
 /// List all users in Redis.
 ///
 /// Scans for keys matching `user:*` and deserializes each.
+/// User JSON data is zeroized after deserialization.
 pub async fn list_users<C>(
     con: &mut C,
 ) -> Result<Vec<StoredUser>, redis::RedisError>
@@ -169,9 +181,12 @@ where
     for key in keys {
         let json: Option<String> = con.get(&key).await?;
         if let Some(data) = json {
-            if let Ok(user) = serde_json::from_str::<StoredUser>(&data) {
+            // Wrap user JSON in Zeroizing
+            let zeroizing_data = Zeroizing::new(data);
+            if let Ok(user) = serde_json::from_str::<StoredUser>(&*zeroizing_data) {
                 users.push(user);
             }
+            // zeroizing_data is automatically zeroized when dropped here
         }
     }
 
@@ -189,13 +204,15 @@ where
 {
     let key = format!("invite:{}", invite.token);
     let json = serde_json::to_string(invite)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON serialize", e.to_string())))?;
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON serialize", e.to_string())))?;
 
     con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
     Ok(())
 }
 
 /// Get an invite by token.
+///
+/// The invite JSON is zeroized after deserialization.
 pub async fn get_invite<C>(
     con: &mut C,
     token: &str,
@@ -208,8 +225,11 @@ where
 
     match json {
         Some(data) => {
-            let invite = serde_json::from_str(&data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "JSON deserialize", e.to_string())))?;
+            // Wrap the JSON string in Zeroizing to clear it after use
+            let zeroizing_data = Zeroizing::new(data);
+            let invite = serde_json::from_str(&*zeroizing_data)
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
+            // zeroizing_data is automatically zeroized when dropped here
             Ok(Some(invite))
         }
         None => Ok(None),
@@ -234,6 +254,7 @@ where
 /// List all invites in Redis.
 ///
 /// Scans for keys matching `invite:*` and deserializes each.
+/// Invite JSON data is zeroized after deserialization.
 pub async fn list_invites<C>(
     con: &mut C,
 ) -> Result<Vec<StoredInvite>, redis::RedisError>
@@ -249,9 +270,12 @@ where
     for key in keys {
         let json: Option<String> = con.get(&key).await?;
         if let Some(data) = json {
-            if let Ok(invite) = serde_json::from_str::<StoredInvite>(&data) {
+            // Wrap invite JSON in Zeroizing
+            let zeroizing_data = Zeroizing::new(data);
+            if let Ok(invite) = serde_json::from_str::<StoredInvite>(&*zeroizing_data) {
                 invites.push(invite);
             }
+            // zeroizing_data is automatically zeroized when dropped here
         }
     }
 
