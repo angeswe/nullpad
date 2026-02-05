@@ -33,8 +33,13 @@ where
     C: AsyncCommands,
 {
     let key = format!("challenge:{}", alias);
-    let json = serde_json::to_string(challenge)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON serialize", e.to_string())))?;
+    let json = serde_json::to_string(challenge).map_err(|e| {
+        redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "JSON serialize",
+            e.to_string(),
+        ))
+    })?;
 
     con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
     Ok(())
@@ -61,7 +66,7 @@ where
             redis.call('DEL', KEYS[1])
         end
         return val
-        "
+        ",
     );
 
     let json: Option<String> = script.key(&key).invoke_async(con).await?;
@@ -70,8 +75,13 @@ where
         Some(data) => {
             // Wrap the JSON string in Zeroizing to clear it after use
             let zeroizing_data = Zeroizing::new(data);
-            let challenge = serde_json::from_str(&*zeroizing_data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
+            let challenge = serde_json::from_str(&zeroizing_data).map_err(|e| {
+                redis::RedisError::from((
+                    redis::ErrorKind::UnexpectedReturnType,
+                    "JSON deserialize",
+                    e.to_string(),
+                ))
+            })?;
             // zeroizing_data is automatically zeroized when dropped here
             Ok(Some(challenge))
         }
@@ -89,8 +99,13 @@ where
     C: AsyncCommands,
 {
     let key = format!("session:{}", session.token);
-    let json = serde_json::to_string(session)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON serialize", e.to_string())))?;
+    let json = serde_json::to_string(session).map_err(|e| {
+        redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "JSON serialize",
+            e.to_string(),
+        ))
+    })?;
 
     con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
     Ok(())
@@ -113,8 +128,13 @@ where
         Some(data) => {
             // Wrap the JSON string in Zeroizing to clear it after use
             let zeroizing_data = Zeroizing::new(data);
-            let session = serde_json::from_str(&*zeroizing_data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
+            let session = serde_json::from_str(&zeroizing_data).map_err(|e| {
+                redis::RedisError::from((
+                    redis::ErrorKind::UnexpectedReturnType,
+                    "JSON deserialize",
+                    e.to_string(),
+                ))
+            })?;
             // zeroizing_data is automatically zeroized when dropped here
             Ok(Some(session))
         }
@@ -125,10 +145,7 @@ where
 /// Delete a session from Redis.
 ///
 /// Returns true if the session was deleted, false if it didn't exist.
-pub async fn delete_session<C>(
-    con: &mut C,
-    token: &str,
-) -> Result<bool, redis::RedisError>
+pub async fn delete_session<C>(con: &mut C, token: &str) -> Result<bool, redis::RedisError>
 where
     C: AsyncCommands,
 {
@@ -141,18 +158,12 @@ where
 ///
 /// Scans for all session keys and deletes those matching the user_id.
 /// Session data is zeroized after checking.
-pub async fn delete_user_sessions<C>(
-    con: &mut C,
-    user_id: &str,
-) -> Result<(), redis::RedisError>
+pub async fn delete_user_sessions<C>(con: &mut C, user_id: &str) -> Result<(), redis::RedisError>
 where
     C: AsyncCommands,
 {
     // Get all session keys
-    let keys: Vec<String> = redis::cmd("KEYS")
-        .arg("session:*")
-        .query_async(con)
-        .await?;
+    let keys: Vec<String> = redis::cmd("KEYS").arg("session:*").query_async(con).await?;
 
     // Check each session and delete if it matches the user_id
     for key in keys {
@@ -160,7 +171,7 @@ where
         if let Some(data) = json {
             // Wrap session JSON in Zeroizing
             let zeroizing_data = Zeroizing::new(data);
-            if let Ok(session) = serde_json::from_str::<StoredSession>(&*zeroizing_data) {
+            if let Ok(session) = serde_json::from_str::<StoredSession>(&zeroizing_data) {
                 if session.user_id == user_id {
                     con.del::<_, ()>(&key).await?;
                 }

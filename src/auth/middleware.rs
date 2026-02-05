@@ -4,10 +4,7 @@ use crate::config::Config;
 use crate::error::AppError;
 use crate::models::Role;
 use crate::storage;
-use axum::{
-    extract::FromRequestParts,
-    http::request::Parts,
-};
+use axum::{extract::FromRequestParts, http::request::Parts};
 use redis::AsyncCommands;
 use std::sync::Arc;
 
@@ -49,7 +46,10 @@ impl FromRequestParts<AppState> for AuthSession {
             .to_string();
 
         // Get Redis connection
-        let mut con = state.redis.get_multiplexed_async_connection().await
+        let mut con = state
+            .redis
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
         // Look up session
@@ -58,7 +58,9 @@ impl FromRequestParts<AppState> for AuthSession {
             .ok_or_else(|| AppError::Unauthorized("Invalid or expired session".to_string()))?;
 
         // Parse role
-        let role = session.role.parse::<Role>()
+        let role = session
+            .role
+            .parse::<Role>()
             .map_err(|e| AppError::Internal(format!("Invalid role in session: {}", e)))?;
 
         Ok(AuthSession {
@@ -152,7 +154,8 @@ mod tests {
     async fn test_check_rate_limit() {
         // Note: This test requires a running Redis instance
         // Skip if REDIS_URL is not set
-        let redis_url = std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        let redis_url =
+            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
         let client = match redis::Client::open(redis_url) {
             Ok(c) => c,

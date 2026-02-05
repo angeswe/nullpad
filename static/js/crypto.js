@@ -2,7 +2,7 @@
  * Nullpad Crypto Module
  *
  * Client-side encryption using Web Crypto API.
- * AES-256-GCM for content encryption, PBKDF2 for PIN-based key derivation.
+ * AES-256-GCM for content encryption, Argon2id for PIN-based key derivation.
  * All encryption/decryption happens in the browser — server never sees plaintext or keys.
  */
 
@@ -109,7 +109,7 @@
     }
 
     /**
-     * Derive a new key from existing key + PIN using PBKDF2
+     * Derive a new key from existing key + PIN using Argon2id
      * @param {string} keyBase64url - Original key as base64url string
      * @param {string} pin - PIN to mix into key derivation
      * @returns {Promise<string>} Derived key as base64url string
@@ -118,37 +118,27 @@
         // Decode the original key
         const keyBytes = base64urlDecode(keyBase64url);
 
-        // Combine key + PIN for derivation material
+        // Combine key + PIN as password material
         const pinBytes = textEncode(pin);
-        const combinedMaterial = new Uint8Array(keyBytes.length + pinBytes.length);
-        combinedMaterial.set(keyBytes, 0);
-        combinedMaterial.set(pinBytes, keyBytes.length);
+        const password = new Uint8Array(keyBytes.length + pinBytes.length);
+        password.set(keyBytes, 0);
+        password.set(pinBytes, keyBytes.length);
 
-        // Import as raw key material for PBKDF2
-        const keyMaterial = await crypto.subtle.importKey(
-            'raw',
-            combinedMaterial,
-            'PBKDF2',
-            false,
-            ['deriveBits']
-        );
-
-        // Use PIN as salt (simple but documented tradeoff)
+        // Use PIN as salt (documented tradeoff: portability vs stronger salt)
         const salt = textEncode(pin);
 
-        // Derive 256 bits using PBKDF2-SHA256 with 100k iterations
-        const derivedBits = await crypto.subtle.deriveBits(
-            {
-                name: 'PBKDF2',
-                salt: salt,
-                iterations: 100000,
-                hash: 'SHA-256'
-            },
-            keyMaterial,
-            256 // 256 bits = 32 bytes
-        );
+        // Derive 32 bytes using Argon2id (OWASP recommended params)
+        const hash = await hashwasm.argon2id({
+            password,
+            salt,
+            parallelism: 1,
+            iterations: 2,
+            memorySize: 19456,
+            hashLength: 32,
+            outputType: 'binary'
+        });
 
-        return base64urlEncode(new Uint8Array(derivedBits));
+        return base64urlEncode(new Uint8Array(hash));
     }
 
     // ============================================================================

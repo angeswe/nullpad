@@ -1,24 +1,51 @@
-FROM rust:1.84-alpine AS builder
+# Multi-stage build for minimal runtime image
 
-RUN apk add --no-cache musl-dev
+# Stage 1: Build
+FROM rust:1.84-slim-bookworm AS builder
 
-WORKDIR /app
+WORKDIR /build
+
+# Copy manifests
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main() {}' > src/main.rs
-RUN cargo build --release && rm -rf src
 
-COPY src/ src/
-RUN touch src/main.rs && cargo build --release
+# Copy source code
+COPY src ./src
 
-FROM alpine:3.21
+# Build release binary
+RUN cargo build --release
 
-RUN apk add --no-cache ca-certificates
+# Stage 2: Runtime
+FROM debian:bookworm-slim
 
-COPY --from=builder /app/target/release/nullpad /usr/local/bin/nullpad
-COPY static/ /app/static/
-COPY favicon.svg /app/static/favicon.svg
+# Install runtime dependencies
+RUN apt-get update && \
+    apt-get install -y ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
 
+# Create non-root user
+RUN groupadd -r nullpad && \
+    useradd -r -g nullpad -s /bin/false nullpad
+
+# Create app directory
 WORKDIR /app
+
+# Copy binary from builder
+COPY --from=builder /build/target/release/nullpad /app/nullpad
+
+# Copy static files
+COPY static /app/static
+
+# Change ownership
+RUN chown -R nullpad:nullpad /app
+
+# Switch to non-root user
+USER nullpad
+
+# Expose port
 EXPOSE 3000
 
-CMD ["nullpad"]
+# Set default bind address
+ENV BIND_ADDR=0.0.0.0:3000
+
+# Run the application
+CMD ["/app/nullpad"]

@@ -1,7 +1,7 @@
 //! Ed25519 signature verification.
 
 use crate::error::AppError;
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
 /// Verify an Ed25519 signature against a message.
@@ -21,7 +21,8 @@ pub fn verify_signature(
     signature_base64: &str,
 ) -> Result<bool, AppError> {
     // Decode public key from base64
-    let pubkey_bytes = general_purpose::STANDARD.decode(pubkey_base64)
+    let pubkey_bytes = general_purpose::STANDARD
+        .decode(pubkey_base64)
         .map_err(|e| AppError::BadRequest(format!("Invalid pubkey base64: {}", e)))?;
 
     if pubkey_bytes.len() != 32 {
@@ -32,7 +33,8 @@ pub fn verify_signature(
     }
 
     // Decode signature from base64
-    let signature_bytes = general_purpose::STANDARD.decode(signature_base64)
+    let signature_bytes = general_purpose::STANDARD
+        .decode(signature_base64)
         .map_err(|e| AppError::BadRequest(format!("Invalid signature base64: {}", e)))?;
 
     if signature_bytes.len() != 64 {
@@ -43,14 +45,16 @@ pub fn verify_signature(
     }
 
     // Create VerifyingKey from pubkey bytes
-    let pubkey_array: [u8; 32] = pubkey_bytes.try_into()
+    let pubkey_array: [u8; 32] = pubkey_bytes
+        .try_into()
         .map_err(|_| AppError::Internal("Failed to convert pubkey to array".to_string()))?;
 
     let verifying_key = VerifyingKey::from_bytes(&pubkey_array)
         .map_err(|e| AppError::BadRequest(format!("Invalid public key: {}", e)))?;
 
     // Create Signature from signature bytes
-    let signature_array: [u8; 64] = signature_bytes.try_into()
+    let signature_array: [u8; 64] = signature_bytes
+        .try_into()
         .map_err(|_| AppError::Internal("Failed to convert signature to array".to_string()))?;
 
     let signature = Signature::from_bytes(&signature_array);
@@ -66,7 +70,7 @@ pub fn verify_signature(
 mod tests {
     use super::*;
     use base64::engine::general_purpose;
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn generate_test_signing_key() -> SigningKey {
         let mut seed = [0u8; 32];

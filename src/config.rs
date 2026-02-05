@@ -130,9 +130,9 @@ where
     T::Err: std::fmt::Display,
 {
     match env::var(key) {
-        Ok(val) => val.parse::<T>().map_err(|e| {
-            ConfigError::ParseError(key.to_string(), format!("{}: {}", e, val))
-        }),
+        Ok(val) => val
+            .parse::<T>()
+            .map_err(|e| ConfigError::ParseError(key.to_string(), format!("{}: {}", e, val))),
         Err(_) => Ok(default),
     }
 }

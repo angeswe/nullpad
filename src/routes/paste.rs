@@ -11,6 +11,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
 /// POST /api/paste — Create paste
@@ -45,6 +46,10 @@ pub async fn create_paste(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !allowed {
+        let mut hasher = std::hash::DefaultHasher::new();
+        addr.ip().hash(&mut hasher);
+        let ip_hash = format!("{:x}", hasher.finish());
+        tracing::warn!(action = "rate_limited", endpoint = "paste", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
     }
 
@@ -105,9 +110,7 @@ pub async fn create_paste(
         .to_lowercase();
 
     // If no auth session, enforce public extension restrictions
-    if auth_session.is_none()
-        && !state.config.public_allowed_extensions.contains(&extension)
-    {
+    if auth_session.is_none() && !state.config.public_allowed_extensions.contains(&extension) {
         return Err(AppError::Forbidden(format!(
             "File type .{} not allowed for public uploads. Allowed: {}",
             extension,
@@ -138,13 +141,18 @@ pub async fn create_paste(
     // Store paste
     storage::paste::store_paste(&mut con, &paste, ttl_secs).await?;
 
+    tracing::info!(
+        action = "paste_created",
+        paste_id = %paste_id,
+        burn = paste.burn_after_reading,
+        ttl = ttl_secs,
+        "Paste created"
+    );
+
     // Build response URL (just the paste ID, frontend adds view.html#)
     let url = format!("/view.html#{}", paste_id);
 
-    Ok(Json(CreatePasteResponse {
-        id: paste_id,
-        url,
-    }))
+    Ok(Json(CreatePasteResponse { id: paste_id, url }))
 }
 
 /// GET /api/paste/:id — Get paste
@@ -211,6 +219,8 @@ pub async fn delete_paste(
     if !deleted {
         return Err(AppError::NotFound("Paste not found".to_string()));
     }
+
+    tracing::info!(action = "paste_deleted", paste_id = %id, "Admin deleted paste");
 
     Ok(StatusCode::NO_CONTENT)
 }

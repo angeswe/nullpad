@@ -1,6 +1,6 @@
 //! Token and nonce generation for authentication.
 
-use base64::{Engine as _, engine::general_purpose};
+use base64::{engine::general_purpose, Engine as _};
 use rand::Rng;
 
 /// Generate a cryptographically random session token.

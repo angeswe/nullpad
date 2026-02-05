@@ -15,6 +15,7 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
 /// POST /api/auth/challenge — Request challenge nonce
@@ -41,6 +42,10 @@ pub async fn request_challenge(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !allowed {
+        let mut hasher = std::hash::DefaultHasher::new();
+        addr.ip().hash(&mut hasher);
+        let ip_hash = format!("{:x}", hasher.finish());
+        tracing::warn!(action = "rate_limited", endpoint = "auth/challenge", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
     }
 
@@ -101,6 +106,7 @@ pub async fn verify_challenge(
     let valid = verify_signature(&user.pubkey, &nonce_bytes, &req.signature)?;
 
     if !valid {
+        tracing::warn!(action = "auth_failed", alias = %req.alias, "Invalid signature");
         return Err(AppError::Unauthorized("Invalid signature".to_string()));
     }
 
@@ -125,6 +131,8 @@ pub async fn verify_challenge(
     };
 
     storage::session::store_session(&mut con, &session, state.config.session_ttl_secs).await?;
+
+    tracing::info!(action = "auth_success", alias = %req.alias, user_id = %user.id, role = %role.as_str(), "User authenticated");
 
     Ok(Json(VerifyResponse {
         token,
@@ -174,6 +182,8 @@ pub async fn register(
 
     // Store user with idle TTL (will be updated to active TTL on first upload)
     storage::user::store_user(&mut con, &user, state.config.user_idle_ttl_secs).await?;
+
+    tracing::info!(action = "user_registered", user_id = %user.id, alias = %user.alias, "New user registered via invite");
 
     Ok(Json(serde_json::json!({
         "success": true,

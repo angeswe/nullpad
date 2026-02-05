@@ -19,8 +19,13 @@ where
     C: AsyncCommands,
 {
     let key = format!("paste:{}", paste.id);
-    let json = serde_json::to_string(paste)
-        .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON serialize", e.to_string())))?;
+    let json = serde_json::to_string(paste).map_err(|e| {
+        redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "JSON serialize",
+            e.to_string(),
+        ))
+    })?;
 
     // Store paste with TTL
     con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
@@ -37,10 +42,7 @@ where
 }
 
 /// Get a paste from Redis.
-pub async fn get_paste<C>(
-    con: &mut C,
-    id: &str,
-) -> Result<Option<StoredPaste>, redis::RedisError>
+pub async fn get_paste<C>(con: &mut C, id: &str) -> Result<Option<StoredPaste>, redis::RedisError>
 where
     C: AsyncCommands,
 {
@@ -49,8 +51,13 @@ where
 
     match json {
         Some(data) => {
-            let paste = serde_json::from_str(&data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
+            let paste = serde_json::from_str(&data).map_err(|e| {
+                redis::RedisError::from((
+                    redis::ErrorKind::UnexpectedReturnType,
+                    "JSON deserialize",
+                    e.to_string(),
+                ))
+            })?;
             Ok(Some(paste))
         }
         None => Ok(None),
@@ -77,15 +84,20 @@ where
             redis.call('DEL', KEYS[1])
         end
         return val
-        "
+        ",
     );
 
     let json: Option<String> = script.key(&key).invoke_async(con).await?;
 
     match json {
         Some(data) => {
-            let paste = serde_json::from_str(&data)
-                .map_err(|e| redis::RedisError::from((redis::ErrorKind::UnexpectedReturnType, "JSON deserialize", e.to_string())))?;
+            let paste = serde_json::from_str(&data).map_err(|e| {
+                redis::RedisError::from((
+                    redis::ErrorKind::UnexpectedReturnType,
+                    "JSON deserialize",
+                    e.to_string(),
+                ))
+            })?;
             Ok(Some(paste))
         }
         None => Ok(None),
@@ -95,10 +107,7 @@ where
 /// Delete a paste from Redis.
 ///
 /// Returns true if the paste was deleted, false if it didn't exist.
-pub async fn delete_paste<C>(
-    con: &mut C,
-    id: &str,
-) -> Result<bool, redis::RedisError>
+pub async fn delete_paste<C>(con: &mut C, id: &str) -> Result<bool, redis::RedisError>
 where
     C: AsyncCommands,
 {
@@ -123,10 +132,7 @@ where
 /// Delete all pastes owned by a user.
 ///
 /// Also deletes the user_pastes set.
-pub async fn delete_user_pastes<C>(
-    con: &mut C,
-    user_id: &str,
-) -> Result<(), redis::RedisError>
+pub async fn delete_user_pastes<C>(con: &mut C, user_id: &str) -> Result<(), redis::RedisError>
 where
     C: AsyncCommands,
 {

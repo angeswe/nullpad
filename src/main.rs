@@ -9,11 +9,7 @@
 //! 6. Start Axum server
 
 use nullpad::{
-    auth::middleware::AppState,
-    config::Config,
-    middleware::security_headers,
-    routes,
-    storage,
+    auth::middleware::AppState, config::Config, middleware::security_headers, routes, storage,
 };
 use std::sync::Arc;
 use tower_http::services::ServeDir;
@@ -30,8 +26,7 @@ async fn main() {
     tracing::info!("Starting nullpad on {}", config.bind_addr);
 
     // Connect to Redis
-    let redis_client = redis::Client::open(config.redis_url.as_str())
-        .expect("Invalid Redis URL");
+    let redis_client = redis::Client::open(config.redis_url.as_str()).expect("Invalid Redis URL");
 
     // Verify Redis connection
     let mut con = redis_client
@@ -67,7 +62,5 @@ async fn main() {
     tracing::info!("Listening on {}", config.bind_addr);
 
     // Start server
-    axum::serve(listener, app)
-        .await
-        .expect("Server error");
+    axum::serve(listener, app).await.expect("Server error");
 }

@@ -946,3 +946,23 @@ input[type="checkbox"]:checked::after {
     text-decoration: underline;
   }
 }
+
+/* ==========================================================================
+   Site Footer
+   ========================================================================== */
+
+.site-footer {
+  text-align: center;
+  padding: 2rem 0 1rem;
+  color: #555;
+  font-size: 0.75rem;
+}
+
+.site-footer a {
+  color: #555;
+  text-decoration: none;
+}
+
+.site-footer a:hover {
+  color: #4ade80;
+}

@@ -4,12 +4,7 @@
 //! - nullpad-kry: Essential security headers (Referrer-Policy, X-Content-Type-Options, etc.)
 //! - nullpad-2hm: Content Security Policy hardening
 
-use axum::{
-    extract::Request,
-    http::HeaderValue,
-    middleware::Next,
-    response::Response,
-};
+use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
 
 /// Middleware that adds comprehensive security headers to all responses.
 ///
@@ -62,18 +57,12 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     let headers = response.headers_mut();
 
     // nullpad-kry: Essential security headers
-    headers.insert(
-        "referrer-policy",
-        HeaderValue::from_static("no-referrer"),
-    );
+    headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert(
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
-        "x-frame-options",
-        HeaderValue::from_static("DENY"),
-    );
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
     headers.insert(
         "strict-transport-security",
         HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
@@ -88,12 +77,12 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
         "content-security-policy",
         HeaderValue::from_static(
             "default-src 'self'; \
-             script-src 'self'; \
+             script-src 'self' 'wasm-unsafe-eval'; \
              style-src 'self' fonts.googleapis.com; \
              font-src fonts.gstatic.com; \
              frame-ancestors 'none'; \
              base-uri 'self'; \
-             form-action 'self'"
+             form-action 'self'",
         ),
     );
 
@@ -137,14 +126,8 @@ mod tests {
             "no-referrer",
             "Referrer-Policy must be no-referrer to prevent key leakage"
         );
-        assert_eq!(
-            headers.get("x-content-type-options").unwrap(),
-            "nosniff"
-        );
-        assert_eq!(
-            headers.get("x-frame-options").unwrap(),
-            "DENY"
-        );
+        assert_eq!(headers.get("x-content-type-options").unwrap(), "nosniff");
+        assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
         assert_eq!(
             headers.get("strict-transport-security").unwrap(),
             "max-age=63072000; includeSubDomains; preload"
@@ -155,9 +138,13 @@ mod tests {
         );
 
         // Verify nullpad-2hm CSP header
-        let csp = headers.get("content-security-policy").unwrap().to_str().unwrap();
+        let csp = headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
         assert!(csp.contains("default-src 'self'"));
-        assert!(csp.contains("script-src 'self'"));
+        assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
         assert!(csp.contains("style-src 'self' fonts.googleapis.com"));
         assert!(csp.contains("font-src fonts.gstatic.com"));
         assert!(csp.contains("frame-ancestors 'none'"));

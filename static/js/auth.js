@@ -1,7 +1,7 @@
 /**
  * Nullpad Authentication Module
  * Ed25519 challenge-response authentication using Web Crypto API
- * No external dependencies — uses native crypto.subtle for Ed25519
+ * Uses Argon2id (via hash-wasm) for key derivation, native crypto.subtle for Ed25519
  */
 
 (function() {
@@ -76,7 +76,7 @@
 
   /**
    * Derive Ed25519 keypair from user secret and alias
-   * Uses PBKDF2 with alias as salt (portability vs stronger salt tradeoff)
+   * Uses Argon2id with alias as salt (portability vs stronger salt tradeoff)
    * @param {string} secret - User's secret password
    * @param {string} alias - User's alias (used as salt)
    * @returns {Promise<{publicKey: string, privateKey: CryptoKey}>}
@@ -84,28 +84,18 @@
   async function deriveKeypair(secret, alias) {
     const encoder = new TextEncoder();
 
-    // Import secret as raw key material for PBKDF2
-    const keyMaterial = await crypto.subtle.importKey(
-      'raw',
-      encoder.encode(secret),
-      'PBKDF2',
-      false,
-      ['deriveBits']
-    );
+    // Derive 32 bytes for Ed25519 seed using Argon2id (OWASP recommended params)
+    const hash = await hashwasm.argon2id({
+      password: encoder.encode(secret),
+      salt: encoder.encode(alias),
+      parallelism: 1,
+      iterations: 2,
+      memorySize: 19456,
+      hashLength: 32,
+      outputType: 'binary'
+    });
 
-    // Derive 32 bytes for Ed25519 seed
-    const derivedBits = await crypto.subtle.deriveBits(
-      {
-        name: 'PBKDF2',
-        salt: encoder.encode(alias),
-        iterations: 100000,
-        hash: 'SHA-256'
-      },
-      keyMaterial,
-      256
-    );
-
-    const seed = new Uint8Array(derivedBits);
+    const seed = new Uint8Array(hash);
 
     // Import seed as Ed25519 private key via PKCS8
     const privateKey = await importPrivateKeyFromSeed(seed);

@@ -39,6 +39,8 @@ pub async fn create_invite(
     // Build invite URL
     let url = format!("/invite.html?token={}", token);
 
+    tracing::info!(action = "invite_created", token = %token, "Admin created invite");
+
     Ok(Json(CreateInviteResponse { token, url }))
 }
 
@@ -85,6 +87,8 @@ pub async fn revoke_invite(
     if !deleted {
         return Err(AppError::NotFound("Invite not found".to_string()));
     }
+
+    tracing::info!(action = "invite_revoked", token = %token, "Admin revoked invite");
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -137,9 +141,7 @@ pub async fn revoke_user(
 
     // Don't allow deleting the admin user
     if user.role == "admin" {
-        return Err(AppError::Forbidden(
-            "Cannot delete admin user".to_string(),
-        ));
+        return Err(AppError::Forbidden("Cannot delete admin user".to_string()));
     }
 
     // Delete user's pastes
@@ -150,6 +152,8 @@ pub async fn revoke_user(
 
     // Delete user
     storage::user::delete_user(&mut con, &id).await?;
+
+    tracing::warn!(action = "user_revoked", user_id = %id, alias = %user.alias, "Admin revoked user");
 
     Ok(StatusCode::NO_CONTENT)
 }
