@@ -191,31 +191,44 @@
         </div>
 
         <footer>
-            Nullpad Admin Keypair Generator | Ed25519 via TweetNaCl.js
+            Nullpad Admin Keypair Generator | Ed25519 via Web Crypto API
         </footer>
     </div>
 
-    <!-- TweetNaCl.js - load from vendored file (relative to tools/) -->
-    <script src="../static/js/vendor/tweetnacl.min.js"></script>
-
-    <!-- Base64 encoding helper -->
     <script>
-        function uint8ArrayToBase64(uint8Array) {
+        function uint8ArrayToBase64(bytes) {
             let binary = '';
-            const len = uint8Array.byteLength;
-            for (let i = 0; i < len; i++) {
-                binary += String.fromCharCode(uint8Array[i]);
+            for (let i = 0; i < bytes.length; i++) {
+                binary += String.fromCharCode(bytes[i]);
             }
             return btoa(binary);
         }
 
-        function generateKeypair() {
-            // Generate Ed25519 keypair
-            const keypair = nacl.sign.keyPair();
+        function b64urlDecode(str) {
+            let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
+            while (b64.length % 4) b64 += '=';
+            const binary = atob(b64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes;
+        }
 
-            // Encode to base64
-            const publicKeyB64 = uint8ArrayToBase64(keypair.publicKey);
-            const secretKeyB64 = uint8ArrayToBase64(keypair.secretKey);
+        async function generateKeypair() {
+            // Generate Ed25519 keypair using Web Crypto
+            const keypair = await crypto.subtle.generateKey(
+                { name: 'Ed25519' },
+                true, // extractable
+                ['sign', 'verify']
+            );
+
+            // Export as JWK for portable key extraction
+            const jwk = await crypto.subtle.exportKey('jwk', keypair.privateKey);
+
+            // jwk.x = public key (base64url), jwk.d = private seed (base64url)
+            const publicKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.x));
+            const secretKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.d));
 
             // Display keys
             document.getElementById('pubkeyField').value = publicKeyB64;
@@ -226,9 +239,7 @@
             const field = document.getElementById(fieldId);
             const text = field.value;
 
-            // Copy to clipboard
             navigator.clipboard.writeText(text).then(() => {
-                // Visual feedback
                 const originalText = buttonElement.textContent;
                 buttonElement.textContent = 'Copied!';
                 buttonElement.classList.add('copied');
@@ -239,7 +250,6 @@
                 }, 2000);
             }).catch(err => {
                 console.error('Failed to copy:', err);
-                alert('Failed to copy to clipboard');
             });
         }
 
