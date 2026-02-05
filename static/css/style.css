@@ -1,0 +1,948 @@
+/* ==========================================================================
+   Nullpad - Dark Terminal Theme
+   Zero-knowledge encrypted paste sharing
+   ========================================================================== */
+
+/* ==========================================================================
+   Reset & Base Styles
+   ========================================================================== */
+
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  line-height: 1.6;
+  color: #e0e0e0;
+  background-color: #0a0a0a;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ==========================================================================
+   Typography
+   ========================================================================== */
+
+h1, h2, h3, h4, h5, h6 {
+  margin: 0 0 1rem 0;
+  font-weight: 700;
+  line-height: 1.2;
+  color: #e0e0e0;
+}
+
+h1 {
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  font-size: 1.5rem;
+}
+
+h3 {
+  font-size: 1.25rem;
+}
+
+p {
+  margin: 0 0 1rem 0;
+}
+
+a {
+  color: #4ade80;
+  text-decoration: none;
+  transition: opacity 0.2s;
+}
+
+a:hover {
+  opacity: 0.8;
+  text-decoration: underline;
+}
+
+code {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+  background-color: #1a1a1a;
+  padding: 0.2em 0.4em;
+  border: 1px solid #333;
+  color: #4ade80;
+}
+
+pre {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+  background-color: #111;
+  border: 1px solid #222;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 0 0 1rem 0;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #e0e0e0;
+}
+
+/* ==========================================================================
+   Layout
+   ========================================================================== */
+
+.container {
+  max-width: 700px;
+  margin: 0 auto;
+  padding: 2rem 1rem;
+}
+
+.page-header {
+  margin-bottom: 2rem;
+  padding-bottom: 1rem;
+  border-bottom: 1px solid #222;
+}
+
+.page-header h1 {
+  margin-bottom: 0.5rem;
+}
+
+.page-header p {
+  color: #a0a0a0;
+  font-size: 0.9em;
+  margin: 0;
+}
+
+/* ==========================================================================
+   Forms
+   ========================================================================== */
+
+label {
+  display: block;
+  margin-bottom: 0.5rem;
+  color: #e0e0e0;
+  font-size: 0.9em;
+  font-weight: 500;
+}
+
+input[type="text"],
+input[type="password"],
+input[type="number"],
+input[type="email"],
+textarea,
+select {
+  width: 100%;
+  padding: 0.75rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+  color: #e0e0e0;
+  background-color: #111;
+  border: 1px solid #333;
+  border-radius: 0;
+  transition: border-color 0.2s;
+}
+
+input[type="text"]:focus,
+input[type="password"]:focus,
+input[type="number"]:focus,
+input[type="email"]:focus,
+textarea:focus,
+select:focus {
+  outline: none;
+  border-color: #4ade80;
+}
+
+input[type="text"]::placeholder,
+input[type="password"]::placeholder,
+input[type="number"]::placeholder,
+input[type="email"]::placeholder,
+textarea::placeholder {
+  color: #555;
+}
+
+textarea {
+  resize: vertical;
+  min-height: 200px;
+  font-family: 'JetBrains Mono', monospace;
+}
+
+select {
+  cursor: pointer;
+  appearance: none;
+  background-image: url("data:image/svg+xml;charset=UTF-8,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%234ade80' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3e%3cpolyline points='6 9 12 15 18 9'%3e%3c/polyline%3e%3c/svg%3e");
+  background-repeat: no-repeat;
+  background-position: right 0.5rem center;
+  background-size: 1em;
+  padding-right: 2.5rem;
+}
+
+.form-group {
+  margin-bottom: 1.5rem;
+}
+
+.form-help {
+  margin-top: 0.5rem;
+  font-size: 0.85em;
+  color: #a0a0a0;
+}
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+.btn {
+  display: inline-block;
+  padding: 0.75rem 1.5rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+  font-weight: 500;
+  text-align: center;
+  text-decoration: none;
+  border: 1px solid transparent;
+  border-radius: 0;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.btn:hover {
+  opacity: 0.9;
+  text-decoration: none;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background-color: #4ade80;
+  color: #0a0a0a;
+  border-color: #4ade80;
+}
+
+.btn-primary:hover {
+  background-color: #3ac76a;
+}
+
+.btn-secondary {
+  background-color: transparent;
+  color: #4ade80;
+  border-color: #4ade80;
+}
+
+.btn-secondary:hover {
+  background-color: rgba(74, 222, 128, 0.1);
+}
+
+.btn-danger {
+  background-color: #ef4444;
+  color: #fff;
+  border-color: #ef4444;
+}
+
+.btn-danger:hover {
+  background-color: #dc2626;
+}
+
+.btn-small {
+  padding: 0.4rem 0.8rem;
+  font-size: 0.8em;
+}
+
+.btn-block {
+  display: block;
+  width: 100%;
+}
+
+/* ==========================================================================
+   Cards & Panels
+   ========================================================================== */
+
+.panel {
+  background-color: #111;
+  border: 1px solid #222;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+.panel-header {
+  margin-bottom: 1rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #222;
+}
+
+.panel-header h2,
+.panel-header h3 {
+  margin: 0;
+  color: #e0e0e0;
+}
+
+.panel-body {
+  color: #a0a0a0;
+}
+
+.panel-footer {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid #222;
+}
+
+/* ==========================================================================
+   Tables
+   ========================================================================== */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-bottom: 1.5rem;
+}
+
+th {
+  text-align: left;
+  padding: 0.75rem;
+  color: #e0e0e0;
+  font-weight: 600;
+  border-bottom: 2px solid #333;
+}
+
+td {
+  padding: 0.75rem;
+  color: #a0a0a0;
+  border-bottom: 1px solid #222;
+}
+
+tr:hover {
+  background-color: rgba(74, 222, 128, 0.05);
+}
+
+/* ==========================================================================
+   Alerts & Messages
+   ========================================================================== */
+
+.alert {
+  padding: 1rem;
+  margin-bottom: 1.5rem;
+  border: 1px solid transparent;
+  border-radius: 0;
+  font-size: 0.9em;
+}
+
+.alert-success {
+  background-color: rgba(74, 222, 128, 0.1);
+  border-color: #4ade80;
+  color: #4ade80;
+}
+
+.alert-warning {
+  background-color: rgba(251, 191, 36, 0.1);
+  border-color: #fbbf24;
+  color: #fbbf24;
+}
+
+.alert-error {
+  background-color: rgba(239, 68, 68, 0.1);
+  border-color: #ef4444;
+  color: #ef4444;
+}
+
+.alert-info {
+  background-color: rgba(74, 222, 128, 0.05);
+  border-color: #333;
+  color: #a0a0a0;
+}
+
+/* ==========================================================================
+   Toggle/Checkbox
+   ========================================================================== */
+
+.toggle-wrapper {
+  display: flex;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+
+.toggle-switch {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  margin-right: 0.75rem;
+}
+
+.toggle-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: #333;
+  border: 1px solid #444;
+  transition: 0.3s;
+}
+
+.toggle-slider:before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  bottom: 3px;
+  background-color: #666;
+  transition: 0.3s;
+}
+
+input:checked + .toggle-slider {
+  background-color: rgba(74, 222, 128, 0.2);
+  border-color: #4ade80;
+}
+
+input:checked + .toggle-slider:before {
+  transform: translateX(20px);
+  background-color: #4ade80;
+}
+
+.toggle-label {
+  color: #e0e0e0;
+  font-size: 0.9em;
+}
+
+/* Checkbox */
+input[type="checkbox"] {
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  background-color: #111;
+  border: 1px solid #333;
+  border-radius: 0;
+  cursor: pointer;
+  position: relative;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+
+input[type="checkbox"]:checked {
+  background-color: #4ade80;
+  border-color: #4ade80;
+}
+
+input[type="checkbox"]:checked::after {
+  content: "✓";
+  position: absolute;
+  color: #0a0a0a;
+  font-size: 14px;
+  top: -2px;
+  left: 2px;
+}
+
+/* ==========================================================================
+   Copy Button
+   ========================================================================== */
+
+.copy-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+.copy-input {
+  flex: 1;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+  padding: 0.5rem;
+  background-color: #111;
+  border: 1px solid #333;
+  color: #4ade80;
+}
+
+.copy-btn {
+  padding: 0.5rem 1rem;
+  background-color: transparent;
+  border: 1px solid #4ade80;
+  color: #4ade80;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.copy-btn:hover {
+  background-color: rgba(74, 222, 128, 0.1);
+}
+
+.copy-btn:active {
+  background-color: rgba(74, 222, 128, 0.2);
+}
+
+/* ==========================================================================
+   File Upload & Drag-Drop
+   ========================================================================== */
+
+.file-upload-area {
+  border: 2px dashed #333;
+  background-color: #111;
+  padding: 2rem;
+  text-align: center;
+  cursor: pointer;
+  transition: all 0.3s;
+  margin-bottom: 1.5rem;
+}
+
+.file-upload-area:hover {
+  border-color: #4ade80;
+  background-color: rgba(74, 222, 128, 0.05);
+}
+
+.file-upload-area.drag-over {
+  border-color: #4ade80;
+  background-color: rgba(74, 222, 128, 0.1);
+}
+
+.file-upload-area input[type="file"] {
+  display: none;
+}
+
+.file-upload-icon {
+  font-size: 2rem;
+  color: #4ade80;
+  margin-bottom: 1rem;
+}
+
+.file-upload-text {
+  color: #a0a0a0;
+  font-size: 0.9em;
+}
+
+.file-upload-text strong {
+  color: #4ade80;
+}
+
+.file-info {
+  margin-top: 1rem;
+  padding: 0.75rem;
+  background-color: rgba(74, 222, 128, 0.1);
+  border: 1px solid #4ade80;
+  color: #4ade80;
+  font-size: 0.85em;
+}
+
+/* ==========================================================================
+   Markdown Rendered Content
+   ========================================================================== */
+
+.markdown-body {
+  color: #e0e0e0;
+  word-wrap: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3,
+.markdown-body h4,
+.markdown-body h5,
+.markdown-body h6 {
+  margin-top: 1.5rem;
+  margin-bottom: 1rem;
+  color: #e0e0e0;
+  border-bottom: 1px solid #222;
+  padding-bottom: 0.5rem;
+}
+
+.markdown-body h1:first-child,
+.markdown-body h2:first-child,
+.markdown-body h3:first-child {
+  margin-top: 0;
+}
+
+.markdown-body a {
+  color: #4ade80;
+}
+
+.markdown-body code {
+  background-color: #1a1a1a;
+  padding: 0.2em 0.4em;
+  border: 1px solid #333;
+  color: #4ade80;
+}
+
+.markdown-body pre {
+  background-color: #111;
+  border: 1px solid #222;
+  padding: 1rem;
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  color: #e0e0e0;
+}
+
+.markdown-body blockquote {
+  margin: 0 0 1rem 0;
+  padding-left: 1rem;
+  border-left: 3px solid #4ade80;
+  color: #a0a0a0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  padding-left: 2rem;
+  margin-bottom: 1rem;
+}
+
+.markdown-body li {
+  margin-bottom: 0.5rem;
+}
+
+.markdown-body table {
+  border-collapse: collapse;
+  width: 100%;
+  margin-bottom: 1rem;
+}
+
+.markdown-body th,
+.markdown-body td {
+  padding: 0.75rem;
+  border: 1px solid #222;
+}
+
+.markdown-body th {
+  background-color: #111;
+  color: #e0e0e0;
+  font-weight: 600;
+}
+
+.markdown-body td {
+  color: #a0a0a0;
+}
+
+.markdown-body img {
+  max-width: 100%;
+  height: auto;
+  margin: 1rem 0;
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid #222;
+  margin: 2rem 0;
+}
+
+/* Syntax highlighting for code blocks */
+.markdown-body .hljs {
+  background-color: #111;
+  color: #e0e0e0;
+}
+
+.markdown-body .hljs-keyword,
+.markdown-body .hljs-selector-tag,
+.markdown-body .hljs-literal,
+.markdown-body .hljs-section,
+.markdown-body .hljs-link {
+  color: #4ade80;
+}
+
+.markdown-body .hljs-string {
+  color: #fbbf24;
+}
+
+.markdown-body .hljs-comment {
+  color: #555;
+}
+
+.markdown-body .hljs-number {
+  color: #ef4444;
+}
+
+/* ==========================================================================
+   Loading Spinner
+   ========================================================================== */
+
+.spinner {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+  border: 2px solid #333;
+  border-top-color: #4ade80;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(10, 10, 10, 0.9);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+}
+
+.loading-spinner {
+  width: 50px;
+  height: 50px;
+  border: 4px solid #333;
+  border-top-color: #4ade80;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* ==========================================================================
+   Admin Dashboard Specific
+   ========================================================================== */
+
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.stat-card {
+  background-color: #111;
+  border: 1px solid #222;
+  padding: 1.5rem;
+}
+
+.stat-card .stat-value {
+  font-size: 2rem;
+  font-weight: 700;
+  color: #4ade80;
+  margin-bottom: 0.5rem;
+}
+
+.stat-card .stat-label {
+  font-size: 0.85em;
+  color: #a0a0a0;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.action-buttons {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+/* ==========================================================================
+   Utility Classes
+   ========================================================================== */
+
+.hidden {
+  display: none !important;
+}
+
+.text-muted {
+  color: #a0a0a0;
+}
+
+.text-success {
+  color: #4ade80;
+}
+
+.text-warning {
+  color: #fbbf24;
+}
+
+.text-error {
+  color: #ef4444;
+}
+
+.text-center {
+  text-align: center;
+}
+
+.text-right {
+  text-align: right;
+}
+
+.mono {
+  font-family: 'JetBrains Mono', monospace;
+}
+
+.mb-1 {
+  margin-bottom: 0.5rem;
+}
+
+.mb-2 {
+  margin-bottom: 1rem;
+}
+
+.mb-3 {
+  margin-bottom: 1.5rem;
+}
+
+.mb-4 {
+  margin-bottom: 2rem;
+}
+
+.mt-1 {
+  margin-top: 0.5rem;
+}
+
+.mt-2 {
+  margin-top: 1rem;
+}
+
+.mt-3 {
+  margin-top: 1.5rem;
+}
+
+.mt-4 {
+  margin-top: 2rem;
+}
+
+.flex {
+  display: flex;
+}
+
+.flex-col {
+  flex-direction: column;
+}
+
+.items-center {
+  align-items: center;
+}
+
+.justify-between {
+  justify-content: space-between;
+}
+
+.gap-1 {
+  gap: 0.5rem;
+}
+
+.gap-2 {
+  gap: 1rem;
+}
+
+/* ==========================================================================
+   Responsive Design
+   ========================================================================== */
+
+@media (max-width: 768px) {
+  body {
+    font-size: 13px;
+  }
+
+  .container {
+    padding: 1rem 0.75rem;
+  }
+
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  h2 {
+    font-size: 1.25rem;
+  }
+
+  h3 {
+    font-size: 1.1rem;
+  }
+
+  .btn {
+    padding: 0.6rem 1rem;
+    font-size: 0.85em;
+  }
+
+  .panel {
+    padding: 1rem;
+  }
+
+  table {
+    font-size: 0.85em;
+  }
+
+  th, td {
+    padding: 0.5rem;
+  }
+
+  .stats-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .action-buttons {
+    flex-direction: column;
+  }
+
+  .action-buttons .btn {
+    width: 100%;
+  }
+
+  .copy-wrapper {
+    flex-direction: column;
+  }
+
+  .copy-btn {
+    width: 100%;
+  }
+}
+
+/* ==========================================================================
+   Accessibility
+   ========================================================================== */
+
+:focus-visible {
+  outline: 2px solid #4ade80;
+  outline-offset: 2px;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ==========================================================================
+   Print Styles
+   ========================================================================== */
+
+@media print {
+  body {
+    background-color: #fff;
+    color: #000;
+  }
+
+  .btn,
+  .copy-btn,
+  .file-upload-area {
+    display: none;
+  }
+
+  a {
+    color: #000;
+    text-decoration: underline;
+  }
+}

@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nullpad Admin Keypair Generator</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'JetBrains Mono', monospace;
+            background-color: #0a0a0a;
+            color: #e0e0e0;
+            padding: 2rem;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+            color: #e0e0e0;
+        }
+
+        .subtitle {
+            color: #a0a0a0;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+        }
+
+        .warning {
+            background-color: #1a1400;
+            border: 1px solid #fbbf24;
+            color: #fbbf24;
+            padding: 1rem;
+            margin-bottom: 2rem;
+            font-size: 0.9rem;
+        }
+
+        .warning strong {
+            display: block;
+            margin-bottom: 0.5rem;
+        }
+
+        button {
+            background-color: #4ade80;
+            color: #0a0a0a;
+            border: none;
+            padding: 0.75rem 1.5rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            font-weight: 600;
+            cursor: pointer;
+            margin-bottom: 2rem;
+            transition: opacity 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.8;
+        }
+
+        button:active {
+            opacity: 0.6;
+        }
+
+        .key-section {
+            margin-bottom: 2rem;
+        }
+
+        .key-section h2 {
+            font-size: 1.2rem;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+            color: #e0e0e0;
+        }
+
+        .key-section .label {
+            font-size: 0.85rem;
+            color: #a0a0a0;
+            margin-bottom: 0.5rem;
+        }
+
+        .key-display {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+
+        textarea {
+            flex: 1;
+            background-color: #1a1a1a;
+            color: #e0e0e0;
+            border: 1px solid #333;
+            padding: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            resize: vertical;
+            min-height: 80px;
+        }
+
+        textarea:focus {
+            outline: none;
+            border-color: #4ade80;
+        }
+
+        .copy-btn {
+            background-color: #333;
+            color: #e0e0e0;
+            padding: 0.75rem 1rem;
+            font-size: 0.85rem;
+            white-space: nowrap;
+        }
+
+        .copy-btn:hover {
+            background-color: #444;
+        }
+
+        .copy-btn.copied {
+            background-color: #4ade80;
+            color: #0a0a0a;
+        }
+
+        .usage-note {
+            font-size: 0.85rem;
+            color: #a0a0a0;
+            margin-top: 0.5rem;
+        }
+
+        .usage-note code {
+            background-color: #1a1a1a;
+            color: #4ade80;
+            padding: 0.2rem 0.4rem;
+        }
+
+        footer {
+            margin-top: 3rem;
+            padding-top: 2rem;
+            border-top: 1px solid #333;
+            text-align: center;
+            color: #666;
+            font-size: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Nullpad Admin Keypair Generator</h1>
+        <div class="subtitle">Ed25519 keypair generator for admin bootstrap</div>
+
+        <div class="warning">
+            <strong>⚠️ Security Warning</strong>
+            Save your secret key securely. It cannot be recovered. Anyone with access to the secret key can authenticate as admin.
+        </div>
+
+        <button id="generateBtn" onclick="generateKeypair()">Generate New Keypair</button>
+
+        <div class="key-section">
+            <h2>Public Key</h2>
+            <div class="label">Use this for the ADMIN_PUBKEY environment variable</div>
+            <div class="key-display">
+                <textarea id="pubkeyField" readonly></textarea>
+                <button class="copy-btn" onclick="copyToClipboard('pubkeyField', this)">Copy</button>
+            </div>
+            <div class="usage-note">
+                Set in .env: <code>ADMIN_PUBKEY=&lt;public key&gt;</code>
+            </div>
+        </div>
+
+        <div class="key-section">
+            <h2>Secret Key</h2>
+            <div class="label">Store this securely — required for admin authentication</div>
+            <div class="key-display">
+                <textarea id="secretkeyField" readonly></textarea>
+                <button class="copy-btn" onclick="copyToClipboard('secretkeyField', this)">Copy</button>
+            </div>
+            <div class="usage-note">
+                Keep this secret safe. You'll need it to sign challenges when logging in as admin.
+            </div>
+        </div>
+
+        <footer>
+            Nullpad Admin Keypair Generator | Ed25519 via TweetNaCl.js
+        </footer>
+    </div>
+
+    <!-- TweetNaCl.js - load from vendored file (relative to tools/) -->
+    <script src="../static/js/vendor/tweetnacl.min.js"></script>
+
+    <!-- Base64 encoding helper -->
+    <script>
+        function uint8ArrayToBase64(uint8Array) {
+            let binary = '';
+            const len = uint8Array.byteLength;
+            for (let i = 0; i < len; i++) {
+                binary += String.fromCharCode(uint8Array[i]);
+            }
+            return btoa(binary);
+        }
+
+        function generateKeypair() {
+            // Generate Ed25519 keypair
+            const keypair = nacl.sign.keyPair();
+
+            // Encode to base64
+            const publicKeyB64 = uint8ArrayToBase64(keypair.publicKey);
+            const secretKeyB64 = uint8ArrayToBase64(keypair.secretKey);
+
+            // Display keys
+            document.getElementById('pubkeyField').value = publicKeyB64;
+            document.getElementById('secretkeyField').value = secretKeyB64;
+        }
+
+        function copyToClipboard(fieldId, buttonElement) {
+            const field = document.getElementById(fieldId);
+            const text = field.value;
+
+            // Copy to clipboard
+            navigator.clipboard.writeText(text).then(() => {
+                // Visual feedback
+                const originalText = buttonElement.textContent;
+                buttonElement.textContent = 'Copied!';
+                buttonElement.classList.add('copied');
+
+                setTimeout(() => {
+                    buttonElement.textContent = originalText;
+                    buttonElement.classList.remove('copied');
+                }, 2000);
+            }).catch(err => {
+                console.error('Failed to copy:', err);
+                alert('Failed to copy to clipboard');
+            });
+        }
+
+        // Auto-generate on page load
+        window.addEventListener('DOMContentLoaded', generateKeypair);
+    </script>
+</body>
+</html>
