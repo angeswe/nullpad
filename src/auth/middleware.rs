@@ -69,6 +69,25 @@ impl FromRequestParts<AppState> for AuthSession {
     }
 }
 
+/// Optional authenticated session extractor.
+///
+/// Returns Some(AuthSession) if valid auth header present, None otherwise.
+/// Does not fail the request if auth is missing or invalid.
+impl FromRequestParts<AppState> for Option<AuthSession> {
+    type Rejection = AppError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        // Try to extract auth session, but don't fail if it's not present
+        match AuthSession::from_request_parts(parts, state).await {
+            Ok(session) => Ok(Some(session)),
+            Err(_) => Ok(None),
+        }
+    }
+}
+
 /// Admin-only session extractor.
 ///
 /// Extracts session and verifies role is Admin.
