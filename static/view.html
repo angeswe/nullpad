@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com">
+  <title>View Paste - Nullpad</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/hljs-dark.min.css">
+</head>
+<body>
+  <div class="container">
+    <div class="page-header">
+      <h1>Nullpad</h1>
+      <p>Decrypting paste...</p>
+    </div>
+
+    <div id="burn-warning" class="alert alert-warning hidden">
+      <strong>Warning:</strong> This paste will be destroyed after viewing. Make sure to save any content you need.
+    </div>
+
+    <div id="pin-prompt" class="panel hidden">
+      <div class="panel-header">
+        <h2>PIN Required</h2>
+      </div>
+      <div class="panel-body">
+        <p>This paste is protected with a PIN. Enter it to decrypt:</p>
+        <form id="pin-form">
+          <div class="form-group">
+            <label for="pin">PIN</label>
+            <input type="password" id="pin" name="pin" placeholder="Enter PIN" autofocus required>
+          </div>
+          <button type="submit" class="btn btn-primary btn-block">Decrypt</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="loading" class="panel">
+      <div class="panel-body text-center">
+        <div class="spinner"></div>
+        <p class="mt-2">Decrypting content...</p>
+      </div>
+    </div>
+
+    <div id="error-panel" class="panel hidden">
+      <div class="panel-header">
+        <h2>Error</h2>
+      </div>
+      <div class="panel-body">
+        <div class="alert alert-error">
+          <p id="error-message"></p>
+        </div>
+        <a href="/" class="btn btn-secondary">Create New Paste</a>
+      </div>
+    </div>
+
+    <div id="content-panel" class="panel hidden">
+      <div class="panel-header">
+        <div class="flex justify-between items-center">
+          <h2>Decrypted Content</h2>
+          <div class="action-buttons">
+            <button id="download-btn" class="btn btn-secondary btn-small hidden">Download</button>
+            <button id="copy-content-btn" class="btn btn-secondary btn-small">Copy</button>
+          </div>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div id="content-display"></div>
+        <pre id="raw-content" class="hidden"></pre>
+      </div>
+      <div class="panel-footer">
+        <a href="/" class="btn btn-secondary">Create New Paste</a>
+      </div>
+    </div>
+
+    <div id="burn-notice" class="alert alert-info hidden">
+      <strong>This paste has been destroyed.</strong> It can no longer be accessed.
+    </div>
+  </div>
+
+  <!-- TODO: Add SRI hashes after finalizing vendor library versions -->
+  <script src="/js/vendor/marked.min.js"></script>
+  <script src="/js/vendor/highlight.min.js"></script>
+  <script src="/js/crypto.js"></script>
+  <script src="/js/view.js"></script>
+</body>
+</html>

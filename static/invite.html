@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com">
+  <title>Register - Nullpad</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <div class="page-header">
+      <h1>Nullpad</h1>
+      <p>Register as a trusted user</p>
+    </div>
+
+    <div id="invalid-invite" class="panel hidden">
+      <div class="panel-header">
+        <h2>Invalid Invite</h2>
+      </div>
+      <div class="panel-body">
+        <div class="alert alert-error">
+          No valid invite token found in URL. Please use the invite link provided by your administrator.
+        </div>
+        <a href="/" class="btn btn-secondary">Go to Home</a>
+      </div>
+    </div>
+
+    <form id="register-form" class="panel">
+      <div class="panel-header">
+        <h2>Create Your Account</h2>
+      </div>
+      <div class="panel-body">
+        <div class="alert alert-success">
+          <strong>Valid invite token detected.</strong> Choose your alias and secret to complete registration.
+        </div>
+
+        <div class="form-group">
+          <label for="alias">Alias</label>
+          <input type="text" id="alias" name="alias" placeholder="Choose a unique alias" required autofocus>
+          <div class="form-help">
+            Your alias is public and used for login. Choose something memorable.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="secret">Secret</label>
+          <input type="password" id="secret" name="secret" placeholder="Choose a strong secret" required>
+          <div class="form-help">
+            Your secret derives your Ed25519 keypair. Keep it secure and never share it.
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label for="secret-confirm">Confirm Secret</label>
+          <input type="password" id="secret-confirm" name="secret-confirm" placeholder="Re-enter your secret" required>
+        </div>
+
+        <div id="error-message" class="alert alert-error hidden"></div>
+
+        <button type="submit" class="btn btn-primary btn-block">
+          <span id="register-text">Register</span>
+          <span id="register-spinner" class="spinner hidden"></span>
+        </button>
+      </div>
+    </form>
+
+    <div id="success-panel" class="panel hidden">
+      <div class="panel-header">
+        <h2>Registration Successful</h2>
+      </div>
+      <div class="panel-body">
+        <div class="alert alert-success">
+          <strong>Welcome!</strong> Your account has been created successfully.
+        </div>
+        <p>You can now log in with your alias and secret to access trusted user features.</p>
+        <a href="/login.html" class="btn btn-primary btn-block">Go to Login</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- TODO: Add SRI hashes after finalizing vendor library versions -->
+  <script src="/js/auth.js"></script>
+  <script src="/js/invite.js"></script>
+</body>
+</html>

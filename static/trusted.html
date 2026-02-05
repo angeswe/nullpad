@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com">
+  <title>Trusted Upload - Nullpad</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <div class="page-header">
+      <div class="flex justify-between items-center">
+        <div>
+          <h1>Nullpad - Trusted Upload</h1>
+          <p>Upload any file type (authenticated users only)</p>
+        </div>
+        <div>
+          <button id="logout-btn" class="btn btn-secondary btn-small">Logout</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="alert alert-info">
+      <strong>Trusted user mode:</strong> You can upload any file type, not just .md and .txt files.
+      <span id="user-info" class="text-muted"></span>
+    </div>
+
+    <form id="paste-form" class="panel">
+      <div class="form-group">
+        <label for="content">Content or drag & drop any file</label>
+        <textarea id="content" name="content" placeholder="Paste your text or markdown here..." rows="10"></textarea>
+        <div class="file-upload-area" id="file-upload-area">
+          <input type="file" id="file-input">
+          <div class="file-upload-icon">📄</div>
+          <div class="file-upload-text">
+            <strong>Drop file here</strong> or click to browse<br>
+            <small>Any file type allowed for trusted users</small>
+          </div>
+        </div>
+        <div id="file-info" class="file-info hidden"></div>
+      </div>
+
+      <div class="form-group">
+        <label for="pin">PIN (recommended for extra security)</label>
+        <input type="password" id="pin" name="pin" placeholder="Enter a PIN to protect this paste">
+        <div class="form-help">
+          PIN adds a second layer of protection. Required to decrypt even if someone intercepts the URL.
+        </div>
+      </div>
+
+      <div class="toggle-wrapper">
+        <label class="toggle-switch">
+          <input type="checkbox" id="burn-after-reading">
+          <span class="toggle-slider"></span>
+        </label>
+        <label for="burn-after-reading" class="toggle-label">
+          Burn after reading (destroy after first view)
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label for="ttl">Expires in</label>
+        <select id="ttl" name="ttl">
+          <option value="60">1 minute</option>
+          <option value="3600">1 hour</option>
+          <option value="86400" selected>1 day</option>
+          <option value="604800">1 week</option>
+        </select>
+      </div>
+
+      <button type="submit" class="btn btn-primary btn-block">Create Encrypted Paste</button>
+    </form>
+
+    <div id="success-panel" class="panel hidden">
+      <div class="panel-header">
+        <h2>Paste Created</h2>
+      </div>
+      <div class="panel-body">
+        <p>Your encrypted paste has been created. Share this URL:</p>
+        <div class="copy-wrapper">
+          <input type="text" id="paste-url" class="copy-input" readonly>
+          <button id="copy-btn" class="copy-btn">Copy</button>
+        </div>
+        <div class="alert alert-warning">
+          <strong>Important:</strong> The decryption key is in the URL fragment (after #).
+          Without it, the paste cannot be decrypted. Keep this URL safe.
+        </div>
+        <div id="burn-notice" class="alert alert-error hidden">
+          <strong>Burn after reading:</strong> This paste will be permanently deleted after the first view.
+        </div>
+        <div id="pin-notice" class="alert alert-info hidden">
+          <strong>PIN protected:</strong> Recipient will need to enter the PIN you set.
+        </div>
+      </div>
+      <div class="panel-footer">
+        <button id="create-another-btn" class="btn btn-secondary">Create Another Paste</button>
+      </div>
+    </div>
+
+    <div class="panel-footer">
+      <a href="/admin.html" id="admin-link" class="btn btn-secondary hidden">Admin Dashboard</a>
+    </div>
+  </div>
+
+  <!-- TODO: Add SRI hashes after finalizing vendor library versions -->
+  <script src="/js/crypto.js"></script>
+  <script src="/js/auth.js"></script>
+  <script src="/js/trusted.js"></script>
+</body>
+</html>

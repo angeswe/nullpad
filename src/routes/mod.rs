@@ -13,7 +13,7 @@ pub fn api_router() -> Router<AppState> {
         // Paste endpoints
         .route("/api/paste", post(paste::create_paste))
         .route(
-            "/api/paste/:id",
+            "/api/paste/{id}",
             get(paste::get_paste).delete(paste::delete_paste),
         )
         // Auth endpoints
@@ -25,7 +25,7 @@ pub fn api_router() -> Router<AppState> {
             "/api/invites",
             post(admin::create_invite).get(admin::list_invites),
         )
-        .route("/api/invites/:token", axum::routing::delete(admin::revoke_invite))
+        .route("/api/invites/{token}", axum::routing::delete(admin::revoke_invite))
         .route("/api/users", get(admin::list_users))
-        .route("/api/users/:id", axum::routing::delete(admin::revoke_user))
+        .route("/api/users/{id}", axum::routing::delete(admin::revoke_user))
 }
