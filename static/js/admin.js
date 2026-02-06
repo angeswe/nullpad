@@ -68,6 +68,11 @@
       throw new Error(error.error || 'Request failed');
     }
 
+    // DELETE endpoints return 204 No Content with no body
+    if (response.status === 204) {
+      return null;
+    }
+
     return await response.json();
   }
 

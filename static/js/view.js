@@ -163,7 +163,7 @@
             'dl', 'dt', 'dd', 'kbd', 'mark', 'abbr'
           ],
           ALLOWED_ATTR: [
-            'href', 'src', 'alt', 'title',
+            'href', 'src', 'alt', 'title', 'class',
             'align', 'colspan', 'rowspan', 'scope', 'open'
           ],
           ALLOW_DATA_ATTR: false

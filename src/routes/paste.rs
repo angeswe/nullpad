@@ -75,7 +75,10 @@ pub async fn create_paste(
                     .bytes()
                     .await
                     .map_err(|e| AppError::BadRequest(format!("Failed to read metadata: {}", e)))?;
-                metadata = Some(serde_json::from_slice(&data)?);
+                metadata =
+                    Some(serde_json::from_slice(&data).map_err(|e| {
+                        AppError::BadRequest(format!("Invalid metadata JSON: {}", e))
+                    })?);
             }
             "file" => {
                 encrypted_content = Some(
