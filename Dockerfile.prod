@@ -31,8 +31,8 @@ RUN mkdir -p src && \
 COPY src ./src
 RUN cargo build --release --target aarch64-unknown-linux-gnu
 
-# Stage 2: Runtime (arm64)
-FROM --platform=$BUILDPLATFORM rust:slim-bookworm
+# Stage 2: Runtime (arm64 — platform set by buildx)
+FROM debian:bookworm-slim
 
 # Install runtime dependencies and apply security updates
 RUN apt-get update && \
