@@ -223,12 +223,21 @@ async fn test_paste_not_found() {
     let (base_url, _con) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
+    // Use a valid-format nanoid that doesn't exist (12 alphanumeric chars)
+    let resp = client
+        .get(format!("{}/api/paste/aAbBcCdDeEfF", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // Invalid format should return 400
     let resp = client
         .get(format!("{}/api/paste/nonexistent", base_url))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 400);
 }
 
 #[tokio::test]
@@ -574,7 +583,7 @@ async fn test_security_headers_on_api() {
     let client = reqwest::Client::new();
 
     let resp = client
-        .get(format!("{}/api/paste/nonexistent", base_url))
+        .get(format!("{}/api/paste/aAbBcCdDeEfF", base_url))
         .send()
         .await
         .unwrap();

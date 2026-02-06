@@ -73,8 +73,8 @@ impl FromRequestParts<AppState> for AuthSession {
 
 /// Optional authenticated session extractor.
 ///
-/// Returns Some(AuthSession) if valid auth header present, None otherwise.
-/// Does not fail the request if auth is missing or invalid.
+/// Returns Some(AuthSession) if valid auth header present, None if no auth header.
+/// Propagates system errors (Redis failures) instead of silently degrading.
 impl FromRequestParts<AppState> for Option<AuthSession> {
     type Rejection = AppError;
 
@@ -82,10 +82,22 @@ impl FromRequestParts<AppState> for Option<AuthSession> {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Try to extract auth session, but don't fail if it's not present
+        // If no Authorization header present, return None (public access)
+        let has_auth = parts
+            .headers
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .is_some();
+
+        if !has_auth {
+            return Ok(None);
+        }
+
+        // Auth header present — attempt extraction; propagate system errors
         match AuthSession::from_request_parts(parts, state).await {
             Ok(session) => Ok(Some(session)),
-            Err(_) => Ok(None),
+            Err(AppError::Unauthorized(_)) => Ok(None), // Invalid/expired token
+            Err(e) => Err(e),                            // System error (Redis down, etc.)
         }
     }
 }

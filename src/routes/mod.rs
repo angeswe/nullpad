@@ -5,7 +5,20 @@ pub mod auth;
 pub mod paste;
 
 use crate::auth::middleware::AppState;
+use crate::error::AppError;
 use axum::{routing::get, routing::post, Router};
+
+/// Validate that a string is a valid nanoid (alphanumeric, hyphens, underscores).
+pub fn validate_id(id: &str, label: &str, expected_len: usize) -> Result<(), AppError> {
+    if id.len() != expected_len
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(format!("Invalid {} format", label)));
+    }
+    Ok(())
+}
 
 /// Build the API router with all endpoints.
 pub fn api_router() -> Router<AppState> {

@@ -96,8 +96,8 @@
         apiRequest('/api/invites')
       ]);
 
-      statUsers.textContent = users.users?.length || 0;
-      statInvites.textContent = invites.invites?.length || 0;
+      statUsers.textContent = Array.isArray(users) ? users.length : 0;
+      statInvites.textContent = Array.isArray(invites) ? invites.length : 0;
 
       // Paste count requires separate tracking or estimation
       statPastes.textContent = '?';
@@ -135,7 +135,7 @@
   async function loadInvites() {
     try {
       const result = await apiRequest('/api/invites');
-      const invites = result.invites || [];
+      const invites = Array.isArray(result) ? result : [];
 
       // Clear existing rows
       clearElement(invitesList);
@@ -164,12 +164,12 @@
 
         // Created cell
         const createdCell = document.createElement('td');
-        createdCell.textContent = new Date(invite.created).toLocaleString();
+        createdCell.textContent = new Date(invite.created_at * 1000).toLocaleString();
         row.appendChild(createdCell);
 
         // Expires cell
         const expiresCell = document.createElement('td');
-        expiresCell.textContent = new Date(invite.expires).toLocaleString();
+        expiresCell.textContent = new Date(invite.expires_at * 1000).toLocaleString();
         row.appendChild(expiresCell);
 
         // Actions cell
@@ -223,7 +223,7 @@
   async function loadUsers() {
     try {
       const result = await apiRequest('/api/users');
-      const users = result.users || [];
+      const users = Array.isArray(result) ? result : [];
 
       // Clear existing rows
       clearElement(usersList);
@@ -253,7 +253,7 @@
         // User ID cell
         const idCell = document.createElement('td');
         const idCode = document.createElement('code');
-        idCode.textContent = user.user_id;
+        idCode.textContent = user.id;
         idCell.appendChild(idCode);
         row.appendChild(idCell);
 
@@ -262,7 +262,7 @@
         const pubkeyCode = document.createElement('code');
         pubkeyCode.className = 'text-muted';
         pubkeyCode.style.fontSize = '0.75em';
-        pubkeyCode.textContent = user.pubkey.substring(0, 32) + '...';
+        pubkeyCode.textContent = user.pubkey ? user.pubkey.substring(0, 32) + '...' : 'N/A';
         pubkeyCell.appendChild(pubkeyCode);
         row.appendChild(pubkeyCell);
 
@@ -272,7 +272,7 @@
           const revokeBtn = document.createElement('button');
           revokeBtn.className = 'btn btn-danger btn-small';
           revokeBtn.textContent = 'Revoke';
-          revokeBtn.addEventListener('click', () => revokeUser(user.user_id, user.alias));
+          revokeBtn.addEventListener('click', () => revokeUser(user.id, user.alias));
           actionsCell.appendChild(revokeBtn);
         } else {
           const protectedSpan = document.createElement('span');

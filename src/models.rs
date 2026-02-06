@@ -127,6 +127,7 @@ pub struct InviteInfo {
 pub struct UserInfo {
     pub id: String,
     pub alias: String,
+    pub pubkey: String,
     pub role: String,
     pub created_at: u64,
 }

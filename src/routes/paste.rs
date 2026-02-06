@@ -101,21 +101,23 @@ pub async fn create_paste(
         )));
     }
 
-    // Extract extension from filename
+    // Extract extension from filename (use rsplit_once to get only the final extension)
     let extension = metadata
         .filename
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_lowercase();
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.to_lowercase());
 
     // If no auth session, enforce public extension restrictions
-    if auth_session.is_none() && !state.config.public_allowed_extensions.contains(&extension) {
-        return Err(AppError::Forbidden(format!(
-            "File type .{} not allowed for public uploads. Allowed: {}",
-            extension,
-            state.config.public_allowed_extensions.join(", ")
-        )));
+    if auth_session.is_none() {
+        match &extension {
+            Some(ext) if state.config.public_allowed_extensions.contains(ext) => {}
+            _ => {
+                return Err(AppError::Forbidden(format!(
+                    "File type not allowed for public uploads. Allowed: {}",
+                    state.config.public_allowed_extensions.join(", ")
+                )));
+            }
+        }
     }
 
     // Clamp TTL to max
@@ -163,8 +165,8 @@ pub async fn create_paste(
         "Paste created"
     );
 
-    // Build response URL (just the paste ID, frontend adds view.html#)
-    let url = format!("/view.html#{}", paste_id);
+    // Build response URL (paste ID in query param, frontend appends #key fragment)
+    let url = format!("/view.html?id={}", paste_id);
 
     Ok(Json(CreatePasteResponse { id: paste_id, url }))
 }
@@ -176,6 +178,8 @@ pub async fn get_paste(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    super::validate_id(&id, "paste ID", 12)?;
+
     let mut con = state
         .redis
         .get_multiplexed_async_connection()
@@ -203,6 +207,8 @@ pub async fn delete_paste(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    super::validate_id(&id, "paste ID", 12)?;
+
     let mut con = state
         .redis
         .get_multiplexed_async_connection()

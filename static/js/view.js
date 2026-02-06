@@ -45,8 +45,21 @@
     const fragment = window.location.hash.substring(1);
     if (fragment && fragment.includes('.')) {
       const parts = fragment.split('.');
+      if (parts.length !== 2 || !parts[0] || !parts[1]) {
+        showError('Invalid paste URL format.');
+        return false;
+      }
       encryptionKey = parts[0];
-      pinSalt = NullpadCrypto.base64urlDecode(parts[1]);
+      try {
+        pinSalt = NullpadCrypto.base64urlDecode(parts[1]);
+        if (pinSalt.length !== 16) {
+          showError('Invalid paste URL: bad salt.');
+          return false;
+        }
+      } catch (e) {
+        showError('Invalid paste URL: corrupt salt encoding.');
+        return false;
+      }
     } else {
       encryptionKey = fragment || null;
     }

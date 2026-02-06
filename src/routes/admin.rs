@@ -76,6 +76,8 @@ pub async fn revoke_invite(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    super::validate_id(&token, "invite token", 16)?;
+
     let mut con = state
         .redis
         .get_multiplexed_async_connection()
@@ -112,6 +114,7 @@ pub async fn list_users(
         .map(|user| UserInfo {
             id: user.id,
             alias: user.alias,
+            pubkey: user.pubkey,
             role: user.role,
             created_at: user.created_at,
         })
@@ -128,6 +131,8 @@ pub async fn revoke_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    super::validate_id(&id, "user ID", 12)?;
+
     let mut con = state
         .redis
         .get_multiplexed_async_connection()

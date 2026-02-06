@@ -93,6 +93,19 @@
       return;
     }
 
+    // Check file size before encrypting (50MB default server limit)
+    const MAX_UPLOAD_BYTES = 52_428_800;
+    if (currentFile && currentFile.size > MAX_UPLOAD_BYTES) {
+      const sizeMB = (currentFile.size / (1024 * 1024)).toFixed(1);
+      const limitMB = (MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0);
+      const errEl = document.createElement('div');
+      errEl.className = 'status-error';
+      errEl.textContent = `File too large (${sizeMB}MB). Maximum is ${limitMB}MB.`;
+      form.prepend(errEl);
+      setTimeout(() => errEl.remove(), 5000);
+      return;
+    }
+
     // Disable submit while processing
     if (submitBtn) {
       submitBtn.disabled = true;
