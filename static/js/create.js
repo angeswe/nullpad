@@ -32,92 +32,7 @@
   let clipboardDirty = false;
 
   // ============================================================================
-  // File Type Validation (client-side only - server can't check encrypted content)
-  // ============================================================================
-
-  // Magic bytes for common binary formats
-  const BINARY_SIGNATURES = [
-    { bytes: [0x89, 0x50, 0x4E, 0x47], name: 'PNG image' },
-    { bytes: [0xFF, 0xD8, 0xFF], name: 'JPEG image' },
-    { bytes: [0x47, 0x49, 0x46, 0x38], name: 'GIF image' },
-    { bytes: [0x25, 0x50, 0x44, 0x46], name: 'PDF document' },
-    { bytes: [0x50, 0x4B, 0x03, 0x04], name: 'ZIP archive' },
-    { bytes: [0x50, 0x4B, 0x05, 0x06], name: 'ZIP archive (empty)' },
-    { bytes: [0x1F, 0x8B], name: 'GZIP archive' },
-    { bytes: [0x42, 0x5A, 0x68], name: 'BZIP2 archive' },
-    { bytes: [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C], name: '7-Zip archive' },
-    { bytes: [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07], name: 'RAR archive' },
-    { bytes: [0x7F, 0x45, 0x4C, 0x46], name: 'ELF executable' },
-    { bytes: [0x4D, 0x5A], name: 'Windows executable' },
-    { bytes: [0xCA, 0xFE, 0xBA, 0xBE], name: 'Java class file' },
-    { bytes: [0x00, 0x00, 0x00, 0x0C, 0x6A, 0x50, 0x20, 0x20], name: 'JPEG 2000' },
-    { bytes: [0x00, 0x00, 0x01, 0x00], name: 'ICO image' },
-    { bytes: [0x49, 0x44, 0x33], name: 'MP3 audio' },
-    { bytes: [0x66, 0x4C, 0x61, 0x43], name: 'FLAC audio' },
-    { bytes: [0x4F, 0x67, 0x67, 0x53], name: 'OGG audio' },
-    { bytes: [0x52, 0x49, 0x46, 0x46], name: 'RIFF (WAV/AVI)' },
-    { bytes: [0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70], name: 'MP4/MOV video' },
-    { bytes: [0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70], name: 'MP4/MOV video' },
-    { bytes: [0x00, 0x00, 0x00, 0x1C, 0x66, 0x74, 0x79, 0x70], name: 'MP4/MOV video' },
-    { bytes: [0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70], name: 'MP4/MOV video' },
-    { bytes: [0x1A, 0x45, 0xDF, 0xA3], name: 'WebM/MKV video' },
-    { bytes: [0x38, 0x42, 0x50, 0x53], name: 'PSD image' },
-    { bytes: [0x49, 0x49, 0x2A, 0x00], name: 'TIFF image' },
-    { bytes: [0x4D, 0x4D, 0x00, 0x2A], name: 'TIFF image' },
-    { bytes: [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1], name: 'MS Office document' },
-  ];
-
-  const PUBLIC_ALLOWED_EXTENSIONS = ['txt', 'md'];
-
-  function isAuthenticated() {
-    return typeof NullpadAuth !== 'undefined' && NullpadAuth.getAuthHeader() !== null;
-  }
-
-  function getFileExtension(filename) {
-    const parts = filename.split('.');
-    return parts.length > 1 ? parts.pop().toLowerCase() : '';
-  }
-
-  async function detectBinaryFormat(file) {
-    const maxBytes = Math.max(...BINARY_SIGNATURES.map(s => s.bytes.length));
-    const slice = file.slice(0, maxBytes);
-    const buffer = await slice.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
-
-    for (const sig of BINARY_SIGNATURES) {
-      if (sig.bytes.length <= bytes.length) {
-        let match = true;
-        for (let i = 0; i < sig.bytes.length; i++) {
-          if (bytes[i] !== sig.bytes[i]) {
-            match = false;
-            break;
-          }
-        }
-        if (match) return sig.name;
-      }
-    }
-    return null;
-  }
-
-  async function validateFileForPublic(file) {
-    const ext = getFileExtension(file.name);
-
-    // Check extension
-    if (!PUBLIC_ALLOWED_EXTENSIONS.includes(ext)) {
-      return { valid: false, error: `File type ".${ext}" not allowed. Public uploads accept only .txt and .md files.` };
-    }
-
-    // Check magic bytes
-    const binaryFormat = await detectBinaryFormat(file);
-    if (binaryFormat) {
-      return { valid: false, error: `File appears to be a ${binaryFormat}, not a text file. Rename won't help - content is checked.` };
-    }
-
-    return { valid: true };
-  }
-
-  // ============================================================================
-  // File Upload Handling
+  // File Upload Handling (trusted users only - public page has no file upload)
   // ============================================================================
 
   function setupFileUpload() {
@@ -151,24 +66,7 @@
     });
   }
 
-  async function handleFile(file) {
-    // Clear any previous file error
-    const existingError = form.querySelector('.file-error');
-    if (existingError) existingError.remove();
-
-    // Validate file type for public (unauthenticated) users
-    if (!isAuthenticated()) {
-      const validation = await validateFileForPublic(file);
-      if (!validation.valid) {
-        const errEl = document.createElement('div');
-        errEl.className = 'status-error file-error';
-        errEl.textContent = validation.error;
-        form.prepend(errEl);
-        fileInput.value = '';
-        return;
-      }
-    }
-
+  function handleFile(file) {
     currentFile = file;
     fileInfo.textContent = `Selected: ${file.name} (${formatFileSize(file.size)})`;
     fileInfo.classList.remove('hidden');
@@ -325,7 +223,7 @@
   function resetForm() {
     form.reset();
     currentFile = null;
-    fileInfo.classList.add('hidden');
+    if (fileInfo) fileInfo.classList.add('hidden');
     contentTextarea.disabled = false;
 
     successPanel.classList.add('hidden');
@@ -378,8 +276,10 @@
         navigator.clipboard.writeText('').catch(() => {});
         clipboardDirty = false;
       }
-      // Clear PIN field
+      // Clear sensitive DOM values (paste URL contains key in fragment)
       pinInput.value = '';
+      pasteUrlInput.value = '';
+      currentFile = null;
     });
   }
 
