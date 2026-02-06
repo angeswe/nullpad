@@ -41,8 +41,9 @@ docker compose up -d
 # Install Redis
 # Ubuntu/Debian: apt install redis-server
 # macOS: brew install redis
+# Or run via Docker: docker run -d -p 6379:6379 redis:7-alpine
 
-# Start Redis
+# Start Redis (skip if using Docker)
 redis-server
 
 # Copy config and set ADMIN_PUBKEY
