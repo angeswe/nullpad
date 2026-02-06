@@ -25,7 +25,6 @@ cp .env.example .env
 openssl genpkey -algorithm ED25519 -out admin_key.pem
 openssl pkey -in admin_key.pem -pubout -outform DER | tail -c 32 | base64
 # Save admin_key.pem securely, copy the base64 output to ADMIN_PUBKEY in .env
-# For key rotation after setup, use tools/keygen.html in the running app
 nano .env
 
 # Start services
