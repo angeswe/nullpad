@@ -28,9 +28,11 @@ services:
       - /tmp
 
   redis:
-    image: redis:7-alpine@sha256:b9f6cf0cab55fdd102fd2182deeae150457943d33439d18c6e2fc5666d3228c1
+    image: redis:7-alpine
     volumes:
       - redis-data:/data
+    environment:
+      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
     restart: unless-stopped
     # NOTE: AOF persistence means burn-after-reading pastes persist in the AOF
     # file until rewrite. Aggressive rewrite settings below minimize this window.
@@ -58,13 +60,8 @@ services:
         limits:
           memory: 2g
           cpus: '1.0'
-    read_only: true
     security_opt:
       - no-new-privileges:true
-    cap_drop:
-      - ALL
-    tmpfs:
-      - /tmp
 
 networks:
   internal:

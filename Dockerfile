@@ -1,7 +1,7 @@
 # Multi-stage build for minimal runtime image
 
 # Stage 1: Build
-FROM rust:slim-bookworm@sha256:5c5066e3f3bdd22a5cec7ba22ef0ee6e0bf6eaf63b65b63c9bf25f6f69a5e26a AS builder
+FROM rust:slim-bookworm AS builder
 
 WORKDIR /build
 
@@ -18,7 +18,7 @@ COPY src ./src
 RUN cargo build --release
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim@sha256:6458e6ce2b6448e31bfdced4be7d8aa88d389e6694ab09f5a718a694abe147f4
+FROM debian:bookworm-slim
 
 # Install runtime dependencies and apply security updates
 RUN apt-get update && \
@@ -36,8 +36,16 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/target/release/nullpad /app/nullpad
 
-# Copy static files (tools/ is for local use only, not served)
+# Copy static files and SRI update script
 COPY static /app/static
+COPY tools/update-sri.sh /app/tools/update-sri.sh
+
+# Regenerate SRI hashes at build time
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends openssl && \
+    rm -rf /var/lib/apt/lists/* && \
+    bash /app/tools/update-sri.sh && \
+    rm -rf /app/tools
 
 # Change ownership
 RUN chown -R nullpad:nullpad /app

@@ -1,7 +1,21 @@
-# Multi-stage build for minimal runtime image (arm64 production)
+# Multi-stage build with cross-compilation for arm64
 
-# Stage 1: Build
-FROM rust:slim-bookworm@sha256:9a94ba32757132618f161731e0b93b8bbd5a34c10f256a1d883ca50ff4f422f2 AS builder
+# Stage 1: Build (on native platform, cross-compile to arm64)
+FROM --platform=$BUILDPLATFORM rust:slim-bookworm AS builder
+
+# Install cross-compilation toolchain
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+    gcc-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    && rm -rf /var/lib/apt/lists/*
+
+# Add arm64 target
+RUN rustup target add aarch64-unknown-linux-gnu
+
+# Configure cargo for cross-compilation
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 
 WORKDIR /build
 
@@ -10,15 +24,15 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
-    cargo build --release && \
-    rm -rf src target/release/nullpad target/release/deps/nullpad-* target/release/deps/libnullpad-* target/release/.fingerprint/nullpad-*
+    cargo build --release --target aarch64-unknown-linux-gnu && \
+    rm -rf src target/aarch64-unknown-linux-gnu/release/nullpad target/aarch64-unknown-linux-gnu/release/deps/nullpad-* target/aarch64-unknown-linux-gnu/release/.fingerprint/nullpad-*
 
 # Copy source code and build for real
 COPY src ./src
-RUN cargo build --release
+RUN cargo build --release --target aarch64-unknown-linux-gnu
 
-# Stage 2: Runtime
-FROM debian:bookworm-slim@sha256:1c5d4fd0caad88eb6cb62bcdbc2f580ef2523ab69e86abc2bd2a94703aac9f96
+# Stage 2: Runtime (arm64)
+FROM --platform=$BUILDPLATFORM rust:slim-bookworm
 
 # Install runtime dependencies and apply security updates
 RUN apt-get update && \
@@ -33,11 +47,19 @@ RUN groupadd -r nullpad && \
 # Create app directory
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder /build/target/release/nullpad /app/nullpad
+# Copy binary from builder (cross-compiled)
+COPY --from=builder /build/target/aarch64-unknown-linux-gnu/release/nullpad /app/nullpad
 
-# Copy static files (tools/ is for local use only, not served)
+# Copy static files and SRI update script
 COPY static /app/static
+COPY tools/update-sri.sh /app/tools/update-sri.sh
+
+# Regenerate SRI hashes at build time
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends openssl && \
+    rm -rf /var/lib/apt/lists/* && \
+    bash /app/tools/update-sri.sh && \
+    rm -rf /app/tools
 
 # Change ownership
 RUN chown -R nullpad:nullpad /app
