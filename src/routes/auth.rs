@@ -184,12 +184,10 @@ pub async fn register(
         ));
     }
 
-    // Look up and delete invite (single-use)
-    let _invite = storage::user::get_invite(&mut con, &req.token)
+    // Atomically get and delete invite (single-use)
+    let _invite = storage::user::get_and_delete_invite(&mut con, &req.token)
         .await?
         .ok_or_else(|| AppError::NotFound("Invite not found or expired".to_string()))?;
-
-    storage::user::delete_invite(&mut con, &req.token).await?;
 
     // Check if alias is already taken
     let existing = storage::user::get_user_by_alias(&mut con, &req.alias).await?;

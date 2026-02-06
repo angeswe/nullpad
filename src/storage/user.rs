@@ -220,10 +220,12 @@ where
     Ok(())
 }
 
-/// Get an invite by token.
+/// Get and delete an invite atomically (single-use token).
 ///
+/// Uses a Lua script to prevent race conditions where two concurrent
+/// registration requests could both consume the same invite token.
 /// The invite JSON is zeroized after deserialization.
-pub async fn get_invite<C>(
+pub async fn get_and_delete_invite<C>(
     con: &mut C,
     token: &str,
 ) -> Result<Option<StoredInvite>, redis::RedisError>
@@ -231,7 +233,19 @@ where
     C: AsyncCommands,
 {
     let key = format!("invite:{}", token);
-    let json: Option<String> = con.get(&key).await?;
+
+    // Lua script for atomic GET + DEL
+    let script = redis::Script::new(
+        r"
+        local val = redis.call('GET', KEYS[1])
+        if val then
+            redis.call('DEL', KEYS[1])
+        end
+        return val
+        ",
+    );
+
+    let json: Option<String> = script.key(&key).invoke_async(con).await?;
 
     match json {
         Some(data) => {
