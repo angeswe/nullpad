@@ -79,20 +79,17 @@
   }
 
   /**
-   * Derive Ed25519 keypair from user secret and alias
-   * Uses Argon2id with alias as salt (portability vs stronger salt tradeoff)
+   * Derive Ed25519 seed from user secret and alias using Argon2id
    * @param {string} secret - User's secret password
    * @param {string} alias - User's alias (used as salt)
-   * @returns {Promise<{publicKey: string, privateKey: CryptoKey}>}
+   * @returns {Promise<Uint8Array>} 32-byte seed (caller must zero after use)
    */
-  async function deriveKeypair(secret, alias) {
+  async function deriveSeed(secret, alias) {
     const encoder = new TextEncoder();
 
     // Argon2id requires salt >= 8 bytes. Pad short aliases with fixed suffix.
-    // This maintains backwards compatibility while meeting the minimum requirement.
     const salt = alias.length >= 8 ? alias : alias + '\0'.repeat(8 - alias.length);
 
-    // Derive 32 bytes for Ed25519 seed using Argon2id (OWASP recommended params)
     let hash;
     try {
       hash = await hashwasm.argon2id({
@@ -108,10 +105,37 @@
       throw new Error('Argon2id failed: ' + e.message);
     }
 
-    const seed = new Uint8Array(hash);
+    return new Uint8Array(hash);
+  }
+
+  /**
+   * Derive Ed25519 private key only (for login - no JWK export needed)
+   * @param {string} secret - User's secret password
+   * @param {string} alias - User's alias (used as salt)
+   * @returns {Promise<CryptoKey>} Ed25519 private key
+   */
+  async function derivePrivateKey(secret, alias) {
+    const seed = await deriveSeed(secret, alias);
+    try {
+      return await importPrivateKeyFromSeed(seed);
+    } catch (e) {
+      throw new Error('Ed25519 PKCS8 import failed: ' + e.message);
+    } finally {
+      seed.fill(0);
+    }
+  }
+
+  /**
+   * Derive Ed25519 keypair from user secret and alias (for registration/keygen)
+   * Uses Argon2id with alias as salt (portability vs stronger salt tradeoff)
+   * @param {string} secret - User's secret password
+   * @param {string} alias - User's alias (used as salt)
+   * @returns {Promise<{publicKey: string, privateKey: CryptoKey}>}
+   */
+  async function deriveKeypair(secret, alias) {
+    const seed = await deriveSeed(secret, alias);
 
     try {
-      // Import seed as Ed25519 private key via PKCS8
       let privateKey;
       try {
         privateKey = await importPrivateKeyFromSeed(seed);
@@ -119,7 +143,7 @@
         throw new Error('Ed25519 PKCS8 import failed: ' + e.message + '. Your browser may not support Ed25519 PKCS8 import.');
       }
 
-      // Extract public key via JWK export (portable across browsers)
+      // Extract public key via JWK export (needed for registration)
       let jwk;
       try {
         jwk = await crypto.subtle.exportKey('jwk', privateKey);
@@ -133,9 +157,7 @@
         privateKey: privateKey
       };
     } finally {
-      // Zero the seed after key import
       seed.fill(0);
-      new Uint8Array(hash).fill(0);
     }
   }
 
@@ -276,9 +298,9 @@
    * @returns {Promise<{token: string, role: string}>}
    */
   async function login(secret, alias) {
-    const keypair = await deriveKeypair(secret, alias);
+    const privateKey = await derivePrivateKey(secret, alias);
     const { nonce } = await requestChallenge(alias);
-    const signature = await signChallenge(nonce, keypair.privateKey);
+    const signature = await signChallenge(nonce, privateKey);
     const { token, role } = await submitVerification(alias, signature);
     saveSession(token, role);
     return { token, role };
