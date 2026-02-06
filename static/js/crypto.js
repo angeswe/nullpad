@@ -109,12 +109,14 @@
     }
 
     /**
-     * Derive a new key from existing key + PIN using Argon2id
+     * Derive a new key from existing key + PIN using Argon2id with random salt.
+     * Returns both the derived key and the salt (caller must store salt with ciphertext).
      * @param {string} keyBase64url - Original key as base64url string
      * @param {string} pin - PIN to mix into key derivation
-     * @returns {Promise<string>} Derived key as base64url string
+     * @param {Uint8Array} [existingSalt] - Salt from existing paste (for decryption)
+     * @returns {Promise<{key: string, salt: Uint8Array}>} Derived key + salt
      */
-    async function deriveKeyWithPin(keyBase64url, pin) {
+    async function deriveKeyWithPin(keyBase64url, pin, existingSalt) {
         // Decode the original key
         const keyBytes = base64urlDecode(keyBase64url);
 
@@ -124,8 +126,8 @@
         password.set(keyBytes, 0);
         password.set(pinBytes, keyBytes.length);
 
-        // Use PIN as salt (documented tradeoff: portability vs stronger salt)
-        const salt = textEncode(pin);
+        // Use random salt (generated fresh for encryption, provided for decryption)
+        const salt = existingSalt || crypto.getRandomValues(new Uint8Array(16));
 
         // Derive 32 bytes using Argon2id (OWASP recommended params)
         const hash = await hashwasm.argon2id({
@@ -138,7 +140,7 @@
             outputType: 'binary'
         });
 
-        return base64urlEncode(new Uint8Array(hash));
+        return { key: base64urlEncode(new Uint8Array(hash)), salt };
     }
 
     // ============================================================================

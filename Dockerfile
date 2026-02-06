@@ -32,8 +32,9 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/target/release/nullpad /app/nullpad
 
-# Copy static files
+# Copy static files and tools
 COPY static /app/static
+COPY tools /app/static/tools
 
 # Change ownership
 RUN chown -R nullpad:nullpad /app

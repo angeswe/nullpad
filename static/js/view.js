@@ -32,14 +32,24 @@
   // URL Parsing
   // ============================================================================
 
+  // Salt for PIN derivation (from URL fragment)
+  let pinSalt = null;
+
   function parseUrl() {
-    // Extract paste ID from pathname: /view.html?id=xxxxx or /p/xxxxx
+    // Extract paste ID from query: /view.html?id=xxxxx
     const params = new URLSearchParams(window.location.search);
     pasteId = params.get('id');
 
-    // Extract encryption key from fragment: #key
+    // Extract encryption key (and optional salt) from fragment
+    // Format: #key or #key.salt
     const fragment = window.location.hash.substring(1);
-    encryptionKey = fragment || null;
+    if (fragment && fragment.includes('.')) {
+      const parts = fragment.split('.');
+      encryptionKey = parts[0];
+      pinSalt = NullpadCrypto.base64urlDecode(parts[1]);
+    } else {
+      encryptionKey = fragment || null;
+    }
 
     if (!pasteId || !encryptionKey) {
       showError('Invalid paste URL. Missing ID or encryption key.');
@@ -63,11 +73,11 @@
       }
 
       const data = await response.json();
-      encryptedData = data.content;
+      encryptedData = data.encrypted_content;
       metadata = {
-        burn: data.burn || false,
+        burn: data.burn_after_reading || false,
         filename: data.filename || null,
-        mimetype: data.mimetype || null
+        mimetype: data.content_type || null
       };
 
       return data;
@@ -82,10 +92,11 @@
 
   async function decryptPaste(pin = null) {
     try {
-      // Derive key with PIN if provided
+      // Derive key with PIN if provided (pass existing salt from URL)
       let decryptionKey = encryptionKey;
       if (pin) {
-        decryptionKey = await NullpadCrypto.deriveKeyWithPin(encryptionKey, pin);
+        const derived = await NullpadCrypto.deriveKeyWithPin(encryptionKey, pin, pinSalt);
+        decryptionKey = derived.key;
       }
 
       // Decrypt content
@@ -253,13 +264,18 @@
         burnWarning.classList.remove('hidden');
       }
 
-      // Try to decrypt without PIN first
-      try {
-        const decrypted = await decryptPaste();
-        showContent(decrypted);
-      } catch (err) {
-        // Decryption failed - probably needs PIN
+      // If salt is present in URL, we know it's PIN-protected
+      if (pinSalt) {
         showPinPrompt();
+      } else {
+        // Try to decrypt without PIN first
+        try {
+          const decrypted = await decryptPaste();
+          showContent(decrypted);
+        } catch (err) {
+          // Decryption failed - probably needs PIN
+          showPinPrompt();
+        }
       }
     } catch (err) {
       showError(err.message);

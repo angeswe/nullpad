@@ -1,6 +1,10 @@
 /**
  * Nullpad Create Module
  * Handles paste creation UI and encryption workflow
+ *
+ * URL fragment format:
+ * - No PIN: #key (base64url)
+ * - With PIN: #key.salt (base64url key + "." + base64url salt)
  */
 
 (function() {
@@ -21,6 +25,7 @@
   const createAnotherBtn = document.getElementById('create-another-btn');
   const burnNotice = document.getElementById('burn-notice');
   const pinNotice = document.getElementById('pin-notice');
+  const submitBtn = form ? form.querySelector('button[type="submit"]') : null;
 
   // State
   let currentFile = null;
@@ -30,19 +35,18 @@
   // ============================================================================
 
   function setupFileUpload() {
-    // Click to browse
+    if (!fileUploadArea) return;
+
     fileUploadArea.addEventListener('click', () => {
       fileInput.click();
     });
 
-    // File selected via browse
     fileInput.addEventListener('change', (e) => {
       if (e.target.files.length > 0) {
         handleFile(e.target.files[0]);
       }
     });
 
-    // Drag and drop
     fileUploadArea.addEventListener('dragover', (e) => {
       e.preventDefault();
       fileUploadArea.classList.add('drag-over');
@@ -62,17 +66,9 @@
   }
 
   function handleFile(file) {
-    // TODO: Implement file type validation for public vs trusted mode
-    // For public: only .md and .txt
-    // For trusted: any file type
-
     currentFile = file;
-
-    // Show file info
     fileInfo.textContent = `Selected: ${file.name} (${formatFileSize(file.size)})`;
     fileInfo.classList.remove('hidden');
-
-    // Clear textarea when file is selected
     contentTextarea.value = '';
     contentTextarea.disabled = true;
   }
@@ -90,21 +86,107 @@
   async function handleSubmit(e) {
     e.preventDefault();
 
-    // TODO: Implement paste creation flow
-    // 1. Generate encryption key using NullpadCrypto.generateKey()
-    // 2. If PIN provided, derive new key with NullpadCrypto.deriveKeyWithPin()
-    // 3. Get content (either from textarea or currentFile)
-    // 4. Encrypt content using NullpadCrypto.encrypt()
-    // 5. Prepare request payload with metadata (burn, ttl, etc.)
-    // 6. POST to /api/paste with Authorization header if authenticated
-    // 7. On success, construct URL with key fragment and show success panel
+    // Validate input
+    const text = contentTextarea.value.trim();
+    if (!text && !currentFile) {
+      contentTextarea.focus();
+      return;
+    }
 
-    console.log('TODO: Implement paste creation');
-    console.log('Content:', contentTextarea.value);
-    console.log('File:', currentFile);
-    console.log('PIN:', pinInput.value);
-    console.log('Burn:', burnCheckbox.checked);
-    console.log('TTL:', ttlSelect.value);
+    // Disable submit while processing
+    if (submitBtn) {
+      submitBtn.disabled = true;
+      submitBtn.textContent = 'Encrypting...';
+    }
+
+    try {
+      // 1. Generate encryption key
+      const rawKey = NullpadCrypto.generateKey();
+
+      // 2. Derive key with PIN if provided, get salt
+      let encryptionKey = rawKey;
+      let salt = null;
+      const pin = pinInput.value.trim();
+      if (pin) {
+        const derived = await NullpadCrypto.deriveKeyWithPin(rawKey, pin);
+        encryptionKey = derived.key;
+        salt = derived.salt;
+      }
+
+      // 3. Get content bytes
+      let contentBytes;
+      let filename;
+      let contentType;
+
+      if (currentFile) {
+        contentBytes = new Uint8Array(await currentFile.arrayBuffer());
+        filename = currentFile.name;
+        contentType = currentFile.type || 'application/octet-stream';
+      } else {
+        contentBytes = NullpadCrypto.textEncode(text);
+        filename = 'paste.md';
+        contentType = 'text/markdown';
+      }
+
+      // 4. Encrypt content
+      const encrypted = await NullpadCrypto.encrypt(contentBytes, encryptionKey);
+      const encryptedBytes = NullpadCrypto.base64Decode(encrypted);
+
+      // 5. Prepare metadata
+      const metadata = JSON.stringify({
+        filename: filename,
+        content_type: contentType,
+        ttl_secs: parseInt(ttlSelect.value, 10),
+        burn_after_reading: burnCheckbox.checked
+      });
+
+      // 6. Build multipart request
+      const formData = new FormData();
+      formData.append('metadata', new Blob([metadata], { type: 'application/json' }));
+      formData.append('file', new Blob([encryptedBytes], { type: 'application/octet-stream' }), filename);
+
+      // Include auth header if logged in
+      const headers = {};
+      if (typeof NullpadAuth !== 'undefined') {
+        const authHeader = NullpadAuth.getAuthHeader();
+        if (authHeader) {
+          headers['Authorization'] = authHeader;
+        }
+      }
+
+      // 7. POST to API
+      const response = await fetch('/api/paste', {
+        method: 'POST',
+        headers: headers,
+        body: formData
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Failed to create paste');
+      }
+
+      const result = await response.json();
+
+      // 8. Build URL with key fragment
+      const fragment = salt
+        ? `${rawKey}.${NullpadCrypto.base64urlEncode(salt)}`
+        : rawKey;
+      const pasteUrl = `${window.location.origin}/view.html?id=${result.id}#${fragment}`;
+
+      showSuccess(pasteUrl, !!pin, burnCheckbox.checked);
+    } catch (err) {
+      if (submitBtn) {
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Encrypt & Share';
+      }
+      // Show error inline instead of alert
+      const errEl = document.createElement('div');
+      errEl.className = 'status-error';
+      errEl.textContent = err.message;
+      form.prepend(errEl);
+      setTimeout(() => errEl.remove(), 5000);
+    }
   }
 
   // ============================================================================
@@ -112,14 +194,10 @@
   // ============================================================================
 
   function showSuccess(url, hasPIN, isBurn) {
-    // Hide form, show success panel
     form.classList.add('hidden');
     successPanel.classList.remove('hidden');
-
-    // Set URL
     pasteUrlInput.value = url;
 
-    // Show notices
     if (isBurn) {
       burnNotice.classList.remove('hidden');
     }
@@ -129,19 +207,21 @@
   }
 
   function resetForm() {
-    // Reset form state
     form.reset();
     currentFile = null;
     fileInfo.classList.add('hidden');
     contentTextarea.disabled = false;
 
-    // Hide success, show form
     successPanel.classList.add('hidden');
     form.classList.remove('hidden');
 
-    // Hide notices
     burnNotice.classList.add('hidden');
     pinNotice.classList.add('hidden');
+
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Encrypt & Share';
+    }
   }
 
   // ============================================================================
@@ -162,7 +242,6 @@
       }, 2000);
     }).catch(err => {
       console.error('Failed to copy:', err);
-      alert('Failed to copy URL. Please copy manually.');
     });
   }
 
@@ -172,20 +251,13 @@
 
   function init() {
     setupFileUpload();
-
-    // Form submission
     form.addEventListener('submit', handleSubmit);
-
-    // Copy button
     copyBtn.addEventListener('click', () => {
       copyToClipboard(pasteUrlInput.value);
     });
-
-    // Create another button
     createAnotherBtn.addEventListener('click', resetForm);
   }
 
-  // Start when DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);
   } else {
