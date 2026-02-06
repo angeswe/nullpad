@@ -20,9 +20,10 @@ RUN cargo build --release
 # Stage 2: Runtime
 FROM debian:bookworm-slim
 
-# Install runtime dependencies
+# Install runtime dependencies and apply security updates
 RUN apt-get update && \
-    apt-get install -y ca-certificates && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
