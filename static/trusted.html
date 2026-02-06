@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'">
   <title>Trusted Upload - Nullpad</title>
   <link rel="icon" href="/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,15 +14,10 @@
   <div class="container">
     <div class="page-header">
       <div class="flex justify-between items-center">
-        <div>
-          <h1>Nullpad - Trusted Upload</h1>
-          <p>Upload any file type (authenticated users only)</p>
-        </div>
-        <div class="action-buttons">
-          <a href="/info.html" class="info-link" title="How it works">!</a>
-          <button id="logout-btn" class="btn btn-secondary btn-small">Logout</button>
-        </div>
+        <h1>nullpad <img src="/favicon.svg" alt="" class="title-icon"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
+        <button id="logout-btn" class="btn btn-secondary btn-small">Logout</button>
       </div>
+      <p>Upload any file type (authenticated users only)</p>
     </div>
 
     <div class="alert alert-info">

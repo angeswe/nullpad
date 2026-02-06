@@ -3,7 +3,6 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'">
   <title>View Paste - Nullpad</title>
   <link rel="icon" href="/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -15,13 +14,8 @@
 <body>
   <div class="container">
     <div class="page-header">
-      <div class="flex justify-between items-center">
-        <div>
-          <h1>Nullpad</h1>
-          <p>Decrypting paste...</p>
-        </div>
-        <a href="/info.html" class="info-link" title="How it works">!</a>
-      </div>
+      <h1>nullpad <img src="/favicon.svg" alt="" class="title-icon"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
+      <p>Decrypting paste...</p>
     </div>
 
     <div id="burn-warning" class="alert alert-warning hidden">
