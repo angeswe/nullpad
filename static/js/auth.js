@@ -88,10 +88,14 @@
   async function deriveKeypair(secret, alias) {
     const encoder = new TextEncoder();
 
+    // Argon2id requires salt >= 8 bytes. Pad short aliases with fixed suffix.
+    // This maintains backwards compatibility while meeting the minimum requirement.
+    const salt = alias.length >= 8 ? alias : alias + '\0'.repeat(8 - alias.length);
+
     // Derive 32 bytes for Ed25519 seed using Argon2id (OWASP recommended params)
     const hash = await hashwasm.argon2id({
       password: encoder.encode(secret),
-      salt: encoder.encode(alias),
+      salt: encoder.encode(salt),
       parallelism: 1,
       iterations: 2,
       memorySize: 19456,
