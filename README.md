@@ -24,13 +24,21 @@ A privacy-first pastebin where all encryption happens in your browser. The serve
 
 ```bash
 # 1. Clone and copy config
+git clone https://github.com/angeswe/nullpad.git
+cd nullpad
 cp .env.example .env
 
-# 2. Generate admin keypair (serve static files to access keygen)
-cd static && python3 -m http.server 8080 &
-# Visit http://localhost:8080/keygen.html
-# Enter your desired alias (e.g., "admin") and a secret password
-# Copy the generated public key
+# 2. Generate admin keypair (choose one method)
+
+# Option A: CLI (recommended - no server needed)
+cargo run -- keygen <alias> <secret>
+# Example: cargo run -- keygen admin mysecretpassword
+# Outputs the public key to use for ADMIN_PUBKEY
+
+# Option B: Web UI (requires HTTPS or localhost)
+# Visit https://nullpad.io/keygen.html
+# Or serve locally: cd static && python3 -m http.server 8080
+# Then visit http://localhost:8080/keygen.html
 
 # 3. Configure .env
 nano .env
@@ -38,8 +46,7 @@ nano .env
 # Set ADMIN_PUBKEY=<generated public key>
 # Set REDIS_PASSWORD=<strong password>
 
-# 4. Stop the temp server and start nullpad
-kill %1 && cd ..
+# 4. Start nullpad
 docker compose up -d
 
 # 5. Visit http://localhost:3015

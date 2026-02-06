@@ -93,24 +93,39 @@
     const salt = alias.length >= 8 ? alias : alias + '\0'.repeat(8 - alias.length);
 
     // Derive 32 bytes for Ed25519 seed using Argon2id (OWASP recommended params)
-    const hash = await hashwasm.argon2id({
-      password: encoder.encode(secret),
-      salt: encoder.encode(salt),
-      parallelism: 1,
-      iterations: 2,
-      memorySize: 19456,
-      hashLength: 32,
-      outputType: 'binary'
-    });
+    let hash;
+    try {
+      hash = await hashwasm.argon2id({
+        password: encoder.encode(secret),
+        salt: encoder.encode(salt),
+        parallelism: 1,
+        iterations: 2,
+        memorySize: 19456,
+        hashLength: 32,
+        outputType: 'binary'
+      });
+    } catch (e) {
+      throw new Error('Argon2id failed: ' + e.message);
+    }
 
     const seed = new Uint8Array(hash);
 
     try {
       // Import seed as Ed25519 private key via PKCS8
-      const privateKey = await importPrivateKeyFromSeed(seed);
+      let privateKey;
+      try {
+        privateKey = await importPrivateKeyFromSeed(seed);
+      } catch (e) {
+        throw new Error('Ed25519 PKCS8 import failed: ' + e.message + '. Your browser may not support Ed25519 PKCS8 import.');
+      }
 
       // Extract public key via JWK export (portable across browsers)
-      const jwk = await crypto.subtle.exportKey('jwk', privateKey);
+      let jwk;
+      try {
+        jwk = await crypto.subtle.exportKey('jwk', privateKey);
+      } catch (e) {
+        throw new Error('JWK export failed: ' + e.message);
+      }
       const pubKeyBytes = b64urlDecode(jwk.x);
 
       return {

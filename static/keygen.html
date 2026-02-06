@@ -70,7 +70,7 @@
   </footer>
 
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"></script>
-  <script src="/js/auth.js" integrity="sha384-ZCUgf4tlP28D7AfftAZpxcbOCbxFRPvCw4pnisEI92yOTiEasm+8+OigEyV1EKGB"></script>
+  <script src="/js/auth.js" integrity="sha384-0gCyavvrxNI8n/l923UoNYS+V28e6acJHh3QYtQlviGbaMT1XZVJUrSSczejJXJH"></script>
   <script>
     (function() {
       'use strict';
@@ -79,6 +79,22 @@
       const result = document.getElementById('result');
       const pubkeyInput = document.getElementById('pubkey');
       const copyBtn = document.getElementById('copy-btn');
+
+      // Check Ed25519 support on page load
+      (async function checkEd25519Support() {
+        try {
+          const testKey = await crypto.subtle.generateKey(
+            { name: 'Ed25519' },
+            false,
+            ['sign', 'verify']
+          );
+        } catch (e) {
+          const msg = 'Your browser does not support Ed25519. Required: Chrome 113+, Firefox 118+, Safari 17+, or Edge 113+.';
+          alert(msg);
+          form.querySelector('button').disabled = true;
+          form.querySelector('button').textContent = 'Browser not supported';
+        }
+      })();
 
       form.addEventListener('submit', async (e) => {
         e.preventDefault();
@@ -100,7 +116,7 @@
           pubkeyInput.value = keypair.publicKey;
           result.classList.remove('hidden');
         } catch (err) {
-          alert('Error generating keypair: ' + err.message);
+          alert('Error generating keypair: ' + err.message + '\n\nCheck browser console for details.');
         } finally {
           form.querySelector('button').disabled = false;
           form.querySelector('button').textContent = 'Generate Keypair';

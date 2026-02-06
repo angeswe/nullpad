@@ -40,12 +40,14 @@ COPY --from=builder /build/target/release/nullpad /app/nullpad
 COPY static /app/static
 COPY tools/update-sri.sh /app/tools/update-sri.sh
 
-# Regenerate SRI hashes at build time
+# Regenerate SRI hashes at build time, then remove openssl
 RUN apt-get update && \
     apt-get install -y --no-install-recommends openssl && \
-    rm -rf /var/lib/apt/lists/* && \
     bash /app/tools/update-sri.sh && \
-    rm -rf /app/tools
+    rm -rf /app/tools && \
+    apt-get purge -y openssl && \
+    apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 
 # Change ownership
 RUN chown -R nullpad:nullpad /app
