@@ -94,7 +94,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - Uses X-Forwarded-For / X-Real-IP behind reverse proxies, falls back to direct IP
 
 **Data Expiration**
-- All Redis keys have TTLs — no data persists indefinitely
+- All Redis keys have TTLs by default — trusted users may create "forever" pastes with no expiration
 - Burn-after-reading uses atomic Lua script (no race conditions)
 - Burn and admin delete clean up user_pastes references atomically
 
@@ -136,8 +136,8 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 ## File Types
 
-- **Public pastes**: `.md` and `.txt` files only
-- **Trusted users**: Any file type after registration via invite
+- **Public pastes**: `.md` and `.txt` files only, TTL up to 7 days
+- **Trusted users**: Any file type after registration via invite, plus a "forever" (no expiration) option
 
 ## License
 

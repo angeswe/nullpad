@@ -29,16 +29,25 @@ where
         ))
     })?;
 
-    // Store paste with TTL
-    con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
+    // Store paste: ttl_secs=0 means forever (no expiration)
+    if ttl_secs == 0 {
+        con.set::<_, _, ()>(&key, json).await?;
+    } else {
+        con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
+    }
 
     // If paste has an owner, add to user's paste set
     if let Some(ref owner_id) = paste.owner_id {
         let user_pastes_key = format!("user_pastes:{}", owner_id);
         con.sadd::<_, _, ()>(&user_pastes_key, &paste.id).await?;
-        // Set TTL on the user_pastes set to match max paste TTL from config
-        con.expire::<_, ()>(&user_pastes_key, max_ttl_secs as i64)
-            .await?;
+        if ttl_secs == 0 {
+            // Forever paste: persist the user_pastes set (remove any TTL)
+            con.persist::<_, ()>(&user_pastes_key).await?;
+        } else {
+            // Set TTL on the user_pastes set to match max paste TTL from config
+            con.expire::<_, ()>(&user_pastes_key, max_ttl_secs as i64)
+                .await?;
+        }
     }
 
     Ok(())

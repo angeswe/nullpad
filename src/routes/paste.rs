@@ -122,11 +122,26 @@ pub async fn create_paste(
         }
     }
 
-    // Use config default if client omitted ttl_secs, clamp to max
-    let ttl_secs = metadata
-        .ttl_secs
-        .unwrap_or(state.config.default_ttl_secs)
-        .min(state.config.max_ttl_secs);
+    // Use config default if client omitted ttl_secs.
+    // ttl_secs=0 means "forever" (no expiration) — trusted/admin users only.
+    let requested_ttl = metadata.ttl_secs.unwrap_or(state.config.default_ttl_secs);
+    let ttl_secs = if requested_ttl == 0 {
+        match &auth_session {
+            Some(s)
+                if s.role == crate::models::Role::Trusted
+                    || s.role == crate::models::Role::Admin =>
+            {
+                0
+            }
+            _ => {
+                return Err(AppError::Forbidden(
+                    "Forever pastes require a trusted account".to_string(),
+                ))
+            }
+        }
+    } else {
+        requested_ttl.min(state.config.max_ttl_secs)
+    };
 
     // Generate paste ID
     let paste_id = nanoid::nanoid!(12);
