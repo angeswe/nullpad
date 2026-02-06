@@ -3,156 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com; frame-ancestors 'none'; base-uri 'self'; form-action 'none'">
     <title>Nullpad Admin Keypair Generator</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-
-        body {
-            font-family: 'JetBrains Mono', monospace;
-            background-color: #0a0a0a;
-            color: #e0e0e0;
-            padding: 2rem;
-            line-height: 1.6;
-        }
-
-        .container {
-            max-width: 800px;
-            margin: 0 auto;
-        }
-
-        h1 {
-            font-size: 2rem;
-            font-weight: 600;
-            margin-bottom: 1rem;
-            color: #e0e0e0;
-        }
-
-        .subtitle {
-            color: #a0a0a0;
-            margin-bottom: 2rem;
-            font-size: 0.9rem;
-        }
-
-        .warning {
-            background-color: #1a1400;
-            border: 1px solid #fbbf24;
-            color: #fbbf24;
-            padding: 1rem;
-            margin-bottom: 2rem;
-            font-size: 0.9rem;
-        }
-
-        .warning strong {
-            display: block;
-            margin-bottom: 0.5rem;
-        }
-
-        button {
-            background-color: #4ade80;
-            color: #0a0a0a;
-            border: none;
-            padding: 0.75rem 1.5rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.9rem;
-            font-weight: 600;
-            cursor: pointer;
-            margin-bottom: 2rem;
-            transition: opacity 0.2s;
-        }
-
-        button:hover {
-            opacity: 0.8;
-        }
-
-        button:active {
-            opacity: 0.6;
-        }
-
-        .key-section {
-            margin-bottom: 2rem;
-        }
-
-        .key-section h2 {
-            font-size: 1.2rem;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            color: #e0e0e0;
-        }
-
-        .key-section .label {
-            font-size: 0.85rem;
-            color: #a0a0a0;
-            margin-bottom: 0.5rem;
-        }
-
-        .key-display {
-            display: flex;
-            gap: 0.5rem;
-            margin-bottom: 0.5rem;
-        }
-
-        textarea {
-            flex: 1;
-            background-color: #1a1a1a;
-            color: #e0e0e0;
-            border: 1px solid #333;
-            padding: 0.75rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.85rem;
-            resize: vertical;
-            min-height: 80px;
-        }
-
-        textarea:focus {
-            outline: none;
-            border-color: #4ade80;
-        }
-
-        .copy-btn {
-            background-color: #333;
-            color: #e0e0e0;
-            padding: 0.75rem 1rem;
-            font-size: 0.85rem;
-            white-space: nowrap;
-        }
-
-        .copy-btn:hover {
-            background-color: #444;
-        }
-
-        .copy-btn.copied {
-            background-color: #4ade80;
-            color: #0a0a0a;
-        }
-
-        .usage-note {
-            font-size: 0.85rem;
-            color: #a0a0a0;
-            margin-top: 0.5rem;
-        }
-
-        .usage-note code {
-            background-color: #1a1a1a;
-            color: #4ade80;
-            padding: 0.2rem 0.4rem;
-        }
-
-        footer {
-            margin-top: 3rem;
-            padding-top: 2rem;
-            border-top: 1px solid #333;
-            text-align: center;
-            color: #666;
-            font-size: 0.85rem;
-        }
-    </style>
+    <link rel="stylesheet" href="keygen.css" integrity="sha384-A1Be9+JuujVc8SqYvpgifzp44iA+RV8lp/OrE5phWbRsXtlGUqJIXVxea39MOwTL">
 </head>
 <body>
     <div class="container">
@@ -160,18 +16,18 @@
         <div class="subtitle">Ed25519 keypair generator for admin bootstrap</div>
 
         <div class="warning">
-            <strong>⚠️ Security Warning</strong>
+            <strong>Security Warning</strong>
             Save your secret key securely. It cannot be recovered. Anyone with access to the secret key can authenticate as admin.
         </div>
 
-        <button id="generateBtn" onclick="generateKeypair()">Generate New Keypair</button>
+        <button id="generateBtn">Generate New Keypair</button>
 
         <div class="key-section">
             <h2>Public Key</h2>
             <div class="label">Use this for the ADMIN_PUBKEY environment variable</div>
             <div class="key-display">
                 <textarea id="pubkeyField" readonly></textarea>
-                <button class="copy-btn" onclick="copyToClipboard('pubkeyField', this)">Copy</button>
+                <button class="copy-btn" data-target="pubkeyField">Copy</button>
             </div>
             <div class="usage-note">
                 Set in .env: <code>ADMIN_PUBKEY=&lt;public key&gt;</code>
@@ -183,7 +39,7 @@
             <div class="label">Store this securely — required for admin authentication</div>
             <div class="key-display">
                 <textarea id="secretkeyField" readonly></textarea>
-                <button class="copy-btn" onclick="copyToClipboard('secretkeyField', this)">Copy</button>
+                <button class="copy-btn" data-target="secretkeyField">Copy</button>
             </div>
             <div class="usage-note">
                 Keep this secret safe. You'll need it to sign challenges when logging in as admin.
@@ -195,66 +51,6 @@
         </footer>
     </div>
 
-    <script>
-        function uint8ArrayToBase64(bytes) {
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) {
-                binary += String.fromCharCode(bytes[i]);
-            }
-            return btoa(binary);
-        }
-
-        function b64urlDecode(str) {
-            let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
-            while (b64.length % 4) b64 += '=';
-            const binary = atob(b64);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-            }
-            return bytes;
-        }
-
-        async function generateKeypair() {
-            // Generate Ed25519 keypair using Web Crypto
-            const keypair = await crypto.subtle.generateKey(
-                { name: 'Ed25519' },
-                true, // extractable
-                ['sign', 'verify']
-            );
-
-            // Export as JWK for portable key extraction
-            const jwk = await crypto.subtle.exportKey('jwk', keypair.privateKey);
-
-            // jwk.x = public key (base64url), jwk.d = private seed (base64url)
-            const publicKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.x));
-            const secretKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.d));
-
-            // Display keys
-            document.getElementById('pubkeyField').value = publicKeyB64;
-            document.getElementById('secretkeyField').value = secretKeyB64;
-        }
-
-        function copyToClipboard(fieldId, buttonElement) {
-            const field = document.getElementById(fieldId);
-            const text = field.value;
-
-            navigator.clipboard.writeText(text).then(() => {
-                const originalText = buttonElement.textContent;
-                buttonElement.textContent = 'Copied!';
-                buttonElement.classList.add('copied');
-
-                setTimeout(() => {
-                    buttonElement.textContent = originalText;
-                    buttonElement.classList.remove('copied');
-                }, 2000);
-            }).catch(err => {
-                console.error('Failed to copy:', err);
-            });
-        }
-
-        // Auto-generate on page load
-        window.addEventListener('DOMContentLoaded', generateKeypair);
-    </script>
+    <script src="keygen.js" integrity="sha384-Gsw3mpeqDb2Q4MNXu30wMlYDf0jgt+w4eUBHySazyo1VS/EJYHNWUwxVm2UVoJO6"></script>
 </body>
 </html>
