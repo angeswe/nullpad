@@ -1251,3 +1251,472 @@ async fn test_activate_user_on_first_upload() {
         ttl_after_second
     );
 }
+
+// ============================================================================
+// Nonce Replay Prevention Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_challenge_nonce_single_use() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Request challenge
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": admin_alias}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let nonce_b64 = body["nonce"].as_str().unwrap();
+
+    // Sign the nonce
+    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
+    let signature = admin_key.sign(&nonce_bytes);
+    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+    // First verification should succeed
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": admin_alias, "signature": sig_b64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Second verification with same signature should fail (nonce consumed)
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": admin_alias, "signature": sig_b64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+// ============================================================================
+// Concurrent Burn-After-Reading Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_concurrent_burn_after_reading_race() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    // Create a burn-after-reading paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "race.txt",
+        b"race condition test",
+        true,
+        3600,
+        None,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let paste_id = body["id"].as_str().unwrap().to_string();
+
+    // Launch 10 concurrent requests to fetch the same paste
+    let mut handles = vec![];
+    for _ in 0..10 {
+        let url = format!("{}/api/paste/{}", base_url, paste_id);
+        let c = client.clone();
+        handles.push(tokio::spawn(async move { c.get(&url).send().await }));
+    }
+
+    // Collect results
+    let mut success_count = 0;
+    let mut not_found_count = 0;
+    for handle in handles {
+        let result = handle.await.unwrap();
+        match result {
+            Ok(resp) => {
+                if resp.status() == 200 {
+                    success_count += 1;
+                } else if resp.status() == 404 {
+                    not_found_count += 1;
+                }
+            }
+            Err(_) => {}
+        }
+    }
+
+    // Exactly one request should succeed, all others should get 404
+    assert_eq!(
+        success_count, 1,
+        "Exactly one request should succeed, got {}",
+        success_count
+    );
+    assert_eq!(
+        not_found_count, 9,
+        "Nine requests should get 404, got {}",
+        not_found_count
+    );
+}
+
+// ============================================================================
+// Max Sessions Per User Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_max_sessions_per_user() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create 5 sessions (the configured max)
+    let mut tokens = vec![];
+    for _ in 0..5 {
+        let token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+        tokens.push(token);
+    }
+
+    // All 5 tokens should work
+    for token in &tokens {
+        let resp = client
+            .get(format!("{}/api/invites", base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // Create a 6th session - this should evict the oldest
+    let new_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // New token should work
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", new_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // First token should be invalidated (evicted)
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", tokens[0]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+// ============================================================================
+// Forever Paste Auth Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_forever_paste_requires_auth() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Public user trying to create forever paste (ttl=0) should be rejected
+    let resp = create_paste(&client, &base_url, "forever.md", b"data", false, 0, None).await;
+    assert_eq!(resp.status(), 403);
+
+    // Login as admin (trusted user)
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Trusted user can create forever paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "forever.md",
+        b"forever data",
+        false,
+        0,
+        Some(&admin_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let paste_id = body["id"].as_str().unwrap();
+
+    // Verify paste exists
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, paste_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+// ============================================================================
+// Trusted User Access Control Tests
+// ============================================================================
+
+/// Helper: create a trusted user and return their signing key, alias, and session token
+async fn create_trusted_user(
+    client: &reqwest::Client,
+    base_url: &str,
+    admin_token: &str,
+) -> (SigningKey, String, String) {
+    // Create invite
+    let resp = client
+        .post(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let invite_token = body["token"].as_str().unwrap().to_string();
+
+    // Generate keypair
+    let (user_key, user_pubkey) = test_keypair();
+    let user_alias = format!("trusted_{}", nanoid::nanoid!(6));
+
+    // Register
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": user_alias,
+            "pubkey": user_pubkey
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Login
+    let user_token = admin_login(client, base_url, &user_alias, &user_key).await;
+
+    (user_key, user_alias, user_token)
+}
+
+#[tokio::test]
+async fn test_trusted_user_gets_403_on_admin_endpoints() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Login as admin to create trusted user
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Create a trusted user
+    let (_user_key, _user_alias, user_token) =
+        create_trusted_user(&client, &base_url, &admin_token).await;
+
+    // Trusted user should get 403 on all admin endpoints
+
+    // POST /api/invites
+    let resp = client
+        .post(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // GET /api/invites
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // DELETE /api/invites/:token
+    let resp = client
+        .delete(format!("{}/api/invites/abcdefghijklmnop", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // GET /api/users
+    let resp = client
+        .get(format!("{}/api/users", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // DELETE /api/users/:id
+    let resp = client
+        .delete(format!("{}/api/users/aAbBcCdDeEfF", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+
+    // DELETE /api/paste/:id (admin-only paste deletion)
+    let resp = client
+        .delete(format!("{}/api/paste/aAbBcCdDeEfF", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+}
+
+#[tokio::test]
+async fn test_session_invalid_after_logout_on_all_endpoints() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Login as admin
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Verify token works before logout
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Logout
+    let resp = client
+        .post(format!("{}/api/auth/logout", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // All protected endpoints should return 401 after logout
+
+    // POST /api/invites
+    let resp = client
+        .post(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // GET /api/invites
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // DELETE /api/invites/:token
+    let resp = client
+        .delete(format!("{}/api/invites/abcdefghijklmnop", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // GET /api/users
+    let resp = client
+        .get(format!("{}/api/users", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // DELETE /api/users/:id
+    let resp = client
+        .delete(format!("{}/api/users/aAbBcCdDeEfF", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // DELETE /api/paste/:id
+    let resp = client
+        .delete(format!("{}/api/paste/aAbBcCdDeEfF", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // POST /api/auth/logout (double logout)
+    let resp = client
+        .post(format!("{}/api/auth/logout", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn test_trusted_user_can_upload_any_extension() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Login as admin
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Create a trusted user
+    let (_user_key, _user_alias, user_token) =
+        create_trusted_user(&client, &base_url, &admin_token).await;
+
+    // Trusted user can upload .exe (blocked for public)
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "program.exe",
+        b"MZ...",
+        false,
+        3600,
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Trusted user can upload .zip
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "archive.zip",
+        b"PK...",
+        false,
+        3600,
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Trusted user can upload .pdf
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "document.pdf",
+        b"%PDF...",
+        false,
+        3600,
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Trusted user can upload file with no extension
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "Makefile",
+        b"all: build",
+        false,
+        3600,
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+}

@@ -1,19 +1,38 @@
 {
   "marked.min.js": {
     "package": "marked",
-    "version": "15.0.12"
+    "version": "15.0.12",
+    "license": "MIT",
+    "url": "https://marked.js.org",
+    "sha384": "sha384-tkjnnf9Tzhv5ZFrDroGvUExw9C3EVFo0RFRkzKR8ZX4b5Psoec4yb1PlD8Jh4j4H"
   },
   "highlight.min.js": {
     "package": "highlight.js",
-    "version": "11.11.1"
+    "version": "11.11.1",
+    "license": "BSD-3-Clause",
+    "url": "https://highlightjs.org",
+    "sha384": "sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU"
   },
   "purify.min.js": {
     "package": "dompurify",
-    "version": "3.3.1"
+    "version": "3.3.1",
+    "license": "(MPL-2.0 OR Apache-2.0)",
+    "url": "https://github.com/cure53/DOMPurify",
+    "sha384": "sha384-80VlBZnyAwkkqtSfg5NhPyZff6nU4K/qniLBL8Jnm4KDv6jZhLiYtJbhglg/i9ww"
   },
   "argon2.umd.min.js": {
     "package": "hash-wasm",
     "version": "4.12.0",
-    "file": "dist/argon2.umd.min.js"
+    "license": "MIT",
+    "url": "https://github.com/Daninet/hash-wasm",
+    "file": "dist/argon2.umd.min.js",
+    "sha384": "sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"
+  },
+  "tweetnacl.min.js": {
+    "package": "tweetnacl",
+    "version": "1.0.3",
+    "license": "Unlicense",
+    "url": "https://tweetnacl.js.org",
+    "sha384": "sha384-05+sicyRJQ56XpL4U9HJ8YbtSzFDvAg7apPKOGV6A0JsAJKFM68jp5oLnUjG5mEp"
   }
 }

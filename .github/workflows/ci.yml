@@ -77,6 +77,16 @@ jobs:
           components: rustfmt
       - run: cargo fmt --check
 
+  vendor-integrity:
+    name: Vendor JS Integrity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Verify vendor JS hashes and SRI attributes
+        run: bash tools/verify-vendor.sh
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest

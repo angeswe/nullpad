@@ -62,6 +62,9 @@ redis-server
 # Copy config and set ADMIN_PUBKEY
 cp .env.example .env
 
+# Enable pre-commit hooks (auto-formats Rust, updates SRI hashes + license table)
+git config core.hooksPath .githooks
+
 # Run the app
 cargo run --release
 

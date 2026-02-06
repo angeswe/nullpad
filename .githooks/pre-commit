@@ -1,0 +1,34 @@
+#!/usr/bin/env sh
+
+# --- cargo fmt check ---
+# Auto-format staged Rust files before committing
+STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')
+if [ -n "$STAGED_RS" ]; then
+    if command -v cargo >/dev/null 2>&1; then
+        if ! cargo fmt --check >/dev/null 2>&1; then
+            echo "pre-commit: running cargo fmt..."
+            cargo fmt
+            echo "$STAGED_RS" | xargs git add
+        fi
+    fi
+fi
+
+# --- vendor JS integrity ---
+# Auto-update SRI hashes and license table when JS or versions.json changes
+STAGED_JS=$(git diff --cached --name-only --diff-filter=ACM -- 'static/js/*.js' 'static/js/vendor/*.js' 'static/js/vendor/versions.json')
+if [ -n "$STAGED_JS" ]; then
+    if [ -f "tools/update-sri.sh" ]; then
+        echo "pre-commit: updating SRI hashes..."
+        bash tools/update-sri.sh
+    fi
+    if [ -f "tools/sync-licenses.sh" ]; then
+        echo "pre-commit: syncing license table..."
+        bash tools/sync-licenses.sh
+    fi
+    git diff --name-only -- 'static/*.html' | xargs -r git add
+fi
+
+# --- bd hook ---
+if command -v bd >/dev/null 2>&1; then
+    exec bd hook pre-commit "$@"
+fi

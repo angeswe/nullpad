@@ -188,6 +188,11 @@
         : rawKey;
       const pasteUrl = `${window.location.origin}/view.html?id=${result.id}#${fragment}`;
 
+      // Zero salt after use
+      if (salt instanceof Uint8Array) {
+        salt.fill(0);
+      }
+
       showSuccess(pasteUrl, !!pin, burnCheckbox.checked);
     } catch (err) {
       if (submitBtn) {
