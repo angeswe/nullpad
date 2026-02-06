@@ -18,8 +18,6 @@ If you discover a security vulnerability in nullpad, please report it privately:
 
 ### What to expect
 
-- Acknowledgment within 48 hours
-- Status update within 7 days
 - Credit in the fix (unless you prefer anonymity)
 
 ## Scope
