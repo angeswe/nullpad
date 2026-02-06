@@ -23,19 +23,27 @@ A privacy-first pastebin where all encryption happens in your browser. The serve
 ## Quick Start (Docker)
 
 ```bash
-# Copy example config
+# 1. Clone and copy config
 cp .env.example .env
 
-# Generate admin keypair
-openssl genpkey -algorithm ED25519 -out admin_key.pem
-openssl pkey -in admin_key.pem -pubout -outform DER | tail -c 32 | base64
-# Save admin_key.pem securely, copy the base64 output to ADMIN_PUBKEY in .env
-nano .env
+# 2. Generate admin keypair (serve static files to access keygen)
+cd static && python3 -m http.server 8080 &
+# Visit http://localhost:8080/keygen.html
+# Enter your desired alias (e.g., "admin") and a secret password
+# Copy the generated public key
 
-# Start services
+# 3. Configure .env
+nano .env
+# Set ADMIN_ALIAS=<your alias>
+# Set ADMIN_PUBKEY=<generated public key>
+# Set REDIS_PASSWORD=<strong password>
+
+# 4. Stop the temp server and start nullpad
+kill %1 && cd ..
 docker compose up -d
 
-# Visit http://localhost:3015
+# 5. Visit http://localhost:3015
+# Log in at /login.html with your alias + secret
 ```
 
 ## Development Setup
