@@ -1,0 +1,53 @@
+name: Vendor JS Audit
+
+on:
+  schedule:
+    - cron: '0 9 * * 1' # Weekly on Monday at 9am UTC
+  workflow_dispatch: # Allow manual trigger
+
+permissions: {}
+
+jobs:
+  check-versions:
+    name: Check vendor JS versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Check for outdated vendor libraries
+        run: |
+          set -euo pipefail
+
+          manifest="static/js/vendor/versions.json"
+          outdated=0
+
+          echo "Checking vendored JavaScript libraries..."
+          echo ""
+
+          for key in $(jq -r 'keys[]' "$manifest"); do
+            package=$(jq -r ".\"$key\".package" "$manifest")
+            current=$(jq -r ".\"$key\".version" "$manifest")
+            latest=$(npm view "$package" version 2>/dev/null || echo "FETCH_FAILED")
+
+            if [ "$latest" = "FETCH_FAILED" ]; then
+              echo "::warning::Failed to fetch latest version for $package"
+              continue
+            fi
+
+            if [ "$current" = "$latest" ]; then
+              echo "  $package ($key): $current (up to date)"
+            else
+              echo "::warning::$package ($key): $current -> $latest available"
+              outdated=$((outdated + 1))
+            fi
+          done
+
+          echo ""
+          if [ "$outdated" -gt 0 ]; then
+            echo "::warning::$outdated vendor libraries have updates available"
+            echo "Run: npm view <package> version to check, then update the file and versions.json"
+          else
+            echo "All vendor libraries are up to date."
+          fi
