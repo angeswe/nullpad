@@ -296,9 +296,11 @@ where
 
     // Log if some pastes failed to delete (for debugging)
     if result.len() >= 2 && result[0] < result[1] {
-        eprintln!(
-            "Warning: Only deleted {}/{} pastes for user {}",
-            result[0], result[1], user_id
+        tracing::warn!(
+            action = "paste_cleanup_partial",
+            deleted = result[0],
+            total = result[1],
+            "Partial paste deletion during user cleanup"
         );
     }
 
