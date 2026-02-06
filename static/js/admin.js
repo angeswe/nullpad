@@ -102,7 +102,7 @@
       // Paste count requires separate tracking or estimation
       statPastes.textContent = '?';
     } catch (err) {
-      console.error('Failed to load stats:', err);
+      // Stats load failure is non-critical, ignore silently
     }
   }
 
@@ -192,7 +192,7 @@
       cell.textContent = 'Failed to load invites';
       row.appendChild(cell);
       invitesList.appendChild(row);
-      console.error('Failed to load invites:', err);
+      // Error displayed in table UI
     }
   }
 
@@ -293,7 +293,7 @@
       cell.textContent = 'Failed to load users';
       row.appendChild(cell);
       usersList.appendChild(row);
-      console.error('Failed to load users:', err);
+      // Error displayed in table UI
     }
   }
 
@@ -358,8 +358,7 @@
       setTimeout(() => {
         copyInviteBtn.textContent = originalText;
       }, 2000);
-    }).catch(err => {
-      console.error('Failed to copy:', err);
+    }).catch(() => {
       alert('Failed to copy URL. Please copy manually.');
     });
   }

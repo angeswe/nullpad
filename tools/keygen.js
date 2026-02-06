@@ -20,20 +20,35 @@ function b64urlDecode(str) {
 }
 
 async function generateKeypair() {
-  const keypair = await crypto.subtle.generateKey(
-    { name: 'Ed25519' },
-    true,
-    ['sign', 'verify']
-  );
+  if (!crypto.subtle) {
+    const msg = 'Web Crypto API not available. This page must be served over HTTPS or localhost (file:// is not supported). Run: python3 -m http.server 8080 --directory tools/';
+    document.getElementById('pubkeyField').value = msg;
+    document.getElementById('secretkeyField').value = '';
+    return;
+  }
 
-  const jwk = await crypto.subtle.exportKey('jwk', keypair.privateKey);
+  try {
+    const keypair = await crypto.subtle.generateKey(
+      { name: 'Ed25519' },
+      true,
+      ['sign', 'verify']
+    );
 
-  // jwk.x = public key (base64url), jwk.d = private seed (base64url)
-  const publicKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.x));
-  const secretKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.d));
+    const jwk = await crypto.subtle.exportKey('jwk', keypair.privateKey);
 
-  document.getElementById('pubkeyField').value = publicKeyB64;
-  document.getElementById('secretkeyField').value = secretKeyB64;
+    // jwk.x = public key (base64url), jwk.d = private seed (base64url)
+    const publicKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.x));
+    const secretKeyB64 = uint8ArrayToBase64(b64urlDecode(jwk.d));
+
+    document.getElementById('pubkeyField').value = publicKeyB64;
+    document.getElementById('secretkeyField').value = secretKeyB64;
+  } catch (err) {
+    const msg = err.name === 'NotSupportedError'
+      ? 'Ed25519 is not supported in this browser. Use Chrome 113+, Firefox 130+, or Safari 17+. Alternatively, generate keys with: openssl genpkey -algorithm ED25519 -out key.pem'
+      : 'Failed to generate keypair: ' + err.message;
+    document.getElementById('pubkeyField').value = msg;
+    document.getElementById('secretkeyField').value = '';
+  }
 }
 
 function copyToClipboard(fieldId, buttonElement) {

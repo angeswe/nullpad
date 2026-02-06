@@ -29,6 +29,7 @@
   let decryptedBytes = null;
   let pinAttempts = 0;
   let pinBackoffUntil = 0;
+  let clipboardDirty = false;
 
   // ============================================================================
   // URL Parsing
@@ -298,14 +299,14 @@
       : rawContent.textContent;
 
     navigator.clipboard.writeText(textToCopy).then(() => {
+      clipboardDirty = true;
       const originalText = copyContentBtn.textContent;
       copyContentBtn.textContent = 'Copied!';
 
       setTimeout(() => {
         copyContentBtn.textContent = originalText;
       }, 2000);
-    }).catch(err => {
-      console.error('Failed to copy:', err);
+    }).catch(() => {
       alert('Failed to copy content.');
     });
   }
@@ -352,11 +353,35 @@
   // Initialization
   // ============================================================================
 
+  function clearSensitiveData() {
+    // Zero out Uint8Array buffers
+    if (decryptedBytes instanceof Uint8Array) {
+      decryptedBytes.fill(0);
+    }
+    if (pinSalt instanceof Uint8Array) {
+      pinSalt.fill(0);
+    }
+    // Null out references to sensitive data
+    decryptedBytes = null;
+    encryptionKey = null;
+    encryptedData = null;
+    pinSalt = null;
+    metadata = null;
+    // Best-effort clipboard clear (may fail without user gesture)
+    if (clipboardDirty && navigator.clipboard) {
+      navigator.clipboard.writeText('').catch(() => {});
+      clipboardDirty = false;
+    }
+  }
+
   function init() {
     // Set up event listeners
     pinForm.addEventListener('submit', handlePinSubmit);
     downloadBtn.addEventListener('click', handleDownload);
     copyContentBtn.addEventListener('click', handleCopyContent);
+
+    // Zero sensitive data on page unload
+    window.addEventListener('pagehide', clearSensitiveData);
 
     // Load paste
     loadPaste();

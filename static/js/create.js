@@ -253,9 +253,7 @@
         copyBtn.classList.remove('btn-primary');
         copyBtn.classList.add('btn-secondary');
       }, 2000);
-    }).catch(err => {
-      console.error('Failed to copy:', err);
-    });
+    }).catch(() => {});
   }
 
   // ============================================================================

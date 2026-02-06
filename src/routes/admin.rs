@@ -63,7 +63,7 @@ pub async fn list_invites(
         .map(|inv| InviteInfo {
             token: inv.token,
             created_at: inv.created_at,
-            expires_at: inv.created_at + state.config.invite_ttl_secs,
+            expires_at: inv.created_at.saturating_add(state.config.invite_ttl_secs),
         })
         .collect();
 
