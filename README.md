@@ -28,17 +28,10 @@ git clone https://github.com/angeswe/nullpad.git
 cd nullpad
 cp .env.example .env
 
-# 2. Generate admin keypair (choose one method)
-
-# Option A: CLI (recommended - no server needed)
+# 2. Generate admin keypair
 cargo run -- keygen <alias> <secret>
 # Example: cargo run -- keygen admin mysecretpassword
-# Outputs the public key to use for ADMIN_PUBKEY
-
-# Option B: Web UI (requires HTTPS or localhost)
-# Visit https://nullpad.io/keygen.html
-# Or serve locally: cd static && python3 -m http.server 8080
-# Then visit http://localhost:8080/keygen.html
+# This outputs your public key for ADMIN_PUBKEY
 
 # 3. Configure .env
 nano .env
@@ -79,7 +72,7 @@ cargo run --release
 
 See `.env.example` for all available options. Key environment variables:
 
-- `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes), generated via openssl (required)
+- `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes), generated via `cargo run -- keygen` (required)
 - `ADMIN_ALIAS` — Admin username (default: "admin")
 - `REDIS_URL` — Redis connection string (default: "redis://127.0.0.1:6379")
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")
