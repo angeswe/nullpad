@@ -97,7 +97,7 @@ impl FromRequestParts<AppState> for Option<AuthSession> {
         match AuthSession::from_request_parts(parts, state).await {
             Ok(session) => Ok(Some(session)),
             Err(AppError::Unauthorized(_)) => Ok(None), // Invalid/expired token
-            Err(e) => Err(e),                            // System error (Redis down, etc.)
+            Err(e) => Err(e),                           // System error (Redis down, etc.)
         }
     }
 }

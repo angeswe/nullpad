@@ -35,13 +35,19 @@ impl IntoResponse for AppError {
             AppError::Internal(msg) => {
                 // Log detailed error server-side, return generic message to client
                 tracing::error!(error = %msg, "Internal server error");
-                (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string())
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Internal server error".to_string(),
+                )
             }
             AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded".to_string()),
+            AppError::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "Rate limit exceeded".to_string(),
+            ),
         };
 
         let body = Json(json!({

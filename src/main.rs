@@ -53,7 +53,9 @@ async fn main() {
     // - Security headers middleware
     let app = routes::api_router()
         .fallback_service(ServeDir::new("static"))
-        .layer(axum::extract::DefaultBodyLimit::max(config.max_upload_bytes))
+        .layer(axum::extract::DefaultBodyLimit::max(
+            config.max_upload_bytes,
+        ))
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(state);
 
