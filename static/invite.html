@@ -50,7 +50,7 @@
           <label for="secret">Secret</label>
           <input type="password" id="secret" name="secret" placeholder="Choose a strong secret" required>
           <div class="form-help">
-            Your secret derives your Ed25519 keypair. Keep it secure and never share it.
+            Your secret phrase derives your login credentials. Keep it secure and never share it.
           </div>
         </div>
 
@@ -87,7 +87,8 @@
   </footer>
 
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"></script>
-  <script src="/js/auth.js" integrity="sha384-GtwrN5KB6t7vVrNAulIMnhVAmA5wQ9FzlnDkvkIsXA6JkGU8lLU97wCIvAaOu2E5"></script>
+  <script src="/js/vendor/tweetnacl.min.js" integrity="sha384-05+sicyRJQ56XpL4U9HJ8YbtSzFDvAg7apPKOGV6A0JsAJKFM68jp5oLnUjG5mEp"></script>
+  <script src="/js/auth.js" integrity="sha384-4Rfjm2j3fd/T9ZWTVv02CXpHu1i85vXBSfPP9n3mdzmdq2GlkVLNLsOhxNDmQgPR"></script>
   <script src="/js/invite.js" integrity="sha384-O9Z6N/fIVMJiT61dMl1NTa/ZG/GoVXTW8SJ8plsNgoe7V0bQABtNMebCpdPA3oI/"></script>
 </body>
 </html>

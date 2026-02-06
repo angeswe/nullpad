@@ -130,6 +130,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 **Frontend**
 - Vanilla HTML/JS (no build step)
 - Web Crypto API for AES-256-GCM and Ed25519
+- TweetNaCl.js for Ed25519 public key derivation (Firefox compatibility)
 - hash-wasm for Argon2id key derivation
 - marked.js + highlight.js for markdown rendering
 - DOMPurify for XSS-safe HTML sanitization

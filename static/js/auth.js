@@ -143,14 +143,12 @@
         throw new Error('Ed25519 PKCS8 import failed: ' + e.message + '. Your browser may not support Ed25519 PKCS8 import.');
       }
 
-      // Extract public key via JWK export (needed for registration)
-      let jwk;
-      try {
-        jwk = await crypto.subtle.exportKey('jwk', privateKey);
-      } catch (e) {
-        throw new Error('JWK export failed: ' + e.message);
+      // Use TweetNaCl for public key derivation (works in all browsers)
+      if (typeof nacl === 'undefined' || !nacl.sign) {
+        throw new Error('TweetNaCl not loaded. Cannot derive public key.');
       }
-      const pubKeyBytes = b64urlDecode(jwk.x);
+      const naclKeypair = nacl.sign.keyPair.fromSeed(seed);
+      const pubKeyBytes = naclKeypair.publicKey;
 
       return {
         publicKey: b64Encode(pubKeyBytes),
