@@ -140,6 +140,8 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - **Public pastes**: `.md` and `.txt` files only, TTL up to 7 days
 - **Trusted users**: Any file type after registration via invite, plus a "forever" (no expiration) option
 
+**Note**: File type validation (extension + magic byte detection) is performed client-side only. The server cannot verify file contents because encryption happens in the browser before upload — this is fundamental to the zero-knowledge design. The client-side check prevents accidental uploads of wrong file types but is not a security boundary.
+
 ## License
 
 AGPL-3.0 — see LICENSE file for details.
