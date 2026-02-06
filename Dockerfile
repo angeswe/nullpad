@@ -1,13 +1,17 @@
 # Multi-stage build for minimal runtime image
 
 # Stage 1: Build
-FROM rust:1.84-slim-bookworm AS builder
+FROM rust:slim-bookworm AS builder
 
 WORKDIR /build
 
 # Copy manifests and cache dependencies
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs && cargo build --release && rm -rf src
+RUN mkdir -p src && \
+    echo "fn main() {}" > src/main.rs && \
+    touch src/lib.rs && \
+    cargo build --release && \
+    rm -rf src
 
 # Copy source code and build for real
 COPY src ./src
