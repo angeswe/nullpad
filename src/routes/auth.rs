@@ -211,20 +211,11 @@ pub async fn register(
         AppError::BadRequest("Invalid public key: not a valid Ed25519 key".to_string())
     })?;
 
-    // Check if alias is already taken
-    let existing = storage::user::get_user_by_alias(&mut con, &req.alias).await?;
-    if existing.is_some() {
-        return Err(AppError::BadRequest(format!(
-            "Alias '{}' is already taken",
-            req.alias
-        )));
-    }
-
     // Create user
     let user_id = nanoid::nanoid!(12);
     let user = StoredUser {
         id: user_id,
-        alias: req.alias,
+        alias: req.alias.clone(),
         pubkey: req.pubkey,
         role: Role::Trusted.as_str().to_string(),
         created_at: std::time::SystemTime::now()
@@ -233,8 +224,20 @@ pub async fn register(
             .as_secs(),
     };
 
-    // Store user with idle TTL (will be updated to active TTL on first upload)
-    storage::user::store_user(&mut con, &user, state.config.user_idle_ttl_secs).await?;
+    // Atomically store user if alias is available (prevents TOCTOU race)
+    let created = storage::user::store_user_if_alias_available(
+        &mut con,
+        &user,
+        state.config.user_idle_ttl_secs,
+    )
+    .await?;
+
+    if !created {
+        return Err(AppError::BadRequest(format!(
+            "Alias '{}' is already taken",
+            req.alias
+        )));
+    }
 
     tracing::info!(action = "user_registered", user_id = %user.id, alias = %user.alias, "New user registered via invite");
 

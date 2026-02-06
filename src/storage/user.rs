@@ -46,6 +46,58 @@ where
     Ok(())
 }
 
+/// Atomically store a user if the alias is available.
+///
+/// Returns Ok(true) if the user was created, Ok(false) if the alias was taken.
+/// Uses a Lua script to prevent TOCTOU race conditions during registration.
+pub async fn store_user_if_alias_available<C>(
+    con: &mut C,
+    user: &StoredUser,
+    ttl_secs: u64,
+) -> Result<bool, redis::RedisError>
+where
+    C: AsyncCommands,
+{
+    let user_key = format!("user:{}", user.id);
+    let alias_key = format!("alias:{}", user.alias);
+
+    let json = serde_json::to_string(user).map_err(|e| {
+        redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "JSON serialize",
+            e.to_string(),
+        ))
+    })?;
+
+    // Atomic check-and-create: check if alias exists, then create user + alias
+    // KEYS[1] = alias:{alias}
+    // KEYS[2] = user:{id}
+    // ARGV[1] = user JSON
+    // ARGV[2] = user ID (for alias lookup value)
+    // ARGV[3] = TTL in seconds
+    let script = redis::Script::new(
+        r#"
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+            return 0
+        end
+        redis.call('SETEX', KEYS[2], ARGV[3], ARGV[1])
+        redis.call('SETEX', KEYS[1], ARGV[3], ARGV[2])
+        return 1
+        "#,
+    );
+
+    let result: i32 = script
+        .key(&alias_key)
+        .key(&user_key)
+        .arg(&json)
+        .arg(&user.id)
+        .arg(ttl_secs as i64)
+        .invoke_async(con)
+        .await?;
+
+    Ok(result == 1)
+}
+
 /// Get a user by ID.
 ///
 /// The user JSON is zeroized after deserialization.

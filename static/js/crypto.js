@@ -111,14 +111,14 @@
     /**
      * Derive a new key from existing key + PIN using Argon2id with random salt.
      * Returns both the derived key and the salt (caller must store salt with ciphertext).
-     * @param {string} keyBase64url - Original key as base64url string
+     * @param {string|Uint8Array} key - Original key as base64url string or raw bytes
      * @param {string} pin - PIN to mix into key derivation
      * @param {Uint8Array} [existingSalt] - Salt from existing paste (for decryption)
      * @returns {Promise<{key: string, salt: Uint8Array}>} Derived key + salt
      */
-    async function deriveKeyWithPin(keyBase64url, pin, existingSalt) {
-        // Decode the original key
-        const keyBytes = base64urlDecode(keyBase64url);
+    async function deriveKeyWithPin(key, pin, existingSalt) {
+        // Decode the original key if string, copy if Uint8Array (caller retains original)
+        const keyBytes = key instanceof Uint8Array ? new Uint8Array(key) : base64urlDecode(key);
 
         // Combine key + PIN as password material
         const pinBytes = textEncode(pin);
@@ -216,10 +216,10 @@
     /**
      * Decrypt AES-256-GCM ciphertext
      * @param {string} encryptedBase64 - Base64-encoded (IV + ciphertext)
-     * @param {string} keyBase64url - Decryption key as base64url string
+     * @param {string|Uint8Array} key - Decryption key as base64url string or raw bytes
      * @returns {Promise<Uint8Array>} Decrypted data (caller decides text vs binary)
      */
-    async function decrypt(encryptedBase64, keyBase64url) {
+    async function decrypt(encryptedBase64, key) {
         // Decode the combined IV + ciphertext
         const combined = base64Decode(encryptedBase64);
 
@@ -227,8 +227,8 @@
         const iv = combined.slice(0, 12);
         const ciphertext = combined.slice(12);
 
-        // Decode key
-        const keyBytes = base64urlDecode(keyBase64url);
+        // Decode key if string, copy if Uint8Array (caller retains original)
+        const keyBytes = key instanceof Uint8Array ? new Uint8Array(key) : base64urlDecode(key);
 
         try {
             // Import key for AES-GCM

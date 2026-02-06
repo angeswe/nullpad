@@ -52,7 +52,12 @@
         showError('Invalid paste URL format.');
         return false;
       }
-      encryptionKey = parts[0];
+      try {
+        encryptionKey = NullpadCrypto.base64urlDecode(parts[0]);
+      } catch (e) {
+        showError('Invalid paste URL: corrupt key encoding.');
+        return false;
+      }
       try {
         pinSalt = NullpadCrypto.base64urlDecode(parts[1]);
         if (pinSalt.length !== 16) {
@@ -64,7 +69,12 @@
         return false;
       }
     } else {
-      encryptionKey = fragment || null;
+      try {
+        encryptionKey = fragment ? NullpadCrypto.base64urlDecode(fragment) : null;
+      } catch (e) {
+        showError('Invalid paste URL: corrupt key encoding.');
+        return false;
+      }
     }
 
     if (!pasteId || !encryptionKey) {
@@ -357,6 +367,9 @@
     // Zero out Uint8Array buffers
     if (decryptedBytes instanceof Uint8Array) {
       decryptedBytes.fill(0);
+    }
+    if (encryptionKey instanceof Uint8Array) {
+      encryptionKey.fill(0);
     }
     if (pinSalt instanceof Uint8Array) {
       pinSalt.fill(0);
