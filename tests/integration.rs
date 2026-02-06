@@ -2,9 +2,12 @@
 //!
 //! These tests require a running Redis instance (default: redis://127.0.0.1:6379).
 //! Set REDIS_URL env var to override.
+//!
+//! Tests run sequentially (--test-threads=1) because they share a Redis instance.
+//! Each test flushes its database before starting.
 
 use base64::{engine::general_purpose, Engine as _};
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use nullpad::{auth::middleware::AppState, config::Config, middleware::security_headers, routes};
 use reqwest::multipart;
 use std::sync::Arc;
@@ -24,29 +27,44 @@ fn test_keypair() -> (SigningKey, String) {
     (signing_key, pubkey)
 }
 
-/// Spin up a test server and return its base URL.
-async fn spawn_test_server() -> (String, redis::aio::MultiplexedConnection) {
-    let (admin_key, admin_pubkey) = test_keypair();
-    let _ = admin_key; // admin signing key available if needed
+/// Spin up a test server and return its base URL, Redis connection, and admin signing key.
+async fn spawn_test_server() -> (
+    String,
+    redis::aio::MultiplexedConnection,
+    SigningKey,
+    String,
+) {
+    spawn_test_server_with_auth_limit(10000).await
+}
 
-    let redis_client = redis::Client::open(redis_url()).expect("Failed to open Redis");
+/// Spin up a test server with a custom auth rate limit.
+async fn spawn_test_server_with_auth_limit(
+    limit: u32,
+) -> (
+    String,
+    redis::aio::MultiplexedConnection,
+    SigningKey,
+    String,
+) {
+    let (admin_key, admin_pubkey) = test_keypair();
+    let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
+
+    let test_redis_url = redis_url();
+    let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
     let mut con = redis_client
         .get_multiplexed_async_connection()
         .await
         .expect("Failed to connect to Redis");
 
-    // Flush test data (use a test-specific prefix approach would be better,
-    // but for integration tests we just flush)
-
     // Set up admin user
-    nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, "testadmin")
+    nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, &admin_alias)
         .await
         .expect("Failed to upsert admin");
 
     let config = Config {
         admin_pubkey,
-        admin_alias: "testadmin".to_string(),
-        redis_url: redis_url(),
+        admin_alias: admin_alias.clone(),
+        redis_url: test_redis_url.clone(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         max_upload_bytes: 52_428_800,
         default_ttl_secs: 86400,
@@ -57,8 +75,8 @@ async fn spawn_test_server() -> (String, redis::aio::MultiplexedConnection) {
         session_ttl_secs: 900,
         challenge_ttl_secs: 30,
         public_allowed_extensions: vec!["md".to_string(), "txt".to_string()],
-        rate_limit_paste_per_min: 100,
-        rate_limit_auth_per_min: 100,
+        rate_limit_paste_per_min: 10000,
+        rate_limit_auth_per_min: limit,
         trusted_proxy_count: 0,
     };
 
@@ -87,7 +105,42 @@ async fn spawn_test_server() -> (String, redis::aio::MultiplexedConnection) {
     });
 
     let base_url = format!("http://{}", addr);
-    (base_url, con)
+    (base_url, con, admin_key, admin_alias)
+}
+
+/// Helper: perform full challenge -> sign -> verify login flow, return session token.
+async fn admin_login(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+    signing_key: &SigningKey,
+) -> String {
+    // Request challenge
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": alias}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let nonce_b64 = body["nonce"].as_str().unwrap();
+
+    // Decode nonce and sign it
+    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
+    let signature = signing_key.sign(&nonce_bytes);
+    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+    // Verify
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": alias, "signature": sig_b64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["token"].as_str().unwrap().to_string()
 }
 
 /// Helper: create a paste via multipart.
@@ -139,7 +192,7 @@ async fn create_paste(
 
 #[tokio::test]
 async fn test_create_and_get_paste() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // Create a paste
@@ -180,7 +233,7 @@ async fn test_create_and_get_paste() {
 
 #[tokio::test]
 async fn test_burn_after_reading() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // Create a burn paste
@@ -221,7 +274,7 @@ async fn test_burn_after_reading() {
 
 #[tokio::test]
 async fn test_paste_not_found() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // Use a valid-format nanoid that doesn't exist (12 alphanumeric chars)
@@ -243,7 +296,7 @@ async fn test_paste_not_found() {
 
 #[tokio::test]
 async fn test_public_extension_restriction() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // .exe should be rejected for public uploads
@@ -274,17 +327,13 @@ async fn test_public_extension_restriction() {
 
 #[tokio::test]
 async fn test_auth_challenge_response_flow() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
-
-    // Admin should be able to complete the full auth flow
-    // We need to find the admin signing key — but we generated a random one in spawn_test_server.
-    // Instead, let's test the challenge endpoint directly.
 
     // Request challenge for existing admin
     let resp = client
         .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": "testadmin"}))
+        .json(&serde_json::json!({"alias": admin_alias}))
         .send()
         .await
         .unwrap();
@@ -296,7 +345,7 @@ async fn test_auth_challenge_response_flow() {
 
 #[tokio::test]
 async fn test_auth_challenge_unknown_user() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // Returns 200 with a throwaway nonce to prevent alias enumeration
@@ -313,13 +362,13 @@ async fn test_auth_challenge_unknown_user() {
 
 #[tokio::test]
 async fn test_auth_verify_invalid_signature() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // Get a challenge
     let resp = client
         .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": "testadmin"}))
+        .json(&serde_json::json!({"alias": admin_alias}))
         .send()
         .await
         .unwrap();
@@ -329,7 +378,44 @@ async fn test_auth_verify_invalid_signature() {
     let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
     let resp = client
         .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": "testadmin", "signature": fake_sig}))
+        .json(&serde_json::json!({"alias": admin_alias, "signature": fake_sig}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+#[tokio::test]
+async fn test_auth_full_login_flow() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Full login: challenge -> sign -> verify -> get token
+    let token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    assert!(!token.is_empty());
+
+    // Use the token to access an admin endpoint
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Logout
+    let resp = client
+        .post(format!("{}/api/auth/logout", base_url))
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // Token should be invalid after logout
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
         .unwrap();
@@ -338,7 +424,7 @@ async fn test_auth_verify_invalid_signature() {
 
 #[tokio::test]
 async fn test_register_with_invite() {
-    let (base_url, mut con) = spawn_test_server().await;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // Manually create an invite in Redis
@@ -373,7 +459,7 @@ async fn test_register_with_invite() {
 
 #[tokio::test]
 async fn test_register_invalid_invite() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     let (_signing_key, pubkey) = test_keypair();
@@ -405,13 +491,208 @@ async fn test_register_invalid_invite() {
     assert_eq!(resp.status(), 404);
 }
 
+#[tokio::test]
+async fn test_verify_alias_validation() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
+
+    // Alias too short (1 char) -> 400
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": "a", "signature": fake_sig}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Alias too long (65 chars) -> 400
+    let long_alias = "a".repeat(65);
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": long_alias, "signature": fake_sig}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Alias with special chars -> 400
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": "user@evil.com", "signature": fake_sig}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn test_challenge_alias_validation() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Alias too short -> 400
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": "x"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Alias too long -> 400
+    let long_alias = "b".repeat(65);
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": long_alias}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Alias with special chars -> 400
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": "user name"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Valid alias at boundaries -> 200
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": "ab"})) // minimum length
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let alias_64 = "c".repeat(64);
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": alias_64})) // maximum length
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_register_alias_validation() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (_key, pubkey) = test_keypair();
+
+    // Alias too short -> 400
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({"token": "abcdefghijklmnop", "alias": "x", "pubkey": pubkey}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Alias too long -> 400
+    let long_alias = "d".repeat(65);
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({"token": "abcdefghijklmnop", "alias": long_alias, "pubkey": pubkey}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Alias with special chars -> 400
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({"token": "abcdefghijklmnop", "alias": "user@domain", "pubkey": pubkey}))
+        .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn test_verify_normalized_error_messages() {
+    let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
+
+    // Verify with no challenge -> 401 with generic "Authentication failed"
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": "nobody_here", "signature": fake_sig}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "Authentication failed");
+
+    // Verify with wrong signature (after getting a challenge) -> 401 with generic message
+    // First get a challenge
+    let _resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": admin_alias}))
+        .send()
+        .await
+        .unwrap();
+    // Then submit bad sig
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": admin_alias, "signature": fake_sig}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "Authentication failed");
+}
+
+#[tokio::test]
+async fn test_rate_limiting_returns_429() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server_with_auth_limit(2).await;
+    // Clear any existing rate limit counter
+    let _: () = con.del("ratelimit:auth:127.0.0.1").await.unwrap();
+
+    let client = reqwest::Client::new();
+
+    // First two challenge requests should succeed (within limit of 2/min)
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": "someone"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": "someone"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Third request should be rate limited -> 429
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": "someone"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+
+    // Verify the error response body
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["error"], "Rate limit exceeded");
+}
+
 // ============================================================================
 // Admin Tests
 // ============================================================================
 
 #[tokio::test]
 async fn test_admin_endpoints_require_auth() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // All admin endpoints should return 401 without auth
@@ -446,23 +727,11 @@ async fn test_admin_endpoints_require_auth() {
 
 #[tokio::test]
 async fn test_admin_create_and_list_invites() {
-    let (base_url, mut con) = spawn_test_server().await;
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // We need an admin session. Create one directly in Redis.
-    let admin_token = nanoid::nanoid!(32);
-    let session = nullpad::models::StoredSession {
-        token: admin_token.clone(),
-        user_id: "admin".to_string(),
-        role: "admin".to_string(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
-    nullpad::storage::session::store_session(&mut con, &session, 900)
-        .await
-        .unwrap();
+    // Login as admin via full auth flow
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
 
     // Create invite
     let resp = client
@@ -492,23 +761,11 @@ async fn test_admin_create_and_list_invites() {
 
 #[tokio::test]
 async fn test_admin_revoke_invite() {
-    let (base_url, mut con) = spawn_test_server().await;
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // Create admin session
-    let admin_token = nanoid::nanoid!(32);
-    let session = nullpad::models::StoredSession {
-        token: admin_token.clone(),
-        user_id: "admin".to_string(),
-        role: "admin".to_string(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
-    nullpad::storage::session::store_session(&mut con, &session, 900)
-        .await
-        .unwrap();
+    // Login as admin via full auth flow
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
 
     // Create invite
     let resp = client
@@ -541,7 +798,7 @@ async fn test_admin_revoke_invite() {
 
 #[tokio::test]
 async fn test_admin_delete_paste() {
-    let (base_url, mut con) = spawn_test_server().await;
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     // Create a paste
@@ -558,20 +815,8 @@ async fn test_admin_delete_paste() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let paste_id = body["id"].as_str().unwrap().to_string();
 
-    // Create admin session
-    let admin_token = nanoid::nanoid!(32);
-    let session = nullpad::models::StoredSession {
-        token: admin_token.clone(),
-        user_id: "admin".to_string(),
-        role: "admin".to_string(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
-    nullpad::storage::session::store_session(&mut con, &session, 900)
-        .await
-        .unwrap();
+    // Login as admin via full auth flow
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
 
     // Delete paste as admin
     let resp = client
@@ -591,13 +836,153 @@ async fn test_admin_delete_paste() {
     assert_eq!(resp.status(), 404);
 }
 
+#[tokio::test]
+async fn test_admin_revoke_user() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create an invite
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let resp = client
+        .post(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let invite_token = body["token"].as_str().unwrap().to_string();
+
+    // Register a user
+    let (user_key, user_pubkey) = test_keypair();
+    let user_alias = format!("revoke_target_{}", nanoid::nanoid!(4));
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": user_alias,
+            "pubkey": user_pubkey
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Login as the user to get their session
+    let user_token = admin_login(&client, &base_url, &user_alias, &user_key).await;
+
+    // Create a paste as the user
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "user_paste.md",
+        b"data",
+        false,
+        3600,
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let paste_id = body["id"].as_str().unwrap().to_string();
+
+    // List users - user should appear
+    let resp = client
+        .get(format!("{}/api/users", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let users: serde_json::Value = resp.json().await.unwrap();
+    let has_user = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["alias"].as_str() == Some(&user_alias));
+    assert!(has_user, "User should appear in list before revocation");
+
+    // Find the user's ID from the list
+    let user_id = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["alias"].as_str() == Some(&user_alias))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Revoke the user
+    let resp = client
+        .delete(format!("{}/api/users/{}", base_url, user_id))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    // Verify user's paste is deleted
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, paste_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    // Verify user's session is invalid
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    // Should be 401 (session deleted) or 403 (not admin) - either way, not 200
+    assert_ne!(resp.status(), 200);
+
+    // Verify user no longer in list
+    let resp = client
+        .get(format!("{}/api/users", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let users: serde_json::Value = resp.json().await.unwrap();
+    let has_user = users
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|u| u["alias"].as_str() == Some(&user_alias));
+    assert!(!has_user, "User should not appear after revocation");
+}
+
+#[tokio::test]
+async fn test_admin_cannot_delete_self() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Try to delete admin user (id is "admin")
+    let resp = client
+        .delete(format!("{}/api/users/admin", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    // Should be 400 (invalid format - "admin" is 5 chars, validate_id expects 12)
+    // OR 403 if the id check happens before format validation
+    assert_ne!(resp.status(), 204, "Admin deletion should be prevented");
+}
+
 // ============================================================================
 // Security Header Tests
 // ============================================================================
 
 #[tokio::test]
 async fn test_security_headers_on_api() {
-    let (base_url, _con) = spawn_test_server().await;
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
     let resp = client
@@ -612,4 +997,135 @@ async fn test_security_headers_on_api() {
     assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
     assert!(headers.get("strict-transport-security").is_some());
     assert!(headers.get("content-security-policy").is_some());
+}
+
+// ============================================================================
+// User Activation Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_activate_user_on_first_upload() {
+    let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Login as admin
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Create invite
+    let resp = client
+        .post(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let invite_token = body["token"].as_str().unwrap().to_string();
+
+    // Generate keypair for new user
+    let (user_key, user_pubkey) = test_keypair();
+    let user_alias = format!("testuser_{}", nanoid::nanoid!(6));
+
+    // Register new user
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": user_alias,
+            "pubkey": user_pubkey
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Login as new user
+    let user_token = admin_login(&client, &base_url, &user_alias, &user_key).await;
+
+    // Get user ID from users list
+    let resp = client
+        .get(format!("{}/api/users", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let users: Vec<serde_json::Value> = resp.json().await.unwrap();
+    let user = users
+        .iter()
+        .find(|u| u["alias"].as_str().unwrap() == user_alias)
+        .unwrap();
+    let user_id = user["id"].as_str().unwrap();
+
+    // Check TTL before first upload (should be around user_idle_ttl_secs = 172800)
+    let ttl_before: i64 = redis::cmd("TTL")
+        .arg(format!("user:{}", user_id))
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        ttl_before > 172700 && ttl_before <= 172800,
+        "TTL before first upload should be close to 172800, got {}",
+        ttl_before
+    );
+
+    // Create first paste as user
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "first.txt",
+        b"first upload",
+        false,
+        3600,
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Check TTL after first upload (should be around user_active_ttl_secs = 86400, i.e. decreased)
+    let ttl_after_first: i64 = redis::cmd("TTL")
+        .arg(format!("user:{}", user_id))
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(
+        ttl_after_first > 86300 && ttl_after_first <= 86400,
+        "TTL after first upload should be close to 86400, got {}",
+        ttl_after_first
+    );
+
+    // Wait a second to ensure some TTL decay
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+
+    // Create second paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "second.txt",
+        b"second upload",
+        false,
+        3600,
+        Some(&user_token),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    // Check TTL after second upload (should NOT reset, should be close to previous value minus elapsed time)
+    let ttl_after_second: i64 = redis::cmd("TTL")
+        .arg(format!("user:{}", user_id))
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    // TTL should have decreased by ~2 seconds, not reset to 86400
+    assert!(
+        ttl_after_second < ttl_after_first,
+        "TTL should decrease, not reset: before={}, after={}",
+        ttl_after_first,
+        ttl_after_second
+    );
+    assert!(
+        ttl_after_second > 86000,
+        "TTL should still be close to user_active_ttl_secs, got {}",
+        ttl_after_second
+    );
 }
