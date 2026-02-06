@@ -772,8 +772,9 @@ async fn test_verify_normalized_error_messages() {
 async fn test_rate_limiting_returns_429() {
     use redis::AsyncCommands;
     let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server_with_auth_limit(2).await;
-    // Clear any existing rate limit counter
-    let _: () = con.del("ratelimit:auth:127.0.0.1").await.unwrap();
+    // Clear any existing rate limit counters
+    let _: () = con.del("ratelimit:auth:challenge:127.0.0.1").await.unwrap();
+    let _: () = con.del("ratelimit:challenge_alias:someone").await.unwrap();
 
     let client = reqwest::Client::new();
 

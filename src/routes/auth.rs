@@ -50,7 +50,7 @@ pub async fn request_challenge(
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:auth:{}", ip);
+    let rate_limit_key = format!("ratelimit:auth:challenge:{}", ip);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -74,7 +74,7 @@ pub async fn request_challenge(
     let alias_allowed = check_rate_limit(
         &mut con,
         &alias_rate_key,
-        3, // max 3 challenges per alias per 30s window
+        10, // max 10 challenges per alias per 30s window
         30,
     )
     .await
@@ -130,7 +130,7 @@ pub async fn verify_challenge(
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:auth:{}", ip);
+    let rate_limit_key = format!("ratelimit:auth:verify:{}", ip);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -237,7 +237,7 @@ pub async fn register(
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:auth:{}", ip);
+    let rate_limit_key = format!("ratelimit:auth:register:{}", ip);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
