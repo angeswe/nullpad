@@ -222,7 +222,14 @@
       const decrypted = await decryptPaste(pin);
       showContent(decrypted);
     } catch (err) {
-      alert('Invalid PIN. Please try again.');
+      // Show inline error instead of alert()
+      let errEl = pinPrompt.querySelector('.status-error');
+      if (!errEl) {
+        errEl = document.createElement('div');
+        errEl.className = 'status-error';
+        pinForm.parentNode.insertBefore(errEl, pinForm);
+      }
+      errEl.textContent = 'Invalid PIN. Please try again.';
       pinInput.value = '';
       pinInput.focus();
     }

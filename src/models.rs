@@ -14,14 +14,10 @@ use serde::{Deserialize, Serialize};
 pub struct PasteMetadata {
     pub filename: String,
     pub content_type: String,
-    #[serde(default = "default_ttl")]
-    pub ttl_secs: u64,
+    /// TTL in seconds. If omitted, uses server config DEFAULT_TTL_SECS.
+    pub ttl_secs: Option<u64>,
     #[serde(default)]
     pub burn_after_reading: bool,
-}
-
-fn default_ttl() -> u64 {
-    86400 // 24 hours
 }
 
 /// Response after creating a paste.

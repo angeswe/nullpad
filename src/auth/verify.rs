@@ -71,10 +71,11 @@ mod tests {
     use super::*;
     use base64::engine::general_purpose;
     use ed25519_dalek::{Signer, SigningKey};
+    use rand::Rng;
 
     fn generate_test_signing_key() -> SigningKey {
         let mut seed = [0u8; 32];
-        rand::fill(&mut seed);
+        rand::rng().fill(&mut seed);
         SigningKey::from_bytes(&seed)
     }
 

@@ -119,6 +119,8 @@ where
 /// Upsert the admin user (permanent, no TTL).
 ///
 /// Creates or updates `user:admin` with the provided pubkey and alias.
+/// Uses a Lua script to atomically clean up stale alias keys if the alias
+/// has changed between deploys, preventing multi-pod startup races.
 pub async fn upsert_admin<C>(
     con: &mut C,
     pubkey: &str,
@@ -139,7 +141,7 @@ where
     };
 
     let user_key = "user:admin";
-    let alias_key = format!("alias:{}", alias);
+    let new_alias_key = format!("alias:{}", alias);
 
     let json = serde_json::to_string(&user).map_err(|e| {
         redis::RedisError::from((
@@ -149,11 +151,29 @@ where
         ))
     })?;
 
-    // Store user without TTL (permanent)
-    con.set::<_, _, ()>(&user_key, json).await?;
+    // Atomic upsert: read old admin, delete stale alias, write new admin + alias
+    let script = redis::Script::new(
+        r#"
+        local old_json = redis.call('GET', KEYS[1])
+        if old_json then
+            local old_user = cjson.decode(old_json)
+            if type(old_user.alias) == 'string' and old_user.alias ~= ARGV[2] then
+                redis.call('DEL', 'alias:' .. old_user.alias)
+            end
+        end
+        redis.call('SET', KEYS[1], ARGV[1])
+        redis.call('SET', KEYS[2], 'admin')
+        return 1
+        "#,
+    );
 
-    // Store alias lookup without TTL (permanent)
-    con.set::<_, _, ()>(&alias_key, "admin").await?;
+    let _: i32 = script
+        .key(user_key)
+        .key(&new_alias_key)
+        .arg(&json)
+        .arg(alias)
+        .invoke_async(con)
+        .await?;
 
     Ok(())
 }

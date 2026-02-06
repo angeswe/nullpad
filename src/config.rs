@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine as _};
 use std::env;
 use std::net::SocketAddr;
 
@@ -60,6 +61,25 @@ impl Config {
             return Err(ConfigError::InvalidValue(
                 "ADMIN_PUBKEY".to_string(),
                 "cannot be empty".to_string(),
+            ));
+        }
+
+        // Validate ADMIN_PUBKEY is valid base64 and decodes to 32 bytes (Ed25519 public key)
+        let pubkey_bytes = general_purpose::STANDARD
+            .decode(&admin_pubkey)
+            .map_err(|e| {
+                ConfigError::InvalidValue(
+                    "ADMIN_PUBKEY".to_string(),
+                    format!("invalid base64: {}", e),
+                )
+            })?;
+        if pubkey_bytes.len() != 32 {
+            return Err(ConfigError::InvalidValue(
+                "ADMIN_PUBKEY".to_string(),
+                format!(
+                    "expected 32 bytes (Ed25519 public key), got {}",
+                    pubkey_bytes.len()
+                ),
             ));
         }
 
@@ -139,8 +159,13 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // Use a mutex to ensure tests run serially since they modify global env vars
+    // Use a mutex to ensure tests run serially since they modify global env vars.
+    // unwrap_or_else handles poison from prior panics.
     static TEST_MUTEX: Mutex<()> = Mutex::new(());
+
+    fn lock_test() -> std::sync::MutexGuard<'static, ()> {
+        TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn clear_test_env() {
         env::remove_var("ADMIN_PUBKEY");
@@ -162,7 +187,7 @@ mod tests {
 
     #[test]
     fn test_parse_env_or_default() {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = lock_test();
 
         env::set_var("TEST_U64", "12345");
         let result: Result<u64, ConfigError> = parse_env_or_default("TEST_U64", 100);
@@ -173,12 +198,15 @@ mod tests {
         assert_eq!(result.unwrap(), 100);
     }
 
+    // Valid 32-byte Ed25519 public key encoded as base64 for tests
+    const TEST_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+
     #[test]
     fn test_invalid_socket_addr() {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = lock_test();
         clear_test_env();
 
-        env::set_var("ADMIN_PUBKEY", "test_pubkey");
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
         env::set_var("BIND_ADDR", "invalid_address");
 
         let result = Config::from_env();
@@ -190,22 +218,27 @@ mod tests {
 
     #[test]
     fn test_missing_admin_pubkey() {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = lock_test();
         clear_test_env();
 
+        // Note: dotenv may reload ADMIN_PUBKEY="" from .env, so this may
+        // produce either MissingVar or InvalidValue - both are correct.
         let result = Config::from_env();
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConfigError::MissingVar(ref s) if s == "ADMIN_PUBKEY"
-        ));
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::MissingVar(s) if s == "ADMIN_PUBKEY")
+                || matches!(&err, ConfigError::InvalidValue(s, _) if s == "ADMIN_PUBKEY"),
+            "Expected MissingVar or InvalidValue for ADMIN_PUBKEY, got: {:?}",
+            err,
+        );
 
         clear_test_env();
     }
 
     #[test]
     fn test_empty_admin_pubkey() {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = lock_test();
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", "");
@@ -221,11 +254,46 @@ mod tests {
     }
 
     #[test]
-    fn test_public_allowed_extensions_parsing() {
-        let _guard = TEST_MUTEX.lock().unwrap();
+    fn test_invalid_admin_pubkey_base64() {
+        let _guard = lock_test();
         clear_test_env();
 
-        env::set_var("ADMIN_PUBKEY", "test_pubkey");
+        env::set_var("ADMIN_PUBKEY", "not-valid-base64!!!");
+
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ADMIN_PUBKEY"
+        ));
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_invalid_admin_pubkey_length() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        // Valid base64 but only 16 bytes (not 32)
+        env::set_var("ADMIN_PUBKEY", "AAAAAAAAAAAAAAAAAAAAAA==");
+
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ADMIN_PUBKEY"
+        ));
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_public_allowed_extensions_parsing() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
         env::set_var("PUBLIC_ALLOWED_EXTENSIONS", "md, txt, json ");
 
         let config = Config::from_env().unwrap();
@@ -236,14 +304,17 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let _guard = TEST_MUTEX.lock().unwrap();
+        let _guard = lock_test();
         clear_test_env();
 
-        env::set_var("ADMIN_PUBKEY", "test_pubkey_base64");
+        // Set required var + override any .env defaults to ensure predictable values
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("BIND_ADDR", "0.0.0.0:3000");
 
         let config = Config::from_env().unwrap();
 
-        assert_eq!(config.admin_pubkey, "test_pubkey_base64");
+        assert_eq!(config.admin_pubkey, TEST_PUBKEY_B64);
         assert_eq!(config.admin_alias, "admin");
         assert_eq!(config.redis_url, "redis://127.0.0.1:6379");
         assert_eq!(config.bind_addr.to_string(), "0.0.0.0:3000");

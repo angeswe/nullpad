@@ -298,13 +298,16 @@ async fn test_auth_challenge_unknown_user() {
     let (base_url, _con) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
+    // Returns 200 with a throwaway nonce to prevent alias enumeration
     let resp = client
         .post(format!("{}/api/auth/challenge", base_url))
         .json(&serde_json::json!({"alias": "nobody"}))
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["nonce"].is_string());
 }
 
 #[tokio::test]

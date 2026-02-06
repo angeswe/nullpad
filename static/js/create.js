@@ -191,7 +191,7 @@
     } catch (err) {
       if (submitBtn) {
         submitBtn.disabled = false;
-        submitBtn.textContent = 'Encrypt & Share';
+        submitBtn.textContent = 'Create Encrypted Paste';
       }
       // Show error inline instead of alert
       const errEl = document.createElement('div');
@@ -233,7 +233,7 @@
 
     if (submitBtn) {
       submitBtn.disabled = false;
-      submitBtn.textContent = 'Encrypt & Share';
+      submitBtn.textContent = 'Create Encrypted Paste';
     }
   }
 

@@ -6,7 +6,7 @@ use crate::models::{CreatePasteResponse, GetPasteResponse, PasteMetadata, Stored
 use crate::storage;
 use axum::{
     extract::{ConnectInfo, Multipart, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -25,17 +25,19 @@ use std::net::SocketAddr;
 pub async fn create_paste(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     auth_session: Option<AuthSession>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
-    // Rate limit by IP
+    // Rate limit by IP (prefer X-Forwarded-For behind reverse proxy)
     let mut con = state
         .redis
         .get_multiplexed_async_connection()
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
-    let rate_limit_key = format!("ratelimit:paste:{}", addr.ip());
+    let ip = super::client_ip(&headers, &addr);
+    let rate_limit_key = format!("ratelimit:paste:{}", ip);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -47,7 +49,7 @@ pub async fn create_paste(
 
     if !allowed {
         let mut hasher = std::hash::DefaultHasher::new();
-        addr.ip().hash(&mut hasher);
+        ip.hash(&mut hasher);
         let ip_hash = format!("{:x}", hasher.finish());
         tracing::warn!(action = "rate_limited", endpoint = "paste", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
@@ -120,8 +122,11 @@ pub async fn create_paste(
         }
     }
 
-    // Clamp TTL to max
-    let ttl_secs = metadata.ttl_secs.min(state.config.max_ttl_secs);
+    // Use config default if client omitted ttl_secs, clamp to max
+    let ttl_secs = metadata
+        .ttl_secs
+        .unwrap_or(state.config.default_ttl_secs)
+        .min(state.config.max_ttl_secs);
 
     // Generate paste ID
     let paste_id = nanoid::nanoid!(12);
@@ -141,20 +146,18 @@ pub async fn create_paste(
     };
 
     // Store paste
-    storage::paste::store_paste(&mut con, &paste, ttl_secs).await?;
+    storage::paste::store_paste(&mut con, &paste, ttl_secs, state.config.max_ttl_secs).await?;
 
-    // On first upload, update user TTL from idle (48h) to active (24h)
+    // On first upload, atomically update user TTL from idle to active.
+    // Uses SCARD + TTL comparison to avoid race conditions between concurrent uploads.
     if let Some(ref session) = auth_session {
-        let existing_pastes = storage::paste::get_user_paste_ids(&mut con, &session.user_id).await?;
-        // Set has exactly 1 entry (the paste we just added) = first upload
-        if existing_pastes.len() == 1 {
-            storage::user::update_user_ttl(
-                &mut con,
-                &session.user_id,
-                state.config.user_active_ttl_secs,
-            )
-            .await?;
-        }
+        storage::paste::activate_user_on_first_upload(
+            &mut con,
+            &session.user_id,
+            state.config.user_idle_ttl_secs,
+            state.config.user_active_ttl_secs,
+        )
+        .await?;
     }
 
     tracing::info!(
@@ -176,6 +179,8 @@ pub async fn create_paste(
 /// Fetches encrypted paste. If burn_after_reading, deletes atomically.
 pub async fn get_paste(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
@@ -185,6 +190,22 @@ pub async fn get_paste(
         .get_multiplexed_async_connection()
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+
+    // Rate limit paste reads to prevent burn-after-reading abuse
+    let ip = super::client_ip(&headers, &addr);
+    let rate_limit_key = format!("ratelimit:paste_read:{}", ip);
+    let allowed = check_rate_limit(
+        &mut con,
+        &rate_limit_key,
+        state.config.rate_limit_paste_per_min * 5, // 5x write limit for reads
+        60,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    if !allowed {
+        return Err(AppError::RateLimited);
+    }
 
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.

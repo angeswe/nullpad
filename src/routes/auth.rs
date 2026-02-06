@@ -11,7 +11,7 @@ use crate::models::{
 use crate::storage;
 use axum::{
     extract::{ConnectInfo, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
@@ -23,6 +23,7 @@ use std::net::SocketAddr;
 pub async fn request_challenge(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Validate alias before rate limiting (cheap check first, avoids wasting rate limit slots)
@@ -48,7 +49,8 @@ pub async fn request_challenge(
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
-    let rate_limit_key = format!("ratelimit:auth:{}", addr.ip());
+    let ip = super::client_ip(&headers, &addr);
+    let rate_limit_key = format!("ratelimit:auth:{}", ip);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -60,37 +62,40 @@ pub async fn request_challenge(
 
     if !allowed {
         let mut hasher = std::hash::DefaultHasher::new();
-        addr.ip().hash(&mut hasher);
+        ip.hash(&mut hasher);
         let ip_hash = format!("{:x}", hasher.finish());
         tracing::warn!(action = "rate_limited", endpoint = "auth/challenge", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
     }
 
-    // Look up user by alias (verify user exists)
-    let _user = storage::user::get_user_by_alias(&mut con, &req.alias)
-        .await?
-        .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
-
-    // Generate nonce
+    // Generate nonce regardless of whether user exists to prevent alias enumeration
     let nonce = generate_challenge_nonce();
 
-    // Store challenge
-    let challenge = StoredChallenge {
-        nonce: nonce.clone(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
+    // Look up user by alias — store challenge only if user exists,
+    // but always return the same response shape
+    let user_exists = storage::user::get_user_by_alias(&mut con, &req.alias)
+        .await?
+        .is_some();
 
-    storage::session::store_challenge(
-        &mut con,
-        &req.alias,
-        &challenge,
-        state.config.challenge_ttl_secs,
-    )
-    .await?;
+    if user_exists {
+        let challenge = StoredChallenge {
+            nonce: nonce.clone(),
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+        };
 
+        storage::session::store_challenge(
+            &mut con,
+            &req.alias,
+            &challenge,
+            state.config.challenge_ttl_secs,
+        )
+        .await?;
+    }
+
+    // Always return a challenge response (non-existent users get a throwaway nonce)
     Ok(Json(ChallengeResponse { nonce }))
 }
 
