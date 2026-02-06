@@ -45,6 +45,8 @@ jobs:
           done
       - name: Unit tests
         run: cargo test --lib
+        env:
+          REDIS_URL: redis://:ci-test-pass@127.0.0.1:6379
       - name: Integration tests (sequential, shared Redis)
         run: cargo test --test integration -- --test-threads=1
         env:
