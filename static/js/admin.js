@@ -207,7 +207,7 @@
     }
 
     try {
-      await apiRequest(`/api/invites/${token}`, {
+      await apiRequest(`/api/invites/${encodeURIComponent(token)}`, {
         method: 'DELETE'
       });
 
@@ -308,7 +308,7 @@
     }
 
     try {
-      await apiRequest(`/api/users/${userId}`, {
+      await apiRequest(`/api/users/${encodeURIComponent(userId)}`, {
         method: 'DELETE'
       });
 
@@ -331,6 +331,13 @@
 
     const pasteId = pasteIdInput.value.trim();
     if (!pasteId) return;
+
+    // Validate paste ID format (nanoid: 12 chars, alphanumeric + hyphen + underscore)
+    if (!/^[A-Za-z0-9_-]{12}$/.test(pasteId)) {
+      pasteDeleteError.textContent = 'Invalid paste ID format.';
+      pasteDeleteError.classList.remove('hidden');
+      return;
+    }
 
     // Hide previous messages
     pasteDeleteSuccess.classList.add('hidden');

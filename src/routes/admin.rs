@@ -2,7 +2,7 @@
 
 use crate::auth::middleware::{AdminSession, AppState};
 use crate::error::AppError;
-use crate::models::{CreateInviteResponse, InviteInfo, Role, StoredInvite, UserInfo};
+use crate::models::{CreateInviteResponse, InviteInfo, StoredInvite, UserInfo};
 use crate::storage;
 use axum::{
     extract::{Path, State},
@@ -145,18 +145,18 @@ pub async fn revoke_user(
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
     // Don't allow deleting the admin user
-    if user.role.parse::<Role>() == Ok(Role::Admin) {
+    if id == "admin" {
         return Err(AppError::Forbidden("Cannot delete admin user".to_string()));
     }
 
-    // Delete user's pastes
-    storage::paste::delete_user_pastes(&mut con, &id).await?;
+    // Delete user first to prevent new sessions
+    storage::user::delete_user(&mut con, &id).await?;
 
     // Delete user's sessions
     storage::session::delete_user_sessions(&mut con, &id).await?;
 
-    // Delete user
-    storage::user::delete_user(&mut con, &id).await?;
+    // Delete user's pastes
+    storage::paste::delete_user_pastes(&mut con, &id).await?;
 
     tracing::warn!(action = "user_revoked", user_id = %id, alias = %user.alias, "Admin revoked user");
 

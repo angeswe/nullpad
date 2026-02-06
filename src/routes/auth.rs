@@ -102,6 +102,8 @@ pub async fn request_challenge(
 /// POST /api/auth/verify — Verify signature and create session
 pub async fn verify_challenge(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut con = state
@@ -110,15 +112,51 @@ pub async fn verify_challenge(
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
+    // Rate limit by IP
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
+    let rate_limit_key = format!("ratelimit:auth:{}", ip);
+    let allowed = check_rate_limit(
+        &mut con,
+        &rate_limit_key,
+        state.config.rate_limit_auth_per_min,
+        60,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    if !allowed {
+        let mut hasher = std::hash::DefaultHasher::new();
+        ip.hash(&mut hasher);
+        let ip_hash = format!("{:x}", hasher.finish());
+        tracing::warn!(action = "rate_limited", endpoint = "auth/verify", ip_hash = %ip_hash, "Rate limit exceeded");
+        return Err(AppError::RateLimited);
+    }
+
+    // Validate alias
+    if req.alias.len() < 2 || req.alias.len() > 64 {
+        return Err(AppError::BadRequest(
+            "Alias must be 2-64 characters".to_string(),
+        ));
+    }
+    if !req
+        .alias
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
+        ));
+    }
+
     // Get and delete challenge (single-use)
     let challenge = storage::session::get_and_delete_challenge(&mut con, &req.alias)
         .await?
-        .ok_or_else(|| AppError::Unauthorized("Challenge not found or expired".to_string()))?;
+        .ok_or_else(|| AppError::Unauthorized("Authentication failed".to_string()))?;
 
     // Look up user to get pubkey
     let user = storage::user::get_user_by_alias(&mut con, &req.alias)
         .await?
-        .ok_or_else(|| AppError::Unauthorized("User not found".to_string()))?;
+        .ok_or_else(|| AppError::Unauthorized("Authentication failed".to_string()))?;
 
     // Verify signature (nonce is base64-encoded bytes)
     let nonce_bytes = general_purpose::STANDARD
@@ -129,7 +167,7 @@ pub async fn verify_challenge(
 
     if !valid {
         tracing::warn!(action = "auth_failed", alias = %req.alias, "Invalid signature");
-        return Err(AppError::Unauthorized("Invalid signature".to_string()));
+        return Err(AppError::Unauthorized("Authentication failed".to_string()));
     }
 
     // Parse role
@@ -165,6 +203,8 @@ pub async fn verify_challenge(
 /// POST /api/register — Register with invite token
 pub async fn register(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let mut con = state
@@ -172,6 +212,26 @@ pub async fn register(
         .get_multiplexed_async_connection()
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+
+    // Rate limit by IP
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
+    let rate_limit_key = format!("ratelimit:auth:{}", ip);
+    let allowed = check_rate_limit(
+        &mut con,
+        &rate_limit_key,
+        state.config.rate_limit_auth_per_min,
+        60,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    if !allowed {
+        let mut hasher = std::hash::DefaultHasher::new();
+        ip.hash(&mut hasher);
+        let ip_hash = format!("{:x}", hasher.finish());
+        tracing::warn!(action = "rate_limited", endpoint = "auth/register", ip_hash = %ip_hash, "Rate limit exceeded");
+        return Err(AppError::RateLimited);
+    }
 
     // Validate alias
     if req.alias.len() < 2 || req.alias.len() > 64 {
@@ -188,6 +248,9 @@ pub async fn register(
             "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
         ));
     }
+
+    // Validate invite token format
+    super::validate_id(&req.token, "invite token", 16)?;
 
     // Atomically get and delete invite (single-use)
     let _invite = storage::user::get_and_delete_invite(&mut con, &req.token)

@@ -9,21 +9,35 @@ services:
     env_file:
       - .env
     environment:
-      - REDIS_URL=redis://redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379
       - RUST_LOG=info
     restart: unless-stopped
+    networks:
+      - internal
 
   redis:
     image: redis:7-alpine
     volumes:
       - redis-data:/data
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: >-
+      redis-server --appendonly yes
+      --requirepass "${REDIS_PASSWORD:-changeme}"
+      --rename-command FLUSHALL ""
+      --rename-command FLUSHDB ""
+      --rename-command CONFIG ""
+      --rename-command DEBUG ""
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
 
 volumes:
   redis-data:

@@ -3,6 +3,7 @@
 
 # Environment
 .env
+.env.production
 
 # OS
 .DS_Store
@@ -15,3 +16,4 @@ Thumbs.db
 .idea/
 .vscode/
 *.iml
+.build/

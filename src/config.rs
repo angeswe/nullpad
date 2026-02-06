@@ -2,7 +2,7 @@ use base64::{engine::general_purpose, Engine as _};
 use std::env;
 use std::net::SocketAddr;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Config {
     // Admin identity
     pub admin_pubkey: String,
@@ -35,6 +35,29 @@ pub struct Config {
 
     // Proxy
     pub trusted_proxy_count: usize,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("admin_pubkey", &"[REDACTED]")
+            .field("admin_alias", &self.admin_alias)
+            .field("redis_url", &"[REDACTED]")
+            .field("bind_addr", &self.bind_addr)
+            .field("max_upload_bytes", &self.max_upload_bytes)
+            .field("default_ttl_secs", &self.default_ttl_secs)
+            .field("max_ttl_secs", &self.max_ttl_secs)
+            .field("invite_ttl_secs", &self.invite_ttl_secs)
+            .field("user_idle_ttl_secs", &self.user_idle_ttl_secs)
+            .field("user_active_ttl_secs", &self.user_active_ttl_secs)
+            .field("session_ttl_secs", &self.session_ttl_secs)
+            .field("challenge_ttl_secs", &self.challenge_ttl_secs)
+            .field("public_allowed_extensions", &self.public_allowed_extensions)
+            .field("rate_limit_paste_per_min", &self.rate_limit_paste_per_min)
+            .field("rate_limit_auth_per_min", &self.rate_limit_auth_per_min)
+            .field("trusted_proxy_count", &self.trusted_proxy_count)
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

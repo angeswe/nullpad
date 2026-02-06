@@ -29,6 +29,7 @@
 
   // State
   let currentFile = null;
+  let clipboardDirty = false;
 
   // ============================================================================
   // File Upload Handling
@@ -243,6 +244,7 @@
 
   function copyToClipboard(text) {
     navigator.clipboard.writeText(text).then(() => {
+      clipboardDirty = true;
       const originalText = copyBtn.textContent;
       copyBtn.textContent = 'Copied!';
       copyBtn.classList.add('btn-primary');
@@ -267,6 +269,16 @@
       copyToClipboard(pasteUrlInput.value);
     });
     createAnotherBtn.addEventListener('click', resetForm);
+
+    // Clear clipboard and sensitive data on page unload
+    window.addEventListener('pagehide', () => {
+      if (clipboardDirty) {
+        navigator.clipboard.writeText('').catch(() => {});
+        clipboardDirty = false;
+      }
+      // Clear PIN field
+      pinInput.value = '';
+    });
   }
 
   if (document.readyState === 'loading') {

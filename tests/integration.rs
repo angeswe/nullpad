@@ -378,10 +378,24 @@ async fn test_register_invalid_invite() {
 
     let (_signing_key, pubkey) = test_keypair();
 
+    // Malformed token (wrong length) → 400
     let resp = client
         .post(format!("{}/api/register", base_url))
         .json(&serde_json::json!({
             "token": "invalid_token",
+            "alias": "testuser",
+            "pubkey": pubkey
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Valid-format but non-existent token → 404
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": "abcdefghijklmnop",
             "alias": "testuser",
             "pubkey": pubkey
         }))

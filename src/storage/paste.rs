@@ -44,9 +44,16 @@ where
             // Forever paste: persist the user_pastes set (remove any TTL)
             con.persist::<_, ()>(&user_pastes_key).await?;
         } else {
-            // Set TTL on the user_pastes set to match max paste TTL from config
-            con.expire::<_, ()>(&user_pastes_key, max_ttl_secs as i64)
+            // Only set TTL if the key isn't already persistent (TTL != -1)
+            // This prevents overwriting persistent state from forever pastes
+            let current_ttl: i64 = redis::cmd("TTL")
+                .arg(&user_pastes_key)
+                .query_async(con)
                 .await?;
+            if current_ttl != -1 {
+                con.expire::<_, ()>(&user_pastes_key, max_ttl_secs as i64)
+                    .await?;
+            }
         }
     }
 
