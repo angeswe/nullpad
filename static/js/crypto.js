@@ -129,18 +129,28 @@
         // Use random salt (generated fresh for encryption, provided for decryption)
         const salt = existingSalt || crypto.getRandomValues(new Uint8Array(16));
 
-        // Derive 32 bytes using Argon2id (OWASP recommended params)
-        const hash = await hashwasm.argon2id({
-            password,
-            salt,
-            parallelism: 1,
-            iterations: 2,
-            memorySize: 19456,
-            hashLength: 32,
-            outputType: 'binary'
-        });
+        try {
+            // Derive 32 bytes using Argon2id (OWASP recommended params)
+            const hash = await hashwasm.argon2id({
+                password,
+                salt,
+                parallelism: 1,
+                iterations: 2,
+                memorySize: 19456,
+                hashLength: 32,
+                outputType: 'binary'
+            });
 
-        return { key: base64urlEncode(new Uint8Array(hash)), salt };
+            const result = { key: base64urlEncode(new Uint8Array(hash)), salt };
+            // Zero the hash output
+            new Uint8Array(hash).fill(0);
+            return result;
+        } finally {
+            // Zero sensitive key material
+            keyBytes.fill(0);
+            pinBytes.fill(0);
+            password.fill(0);
+        }
     }
 
     // ============================================================================
@@ -162,37 +172,41 @@
         // Decode key
         const keyBytes = base64urlDecode(keyBase64url);
 
-        // Import key for AES-GCM
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw',
-            keyBytes,
-            { name: 'AES-GCM' },
-            false,
-            ['encrypt']
-        );
+        try {
+            // Import key for AES-GCM
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw',
+                keyBytes,
+                { name: 'AES-GCM' },
+                false,
+                ['encrypt']
+            );
 
-        // Generate random 12-byte IV
-        const iv = new Uint8Array(12);
-        crypto.getRandomValues(iv);
+            // Generate random 12-byte IV
+            const iv = new Uint8Array(12);
+            crypto.getRandomValues(iv);
 
-        // Encrypt with AES-GCM
-        const ciphertext = await crypto.subtle.encrypt(
-            {
-                name: 'AES-GCM',
-                iv: iv
-            },
-            cryptoKey,
-            plaintextBytes
-        );
+            // Encrypt with AES-GCM
+            const ciphertext = await crypto.subtle.encrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: iv
+                },
+                cryptoKey,
+                plaintextBytes
+            );
 
-        // Concatenate IV + ciphertext
-        const ciphertextBytes = new Uint8Array(ciphertext);
-        const combined = new Uint8Array(iv.length + ciphertextBytes.length);
-        combined.set(iv, 0);
-        combined.set(ciphertextBytes, iv.length);
+            // Concatenate IV + ciphertext
+            const ciphertextBytes = new Uint8Array(ciphertext);
+            const combined = new Uint8Array(iv.length + ciphertextBytes.length);
+            combined.set(iv, 0);
+            combined.set(ciphertextBytes, iv.length);
 
-        // Return as standard base64
-        return base64Encode(combined);
+            // Return as standard base64
+            return base64Encode(combined);
+        } finally {
+            keyBytes.fill(0);
+        }
     }
 
     // ============================================================================
@@ -216,26 +230,30 @@
         // Decode key
         const keyBytes = base64urlDecode(keyBase64url);
 
-        // Import key for AES-GCM
-        const cryptoKey = await crypto.subtle.importKey(
-            'raw',
-            keyBytes,
-            { name: 'AES-GCM' },
-            false,
-            ['decrypt']
-        );
+        try {
+            // Import key for AES-GCM
+            const cryptoKey = await crypto.subtle.importKey(
+                'raw',
+                keyBytes,
+                { name: 'AES-GCM' },
+                false,
+                ['decrypt']
+            );
 
-        // Decrypt with AES-GCM
-        const plaintext = await crypto.subtle.decrypt(
-            {
-                name: 'AES-GCM',
-                iv: iv
-            },
-            cryptoKey,
-            ciphertext
-        );
+            // Decrypt with AES-GCM
+            const plaintext = await crypto.subtle.decrypt(
+                {
+                    name: 'AES-GCM',
+                    iv: iv
+                },
+                cryptoKey,
+                ciphertext
+            );
 
-        return new Uint8Array(plaintext);
+            return new Uint8Array(plaintext);
+        } finally {
+            keyBytes.fill(0);
+        }
     }
 
     // ============================================================================

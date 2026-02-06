@@ -128,10 +128,12 @@
       const isMarkdown = metadata.filename?.endsWith('.md') ||
                         metadata.mimetype === 'text/markdown';
 
-      if (isMarkdown && typeof marked !== 'undefined') {
-        // Render as markdown (marked.js is safe from XSS)
-        const html = marked.parse(decrypted.content);
-        contentDisplay.innerHTML = html;
+      if (isMarkdown && typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
+        // Render markdown, then sanitize with DOMPurify to prevent XSS
+        // DOMPurify is REQUIRED - no unsafe fallback to raw HTML
+        const rawHtml = marked.parse(decrypted.content);
+        const safeHtml = DOMPurify.sanitize(rawHtml);
+        contentDisplay.innerHTML = safeHtml;
         contentDisplay.classList.add('markdown-body');
 
         // Highlight code blocks
@@ -141,6 +143,7 @@
           });
         }
       } else {
+        // Fall back to plain text if DOMPurify not available (safe default)
         // Render as plain text
         rawContent.textContent = decrypted.content;
         rawContent.classList.remove('hidden');

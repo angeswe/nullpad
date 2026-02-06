@@ -65,13 +65,17 @@
     ], 0);
     pkcs8.set(seed, 16);
 
-    return await crypto.subtle.importKey(
-      'pkcs8',
-      pkcs8,
-      { name: 'Ed25519' },
-      true,
-      ['sign']
-    );
+    try {
+      return await crypto.subtle.importKey(
+        'pkcs8',
+        pkcs8,
+        { name: 'Ed25519' },
+        true,
+        ['sign']
+      );
+    } finally {
+      pkcs8.fill(0);
+    }
   }
 
   /**
@@ -97,17 +101,23 @@
 
     const seed = new Uint8Array(hash);
 
-    // Import seed as Ed25519 private key via PKCS8
-    const privateKey = await importPrivateKeyFromSeed(seed);
+    try {
+      // Import seed as Ed25519 private key via PKCS8
+      const privateKey = await importPrivateKeyFromSeed(seed);
 
-    // Extract public key via JWK export (portable across browsers)
-    const jwk = await crypto.subtle.exportKey('jwk', privateKey);
-    const pubKeyBytes = b64urlDecode(jwk.x);
+      // Extract public key via JWK export (portable across browsers)
+      const jwk = await crypto.subtle.exportKey('jwk', privateKey);
+      const pubKeyBytes = b64urlDecode(jwk.x);
 
-    return {
-      publicKey: b64Encode(pubKeyBytes),
-      privateKey: privateKey
-    };
+      return {
+        publicKey: b64Encode(pubKeyBytes),
+        privateKey: privateKey
+      };
+    } finally {
+      // Zero the seed after key import
+      seed.fill(0);
+      new Uint8Array(hash).fill(0);
+    }
   }
 
   /**
