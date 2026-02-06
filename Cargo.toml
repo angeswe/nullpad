@@ -44,4 +44,4 @@ strip = true
 lto = true
 
 [dev-dependencies]
-reqwest = { version = "0.13.1", features = ["json", "multipart"] }
+reqwest = { version = "0.13.2", features = ["json", "multipart"] }
