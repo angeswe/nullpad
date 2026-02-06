@@ -58,7 +58,6 @@ async fn spawn_test_server() -> (String, redis::aio::MultiplexedConnection) {
         challenge_ttl_secs: 30,
         public_allowed_extensions: vec!["md".to_string(), "txt".to_string()],
         rate_limit_paste_per_min: 100,
-        rate_limit_paste_per_hour: 1000,
         rate_limit_auth_per_min: 100,
     };
 

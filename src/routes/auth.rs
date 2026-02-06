@@ -25,6 +25,22 @@ pub async fn request_challenge(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(req): Json<ChallengeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Validate alias before rate limiting (cheap check first, avoids wasting rate limit slots)
+    if req.alias.len() < 2 || req.alias.len() > 64 {
+        return Err(AppError::BadRequest(
+            "Alias must be 2-64 characters".to_string(),
+        ));
+    }
+    if !req
+        .alias
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
+        ));
+    }
+
     // Rate limit by IP
     let mut con = state
         .redis
@@ -41,22 +57,6 @@ pub async fn request_challenge(
     )
     .await
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    // Validate alias
-    if req.alias.len() < 2 || req.alias.len() > 64 {
-        return Err(AppError::BadRequest(
-            "Alias must be 2-64 characters".to_string(),
-        ));
-    }
-    if !req
-        .alias
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::BadRequest(
-            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
-        ));
-    }
 
     if !allowed {
         let mut hasher = std::hash::DefaultHasher::new();

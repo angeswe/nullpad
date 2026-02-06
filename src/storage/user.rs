@@ -158,7 +158,7 @@ where
     Ok(())
 }
 
-/// Update a user's TTL.
+/// Update a user's TTL (both user key and alias key).
 pub async fn update_user_ttl<C>(
     con: &mut C,
     id: &str,
@@ -167,8 +167,15 @@ pub async fn update_user_ttl<C>(
 where
     C: AsyncCommands,
 {
-    let key = format!("user:{}", id);
-    con.expire::<_, ()>(&key, ttl_secs as i64).await?;
+    let user_key = format!("user:{}", id);
+    con.expire::<_, ()>(&user_key, ttl_secs as i64).await?;
+
+    // Also update alias key TTL to stay in sync
+    if let Some(user) = get_user(con, id).await? {
+        let alias_key = format!("alias:{}", user.alias);
+        con.expire::<_, ()>(&alias_key, ttl_secs as i64).await?;
+    }
+
     Ok(())
 }
 

@@ -56,14 +56,8 @@
     // Set up logout button
     logoutBtn.addEventListener('click', handleLogout);
 
-    // The rest of the paste creation logic is handled by create.js
-    // We just need to ensure the Authorization header is included in requests
-
-    // TODO: Modify create.js to support authenticated uploads
-    // For now, create.js needs to be updated to:
-    // 1. Accept any file type (not just .md/.txt)
-    // 2. Include Authorization header in POST /api/paste request
-    // 3. Use NullpadAuth.getAuthHeader() to get the bearer token
+    // Paste creation logic is handled by create.js (loaded before this script).
+    // create.js already includes the Authorization header via NullpadAuth.getAuthHeader().
   }
 
   // Start when DOM is ready

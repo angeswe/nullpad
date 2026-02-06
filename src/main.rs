@@ -11,6 +11,7 @@
 use nullpad::{
     auth::middleware::AppState, config::Config, middleware::security_headers, routes, storage,
 };
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::services::ServeDir;
 
@@ -61,6 +62,11 @@ async fn main() {
         .expect("Failed to bind");
     tracing::info!("Listening on {}", config.bind_addr);
 
-    // Start server
-    axum::serve(listener, app).await.expect("Server error");
+    // Start server (with_connect_info required for ConnectInfo<SocketAddr> extractors)
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await
+    .expect("Server error");
 }

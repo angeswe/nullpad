@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com; frame-ancestors 'none'; base-uri 'self'; form-action 'self'">
   <title>Trusted Upload - Nullpad</title>
   <link rel="icon" href="/favicon.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -108,12 +108,13 @@
   </div>
 
   <footer class="site-footer">
-    <a href="https://github.com/glow/nullpad" target="_blank" rel="noopener">GitHub</a>
+    <a href="https://github.com/angeswe/nullpad" target="_blank" rel="noopener">GitHub</a>
   </footer>
 
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"></script>
   <script src="/js/crypto.js" integrity="sha384-7iJDz61aSVORPhxQlou/is7pjLDV7rCADgJ4DAsUgGRhFswnptrQrdLXqjtGW/aR"></script>
   <script src="/js/auth.js" integrity="sha384-cxO48Wa1628fqkXBwWYuVjlDsnaGBF/7aLha5COYpSCd5VpmGJh4r0fZPqkyv6FQ"></script>
-  <script src="/js/trusted.js" integrity="sha384-5hHeX7EYSXPoWCf+ChXr/L97BqABnhLEos4ZUw+ZsLUvjJsNHlkAnxpWkuEDm3mE"></script>
+  <script src="/js/create.js" integrity="sha384-VF8iwfwAE8Kztr3gOgYWTha2JDFiZj1ieqfKCGp3dz6DiwlOYCU2tv1XgCR4shAI"></script>
+  <script src="/js/trusted.js" integrity="sha384-wD4K/p/w1yS+yG9H9WP1Co0/TJmy2sUwC5iW6zEYPmGvptqUENoVprXBdHHz+3Mr"></script>
 </body>
 </html>

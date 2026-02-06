@@ -30,7 +30,6 @@ pub struct Config {
 
     // Rate limiting
     pub rate_limit_paste_per_min: u32,
-    pub rate_limit_paste_per_hour: u32,
     pub rate_limit_auth_per_min: u32,
 }
 
@@ -99,7 +98,6 @@ impl Config {
 
         // Rate limiting
         let rate_limit_paste_per_min = parse_env_or_default("RATE_LIMIT_PASTE_PER_MIN", 10)?;
-        let rate_limit_paste_per_hour = parse_env_or_default("RATE_LIMIT_PASTE_PER_HOUR", 100)?;
         let rate_limit_auth_per_min = parse_env_or_default("RATE_LIMIT_AUTH_PER_MIN", 5)?;
 
         Ok(Config {
@@ -117,7 +115,6 @@ impl Config {
             challenge_ttl_secs,
             public_allowed_extensions,
             rate_limit_paste_per_min,
-            rate_limit_paste_per_hour,
             rate_limit_auth_per_min,
         })
     }
@@ -160,7 +157,6 @@ mod tests {
         env::remove_var("CHALLENGE_TTL_SECS");
         env::remove_var("PUBLIC_ALLOWED_EXTENSIONS");
         env::remove_var("RATE_LIMIT_PASTE_PER_MIN");
-        env::remove_var("RATE_LIMIT_PASTE_PER_HOUR");
         env::remove_var("RATE_LIMIT_AUTH_PER_MIN");
     }
 
@@ -261,7 +257,6 @@ mod tests {
         assert_eq!(config.challenge_ttl_secs, 30);
         assert_eq!(config.public_allowed_extensions, vec!["md", "txt"]);
         assert_eq!(config.rate_limit_paste_per_min, 10);
-        assert_eq!(config.rate_limit_paste_per_hour, 100);
         assert_eq!(config.rate_limit_auth_per_min, 5);
 
         clear_test_env();

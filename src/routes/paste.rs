@@ -141,6 +141,20 @@ pub async fn create_paste(
     // Store paste
     storage::paste::store_paste(&mut con, &paste, ttl_secs).await?;
 
+    // On first upload, update user TTL from idle (48h) to active (24h)
+    if let Some(ref session) = auth_session {
+        let existing_pastes = storage::paste::get_user_paste_ids(&mut con, &session.user_id).await?;
+        // Set has exactly 1 entry (the paste we just added) = first upload
+        if existing_pastes.len() == 1 {
+            storage::user::update_user_ttl(
+                &mut con,
+                &session.user_id,
+                state.config.user_active_ttl_secs,
+            )
+            .await?;
+        }
+    }
+
     tracing::info!(
         action = "paste_created",
         paste_id = %paste_id,
