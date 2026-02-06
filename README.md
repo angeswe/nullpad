@@ -2,6 +2,8 @@
 
 Zero-knowledge encrypted paste and file sharing. Server never sees plaintext.
 
+**Live instance**: [nullpad.io](https://nullpad.io) — Note: nullpad.io is behind Cloudflare, which logs requests. Self-host for maximum privacy.
+
 ## What is nullpad?
 
 A privacy-first pastebin where all encryption happens in your browser. The server only stores ciphertext — no plaintext, no keys, no user secrets. Share sensitive data with confidence.
@@ -98,6 +100,13 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - All Redis keys have TTLs by default — trusted users may create "forever" pastes with no expiration
 - Burn-after-reading uses atomic Lua script (no race conditions)
 - Burn and admin delete clean up user_pastes references atomically
+
+**Logging**
+- No HTTP access logs — nullpad does not log request paths, paste IDs, or IP addresses
+- Only security-relevant events are logged: rate limit triggers (hashed IP), auth failures, admin actions
+- This is intentional — access logs would undermine the zero-knowledge model
+
+**Note on CDN/Proxy logging**: If you deploy behind Cloudflare, nginx, or another reverse proxy, those services may log requests independently. Nullpad has no control over upstream logging. For maximum privacy, review your proxy's logging configuration.
 
 ## Tech Stack
 
