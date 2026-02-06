@@ -11,7 +11,7 @@ RUN mkdir -p src && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs && \
     cargo build --release && \
-    rm -rf src
+    rm -rf src target/release/nullpad target/release/deps/nullpad-* target/release/deps/libnullpad-* target/release/.fingerprint/nullpad-*
 
 # Copy source code and build for real
 COPY src ./src
