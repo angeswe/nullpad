@@ -167,19 +167,37 @@
           ALLOWED_TAGS: [
             'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'hr',
             'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
-            'em', 'strong', 'del', 's', 'a', 'img',
+            'em', 'strong', 'del', 's', 'a',
             'table', 'thead', 'tbody', 'tr', 'th', 'td',
             'div', 'span', 'sup', 'sub', 'details', 'summary',
             'dl', 'dt', 'dd', 'kbd', 'mark', 'abbr'
           ],
           ALLOWED_ATTR: [
-            'href', 'src', 'alt', 'title', 'class',
+            'href', 'alt', 'title', 'class',
             'align', 'colspan', 'rowspan', 'scope', 'open'
           ],
           ALLOW_DATA_ATTR: false
         };
+        // Allow class only on <code> elements (for highlight.js syntax themes)
+        DOMPurify.addHook('uponSanitizeAttribute', function(node, data) {
+          if (data.attrName === 'class' && node.tagName !== 'CODE') {
+            data.keepAttr = false;
+          }
+        });
+        // Force external links to open in new tab with noopener
+        DOMPurify.addHook('afterSanitizeAttributes', function(node) {
+          if (node.tagName === 'A' && node.hasAttribute('href')) {
+            const href = node.getAttribute('href');
+            if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
+              node.setAttribute('target', '_blank');
+              node.setAttribute('rel', 'noopener noreferrer');
+            }
+          }
+        });
         // DOMPurify.sanitize() returns safe HTML — this is the intended usage pattern
+        // (DOMPurify is an HTML sanitizer library, this is the correct usage)
         contentDisplay.innerHTML = DOMPurify.sanitize(rawHtml, purifyConfig);
+        DOMPurify.removeAllHooks();
         contentDisplay.classList.add('markdown-body');
 
         // Highlight code blocks

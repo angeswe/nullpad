@@ -173,7 +173,7 @@ pub async fn create_paste(
             }
         }
     } else {
-        requested_ttl.min(state.config.max_ttl_secs)
+        requested_ttl.clamp(60, state.config.max_ttl_secs)
     };
 
     // Generate paste ID

@@ -1,7 +1,7 @@
 # Multi-stage build for minimal runtime image
 
 # Stage 1: Build
-FROM rust:slim-bookworm AS builder
+FROM rust:slim-bookworm@sha256:5c5066e3f3bdd22a5cec7ba22ef0ee6e0bf6eaf63b65b63c9bf25f6f69a5e26a AS builder
 
 WORKDIR /build
 
@@ -18,7 +18,7 @@ COPY src ./src
 RUN cargo build --release
 
 # Stage 2: Runtime
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:6458e6ce2b6448e31bfdced4be7d8aa88d389e6694ab09f5a718a694abe147f4
 
 # Install runtime dependencies and apply security updates
 RUN apt-get update && \

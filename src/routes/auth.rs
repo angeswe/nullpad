@@ -68,6 +68,22 @@ pub async fn request_challenge(
         return Err(AppError::RateLimited);
     }
 
+    // Per-alias rate limit to prevent challenge overwrite attacks
+    // (attacker repeatedly requesting challenges to invalidate legitimate user's nonce)
+    let alias_rate_key = format!("ratelimit:challenge_alias:{}", req.alias);
+    let alias_allowed = check_rate_limit(
+        &mut con,
+        &alias_rate_key,
+        3, // max 3 challenges per alias per 30s window
+        30,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    if !alias_allowed {
+        return Err(AppError::RateLimited);
+    }
+
     // Generate nonce regardless of whether user exists to prevent alias enumeration
     let nonce = generate_challenge_nonce();
 
@@ -321,7 +337,7 @@ pub async fn logout(
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
-    storage::session::delete_session(&mut con, &session.token).await?;
+    storage::session::delete_session(&mut con, &session.token, &session.user_id).await?;
 
     tracing::info!(action = "logout", user_id = %session.user_id, "User logged out");
 

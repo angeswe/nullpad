@@ -262,9 +262,14 @@ where
     C: AsyncCommands,
 {
     let mut users = Vec::new();
+    // Use negation pattern to exclude user_pastes:* and user_sessions:* keys
     let keys = super::scan_keys(con, "user:*").await?;
 
     for key in keys {
+        // Skip non-user keys that match the broad pattern
+        if key.starts_with("user_pastes:") || key.starts_with("user_sessions:") {
+            continue;
+        }
         let json: Option<String> = con.get(&key).await?;
         if let Some(data) = json {
             // Wrap user JSON in Zeroizing

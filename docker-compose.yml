@@ -9,26 +9,32 @@ services:
     env_file:
       - .env
     environment:
-      - REDIS_URL=redis://:${REDIS_PASSWORD:-changeme}@redis:6379
+      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379
       - RUST_LOG=info
     restart: unless-stopped
     networks:
       - internal
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:b9f6cf0cab55fdd102fd2182deeae150457943d33439d18c6e2fc5666d3228c1
     volumes:
       - redis-data:/data
     restart: unless-stopped
+    # NOTE: AOF persistence means burn-after-reading pastes persist in the AOF
+    # file until rewrite. Aggressive rewrite settings below minimize this window.
+    # For stronger burn guarantees, disable AOF (--appendonly no --save "").
     command: >-
       redis-server --appendonly yes
-      --requirepass "${REDIS_PASSWORD:-changeme}"
+      --auto-aof-rewrite-percentage 50
+      --auto-aof-rewrite-min-size 16mb
+      --requirepass "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
+      --maxmemory "${REDIS_MAXMEMORY:-2gb}"
+      --maxmemory-policy allkeys-lru
       --rename-command FLUSHALL ""
       --rename-command FLUSHDB ""
-      --rename-command CONFIG ""
       --rename-command DEBUG ""
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-changeme}", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$REDIS_PASSWORD redis-cli ping"]
       interval: 5s
       timeout: 3s
       retries: 5

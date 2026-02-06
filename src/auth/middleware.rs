@@ -45,6 +45,18 @@ impl FromRequestParts<AppState> for AuthSession {
             .ok_or_else(|| AppError::Unauthorized("Invalid authorization format".to_string()))?
             .to_string();
 
+        // Validate token format: must be exactly 44 chars of base64
+        // (32 bytes of randomness = 44 base64 chars with padding)
+        if token.len() != 44
+            || !token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+        {
+            return Err(AppError::Unauthorized(
+                "Invalid or expired session".to_string(),
+            ));
+        }
+
         // Get Redis connection
         let mut con = state
             .redis

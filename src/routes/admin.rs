@@ -39,7 +39,7 @@ pub async fn create_invite(
     // Build invite URL
     let url = format!("/invite.html?token={}", token);
 
-    tracing::info!(action = "invite_created", token = %token, "Admin created invite");
+    tracing::info!(action = "invite_created", token_prefix = %&token[..6], "Admin created invite");
 
     Ok(Json(CreateInviteResponse { token, url }))
 }
@@ -90,7 +90,7 @@ pub async fn revoke_invite(
         return Err(AppError::NotFound("Invite not found".to_string()));
     }
 
-    tracing::info!(action = "invite_revoked", token = %token, "Admin revoked invite");
+    tracing::info!(action = "invite_revoked", token_prefix = %&token[..6], "Admin revoked invite");
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -131,6 +131,12 @@ pub async fn revoke_user(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Don't allow deleting the admin user (check before validate_id
+    // since admin ID is "admin" which doesn't match nanoid format)
+    if id == "admin" {
+        return Err(AppError::Forbidden("Cannot delete admin user".to_string()));
+    }
+
     super::validate_id(&id, "user ID", 12)?;
 
     let mut con = state
@@ -144,18 +150,13 @@ pub async fn revoke_user(
         .await?
         .ok_or_else(|| AppError::NotFound("User not found".to_string()))?;
 
-    // Don't allow deleting the admin user
-    if id == "admin" {
-        return Err(AppError::Forbidden("Cannot delete admin user".to_string()));
-    }
-
-    // Delete user first to prevent new sessions
-    storage::user::delete_user(&mut con, &id).await?;
-
-    // Delete user's sessions
+    // Delete user's sessions first (prevents any in-flight auth from working)
     storage::session::delete_user_sessions(&mut con, &id).await?;
 
-    // Delete user's pastes
+    // Delete user record (prevents new logins)
+    storage::user::delete_user(&mut con, &id).await?;
+
+    // Delete user's pastes last
     storage::paste::delete_user_pastes(&mut con, &id).await?;
 
     tracing::warn!(action = "user_revoked", user_id = %id, alias = %user.alias, "Admin revoked user");

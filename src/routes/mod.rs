@@ -46,7 +46,22 @@ pub fn client_ip(headers: &HeaderMap, addr: &SocketAddr, trusted_proxy_count: us
         }
     }
     // No proxy trust or no valid XFF: use direct connection IP
-    addr.ip()
+    normalize_ip(addr.ip())
+}
+
+/// Normalize IPv4-mapped IPv6 addresses to their IPv4 equivalent.
+/// Prevents rate limit bypass via `::ffff:1.2.3.4` vs `1.2.3.4`.
+fn normalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                IpAddr::V4(v4)
+            } else {
+                IpAddr::V6(v6)
+            }
+        }
+        v4 => v4,
+    }
 }
 
 /// GET /healthz — Health check endpoint for liveness/readiness probes.
