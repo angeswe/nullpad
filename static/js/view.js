@@ -27,6 +27,8 @@
   let encryptedData = null;
   let metadata = null;
   let decryptedBytes = null;
+  let pinAttempts = 0;
+  let pinBackoffUntil = 0;
 
   // ============================================================================
   // URL Parsing
@@ -66,6 +68,12 @@
 
     if (!pasteId || !encryptionKey) {
       showError('Invalid paste URL. Missing ID or encryption key.');
+      return false;
+    }
+
+    // Validate paste ID format (nanoid: 12 chars, alphanumeric + hyphen + underscore)
+    if (!/^[A-Za-z0-9_-]{12}$/.test(pasteId)) {
+      showError('Invalid paste ID format.');
       return false;
     }
 
@@ -142,11 +150,25 @@
                         metadata.mimetype === 'text/markdown';
 
       if (isMarkdown && typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined') {
-        // Render markdown, then sanitize with DOMPurify to prevent XSS
-        // DOMPurify is REQUIRED - no unsafe fallback to raw HTML
+        // Render markdown, then sanitize with DOMPurify using strict allowlist
         const rawHtml = marked.parse(decrypted.content);
-        const safeHtml = DOMPurify.sanitize(rawHtml);
-        contentDisplay.innerHTML = safeHtml;
+        const purifyConfig = {
+          ALLOWED_TAGS: [
+            'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'hr',
+            'ul', 'ol', 'li', 'blockquote', 'pre', 'code',
+            'em', 'strong', 'del', 's', 'a', 'img',
+            'table', 'thead', 'tbody', 'tr', 'th', 'td',
+            'div', 'span', 'sup', 'sub', 'details', 'summary',
+            'dl', 'dt', 'dd', 'kbd', 'mark', 'abbr'
+          ],
+          ALLOWED_ATTR: [
+            'href', 'src', 'alt', 'title',
+            'align', 'colspan', 'rowspan', 'scope', 'open'
+          ],
+          ALLOW_DATA_ATTR: false
+        };
+        // DOMPurify.sanitize() returns safe HTML — this is the intended usage pattern
+        contentDisplay.innerHTML = DOMPurify.sanitize(rawHtml, purifyConfig);
         contentDisplay.classList.add('markdown-body');
 
         // Highlight code blocks
@@ -218,18 +240,39 @@
     const pin = pinInput.value.trim();
     if (!pin) return;
 
-    try {
-      const decrypted = await decryptPaste(pin);
-      showContent(decrypted);
-    } catch (err) {
-      // Show inline error instead of alert()
+    // Enforce exponential backoff on failed PIN attempts
+    const now = Date.now();
+    if (now < pinBackoffUntil) {
+      const waitSecs = Math.ceil((pinBackoffUntil - now) / 1000);
       let errEl = pinPrompt.querySelector('.status-error');
       if (!errEl) {
         errEl = document.createElement('div');
         errEl.className = 'status-error';
         pinForm.parentNode.insertBefore(errEl, pinForm);
       }
-      errEl.textContent = 'Invalid PIN. Please try again.';
+      errEl.textContent = `Too many attempts. Wait ${waitSecs}s before trying again.`;
+      return;
+    }
+
+    try {
+      const decrypted = await decryptPaste(pin);
+      showContent(decrypted);
+    } catch (err) {
+      pinAttempts++;
+      // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s max
+      const delaySecs = Math.min(Math.pow(2, pinAttempts - 1), 30);
+      pinBackoffUntil = Date.now() + delaySecs * 1000;
+
+      let errEl = pinPrompt.querySelector('.status-error');
+      if (!errEl) {
+        errEl = document.createElement('div');
+        errEl.className = 'status-error';
+        pinForm.parentNode.insertBefore(errEl, pinForm);
+      }
+      const remainingSecs = Math.ceil((pinBackoffUntil - Date.now()) / 1000);
+      errEl.textContent = pinAttempts >= 3
+        ? `Invalid PIN. Wait ${remainingSecs}s before next attempt.`
+        : 'Invalid PIN. Please try again.';
       pinInput.value = '';
       pinInput.focus();
     }

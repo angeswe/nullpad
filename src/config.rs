@@ -32,6 +32,9 @@ pub struct Config {
     // Rate limiting
     pub rate_limit_paste_per_min: u32,
     pub rate_limit_auth_per_min: u32,
+
+    // Proxy
+    pub trusted_proxy_count: usize,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -120,6 +123,9 @@ impl Config {
         let rate_limit_paste_per_min = parse_env_or_default("RATE_LIMIT_PASTE_PER_MIN", 10)?;
         let rate_limit_auth_per_min = parse_env_or_default("RATE_LIMIT_AUTH_PER_MIN", 5)?;
 
+        // Proxy configuration
+        let trusted_proxy_count = parse_env_or_default("TRUSTED_PROXY_COUNT", 0)?;
+
         Ok(Config {
             admin_pubkey,
             admin_alias,
@@ -136,6 +142,7 @@ impl Config {
             public_allowed_extensions,
             rate_limit_paste_per_min,
             rate_limit_auth_per_min,
+            trusted_proxy_count,
         })
     }
 }
@@ -183,6 +190,7 @@ mod tests {
         env::remove_var("PUBLIC_ALLOWED_EXTENSIONS");
         env::remove_var("RATE_LIMIT_PASTE_PER_MIN");
         env::remove_var("RATE_LIMIT_AUTH_PER_MIN");
+        env::remove_var("TRUSTED_PROXY_COUNT");
     }
 
     #[test]
@@ -221,17 +229,17 @@ mod tests {
         let _guard = lock_test();
         clear_test_env();
 
-        // Note: dotenv may reload ADMIN_PUBKEY="" from .env, so this may
-        // produce either MissingVar or InvalidValue - both are correct.
+        // Set ADMIN_PUBKEY to empty to prevent dotenvy from reloading
+        // a valid key from .env (dotenvy doesn't override existing vars).
+        // This triggers the "cannot be empty" check in from_env().
+        env::set_var("ADMIN_PUBKEY", "");
+
         let result = Config::from_env();
         assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            matches!(&err, ConfigError::MissingVar(s) if s == "ADMIN_PUBKEY")
-                || matches!(&err, ConfigError::InvalidValue(s, _) if s == "ADMIN_PUBKEY"),
-            "Expected MissingVar or InvalidValue for ADMIN_PUBKEY, got: {:?}",
-            err,
-        );
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ADMIN_PUBKEY"
+        ));
 
         clear_test_env();
     }

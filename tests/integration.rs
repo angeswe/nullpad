@@ -59,6 +59,7 @@ async fn spawn_test_server() -> (String, redis::aio::MultiplexedConnection) {
         public_allowed_extensions: vec!["md".to_string(), "txt".to_string()],
         rate_limit_paste_per_min: 100,
         rate_limit_auth_per_min: 100,
+        trusted_proxy_count: 0,
     };
 
     let state = AppState {

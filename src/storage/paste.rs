@@ -69,6 +69,7 @@ where
     let key = format!("paste:{}", id);
 
     // Lua script: GET paste, parse JSON for burn flag, DEL if burn + SREM from user_pastes
+    // Key prefixes passed as ARGV to avoid hardcoding in Lua
     let script = redis::Script::new(
         r#"
         local val = redis.call('GET', KEYS[1])
@@ -79,14 +80,19 @@ where
         if obj.burn_after_reading == true then
             redis.call('DEL', KEYS[1])
             if type(obj.owner_id) == 'string' then
-                redis.call('SREM', 'user_pastes:' .. obj.owner_id, ARGV[1])
+                redis.call('SREM', ARGV[2] .. obj.owner_id, ARGV[1])
             end
         end
         return val
         "#,
     );
 
-    let json: Option<String> = script.key(&key).arg(id).invoke_async(con).await?;
+    let json: Option<String> = script
+        .key(&key)
+        .arg(id)
+        .arg("user_pastes:")
+        .invoke_async(con)
+        .await?;
 
     match json {
         Some(data) => {
@@ -115,6 +121,7 @@ where
 {
     let key = format!("paste:{}", id);
 
+    // Key prefixes passed as ARGV to avoid hardcoding in Lua
     let script = redis::Script::new(
         r#"
         local val = redis.call('GET', KEYS[1])
@@ -124,13 +131,18 @@ where
         redis.call('DEL', KEYS[1])
         local obj = cjson.decode(val)
         if type(obj.owner_id) == 'string' then
-            redis.call('SREM', 'user_pastes:' .. obj.owner_id, ARGV[1])
+            redis.call('SREM', ARGV[2] .. obj.owner_id, ARGV[1])
         end
         return 1
         "#,
     );
 
-    let deleted: i32 = script.key(&key).arg(id).invoke_async(con).await?;
+    let deleted: i32 = script
+        .key(&key)
+        .arg(id)
+        .arg("user_pastes:")
+        .invoke_async(con)
+        .await?;
     Ok(deleted > 0)
 }
 

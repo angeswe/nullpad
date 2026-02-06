@@ -49,7 +49,7 @@ pub async fn request_challenge(
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
-    let ip = super::client_ip(&headers, &addr);
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let rate_limit_key = format!("ratelimit:auth:{}", ip);
     let allowed = check_rate_limit(
         &mut con,
@@ -193,6 +193,23 @@ pub async fn register(
     let _invite = storage::user::get_and_delete_invite(&mut con, &req.token)
         .await?
         .ok_or_else(|| AppError::NotFound("Invite not found or expired".to_string()))?;
+
+    // Validate pubkey: must be valid base64, 32 bytes, and a valid Ed25519 public key
+    let pubkey_bytes = general_purpose::STANDARD
+        .decode(&req.pubkey)
+        .map_err(|_| AppError::BadRequest("Invalid public key: not valid base64".to_string()))?;
+    if pubkey_bytes.len() != 32 {
+        return Err(AppError::BadRequest(format!(
+            "Invalid public key: expected 32 bytes, got {}",
+            pubkey_bytes.len()
+        )));
+    }
+    let key_array: [u8; 32] = pubkey_bytes
+        .try_into()
+        .map_err(|_| AppError::BadRequest("Invalid public key: wrong length".to_string()))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key_array).map_err(|_| {
+        AppError::BadRequest("Invalid public key: not a valid Ed25519 key".to_string())
+    })?;
 
     // Check if alias is already taken
     let existing = storage::user::get_user_by_alias(&mut con, &req.alias).await?;

@@ -152,13 +152,14 @@ where
     })?;
 
     // Atomic upsert: read old admin, delete stale alias, write new admin + alias
+    // Alias key prefix passed as ARGV[3] to avoid hardcoding in Lua
     let script = redis::Script::new(
         r#"
         local old_json = redis.call('GET', KEYS[1])
         if old_json then
             local old_user = cjson.decode(old_json)
             if type(old_user.alias) == 'string' and old_user.alias ~= ARGV[2] then
-                redis.call('DEL', 'alias:' .. old_user.alias)
+                redis.call('DEL', ARGV[3] .. old_user.alias)
             end
         end
         redis.call('SET', KEYS[1], ARGV[1])
@@ -172,6 +173,7 @@ where
         .key(&new_alias_key)
         .arg(&json)
         .arg(alias)
+        .arg("alias:")
         .invoke_async(con)
         .await?;
 

@@ -147,13 +147,20 @@ pub async fn check_rate_limit<C>(
 where
     C: AsyncCommands,
 {
-    // Increment counter
-    let count: u32 = con.incr(key, 1).await?;
+    // Atomic INCR + conditional EXPIRE via Lua script.
+    // Prevents race condition where server crash between INCR and EXPIRE
+    // leaves the key without a TTL, permanently blocking that IP.
+    let script = redis::Script::new(
+        r#"
+        local count = redis.call('INCR', KEYS[1])
+        if count == 1 then
+            redis.call('EXPIRE', KEYS[1], ARGV[1])
+        end
+        return count
+        "#,
+    );
 
-    // Set TTL on first request
-    if count == 1 {
-        con.expire::<_, ()>(key, window_secs as i64).await?;
-    }
+    let count: u32 = script.key(key).arg(window_secs).invoke_async(con).await?;
 
     Ok(count <= max)
 }

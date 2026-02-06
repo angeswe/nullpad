@@ -30,21 +30,23 @@ pub fn validate_id(id: &str, label: &str, expected_len: usize) -> Result<(), App
 
 /// Extract client IP from X-Forwarded-For header, falling back to ConnectInfo.
 ///
-/// Trusts the first (leftmost) IP in X-Forwarded-For, which is the original client.
-/// Falls back to the direct connection IP if no forwarded header is present.
-pub fn client_ip(headers: &HeaderMap, addr: &SocketAddr) -> IpAddr {
-    headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.split(',').next())
-        .and_then(|s| s.trim().parse::<IpAddr>().ok())
-        .or_else(|| {
-            headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<IpAddr>().ok())
-        })
-        .unwrap_or_else(|| addr.ip())
+/// When `trusted_proxy_count` > 0, reads the Nth-from-right IP in X-Forwarded-For
+/// (e.g., with 1 trusted proxy, reads the 2nd-from-right, which is the real client).
+/// When `trusted_proxy_count` == 0, falls back to direct connection IP (no proxy trust).
+pub fn client_ip(headers: &HeaderMap, addr: &SocketAddr, trusted_proxy_count: usize) -> IpAddr {
+    if trusted_proxy_count > 0 {
+        if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+            let ips: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
+            // With N trusted proxies, the real client IP is at position len - N - 1
+            // (proxies append, so rightmost N entries are proxy IPs)
+            let target_idx = ips.len().saturating_sub(trusted_proxy_count + 1);
+            if let Ok(ip) = ips[target_idx].parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+    // No proxy trust or no valid XFF: use direct connection IP
+    addr.ip()
 }
 
 /// GET /healthz — Health check endpoint for liveness/readiness probes.

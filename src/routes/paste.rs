@@ -36,7 +36,7 @@ pub async fn create_paste(
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
-    let ip = super::client_ip(&headers, &addr);
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let rate_limit_key = format!("ratelimit:paste:{}", ip);
     let allowed = check_rate_limit(
         &mut con,
@@ -93,6 +93,36 @@ pub async fn create_paste(
     let metadata = metadata.ok_or_else(|| AppError::BadRequest("Missing metadata".to_string()))?;
     let encrypted_content =
         encrypted_content.ok_or_else(|| AppError::BadRequest("Missing file".to_string()))?;
+
+    // Validate filename: max 255 chars, no null bytes, no path separators
+    if metadata.filename.len() > 255 {
+        return Err(AppError::BadRequest(
+            "Filename too long (max 255 characters)".to_string(),
+        ));
+    }
+    if metadata.filename.contains('\0')
+        || metadata.filename.contains('/')
+        || metadata.filename.contains('\\')
+    {
+        return Err(AppError::BadRequest(
+            "Filename contains invalid characters".to_string(),
+        ));
+    }
+    if metadata.filename.is_empty() {
+        return Err(AppError::BadRequest("Filename cannot be empty".to_string()));
+    }
+
+    // Validate content_type: max 127 chars, ASCII only, no null bytes
+    if metadata.content_type.len() > 127 {
+        return Err(AppError::BadRequest(
+            "Content type too long (max 127 characters)".to_string(),
+        ));
+    }
+    if !metadata.content_type.is_ascii() || metadata.content_type.contains('\0') {
+        return Err(AppError::BadRequest(
+            "Content type contains invalid characters".to_string(),
+        ));
+    }
 
     // Check file size
     if encrypted_content.len() > state.config.max_upload_bytes {
@@ -207,7 +237,7 @@ pub async fn get_paste(
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
     // Rate limit paste reads to prevent burn-after-reading abuse
-    let ip = super::client_ip(&headers, &addr);
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let rate_limit_key = format!("ratelimit:paste_read:{}", ip);
     let allowed = check_rate_limit(
         &mut con,

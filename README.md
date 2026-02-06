@@ -22,9 +22,9 @@ A privacy-first pastebin where all encryption happens in your browser. The serve
 cp .env.example .env
 
 # Generate admin keypair
-# Open tools/keygen.html in your browser, save the public key
-
-# Set ADMIN_PUBKEY in .env (base64-encoded Ed25519 public key)
+openssl genpkey -algorithm ED25519 -out admin_key.pem
+openssl pkey -in admin_key.pem -pubout -outform DER | tail -c 32 | base64
+# Save admin_key.pem securely, copy the base64 output to ADMIN_PUBKEY in .env
 nano .env
 
 # Start services
@@ -58,7 +58,7 @@ cargo run --release
 
 See `.env.example` for all available options. Key environment variables:
 
-- `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes) from tools/keygen.html (required)
+- `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes), generated via openssl (required)
 - `ADMIN_ALIAS` — Admin username (default: "admin")
 - `REDIS_URL` — Redis connection string (default: "redis://127.0.0.1:6379")
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")

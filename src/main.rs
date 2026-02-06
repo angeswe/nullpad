@@ -13,6 +13,7 @@ use nullpad::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
 #[tokio::main]
@@ -51,11 +52,16 @@ async fn main() {
     // - API routes (with state)
     // - Static file serving (fallback)
     // - Security headers middleware
+    // Explicit CORS: deny all cross-origin requests (single-origin deployment).
+    // CorsLayer::new() with no allowed origins rejects all CORS preflight requests.
+    let cors = CorsLayer::new();
+
     let app = routes::api_router()
         .fallback_service(ServeDir::new("static"))
         .layer(axum::extract::DefaultBodyLimit::max(
             config.max_upload_bytes,
         ))
+        .layer(cors)
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(state);
 
