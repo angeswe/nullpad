@@ -205,10 +205,13 @@
             }
           }
         });
-        // DOMPurify.sanitize() returns safe HTML — this is the intended usage pattern
-        // (DOMPurify is an HTML sanitizer library, this is the correct usage)
-        contentDisplay.innerHTML = DOMPurify.sanitize(rawHtml, purifyConfig);
-        DOMPurify.removeAllHooks();
+        try {
+          // DOMPurify.sanitize() returns safe HTML — this is the intended usage pattern
+          // (DOMPurify is an HTML sanitizer library, this is the correct usage)
+          contentDisplay.innerHTML = DOMPurify.sanitize(rawHtml, purifyConfig);
+        } finally {
+          DOMPurify.removeAllHooks();
+        }
         contentDisplay.classList.add('markdown-body');
 
         // Highlight code blocks
