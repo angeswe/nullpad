@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' fonts.googleapis.com; font-src fonts.gstatic.com; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'">
+  <title>How It Works - Nullpad</title>
+  <link rel="icon" href="/favicon.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <div class="container">
+    <div class="page-header">
+      <h1>How Nullpad Works</h1>
+      <p>Zero-knowledge encrypted paste sharing</p>
+    </div>
+
+    <div class="panel info-section">
+      <div class="panel-header">
+        <h3>End-to-End Encryption</h3>
+      </div>
+      <div class="panel-body">
+        <p class="text-muted">
+          All content is encrypted in your browser using <code>AES-256-GCM</code> via the Web Crypto API before being uploaded to the server. The server only stores ciphertext and never has access to your plaintext content or encryption keys.
+        </p>
+      </div>
+    </div>
+
+    <div class="panel info-section">
+      <div class="panel-header">
+        <h3>Key in URL Fragment</h3>
+      </div>
+      <div class="panel-body">
+        <p class="text-muted">
+          The decryption key lives in the URL fragment (the part after <code>#</code>). Browsers never send fragments to servers, so only the person with the complete URL can decrypt the content.
+        </p>
+      </div>
+    </div>
+
+    <div class="panel info-section">
+      <div class="panel-header">
+        <h3>Optional PIN Protection</h3>
+      </div>
+      <div class="panel-body">
+        <p class="text-muted">
+          Adding a PIN provides a second layer of protection. The encryption key is derived using <code>Argon2id</code> from both the random key and your PIN. Even if someone intercepts the URL, they cannot decrypt the content without the PIN.
+        </p>
+      </div>
+    </div>
+
+    <div class="panel info-section">
+      <div class="panel-header">
+        <h3>Trusted User Authentication</h3>
+      </div>
+      <div class="panel-body">
+        <p class="text-muted">
+          Trusted users authenticate using <code>Ed25519</code> challenge-response signatures via the Web Crypto API. Your secret derives an Ed25519 keypair client-side using <code>Argon2id</code>. The server only stores public keys and never sees your secret.
+        </p>
+      </div>
+    </div>
+
+    <div class="panel info-section">
+      <div class="panel-header">
+        <h3>Auto-Expiring Data</h3>
+      </div>
+      <div class="panel-body">
+        <p class="text-muted">
+          All data is stored in Redis with time-to-live (TTL) values. Pastes automatically expire based on your chosen duration (1 minute to 1 week). Burn-after-reading pastes use an atomic read-and-delete operation to ensure they're destroyed after a single view. Trusted users can create "forever" pastes that don't expire.
+        </p>
+      </div>
+    </div>
+
+    <div class="panel info-section">
+      <div class="panel-header">
+        <h3>Open Source</h3>
+      </div>
+      <div class="panel-body">
+        <p class="text-muted">
+          Nullpad is licensed under <code>AGPL-3.0</code> and the full source code is available on <a href="https://github.com/angeswe/nullpad" target="_blank" rel="noopener">GitHub</a>. You can audit the code, self-host your own instance, or contribute improvements.
+        </p>
+      </div>
+    </div>
+
+    <div class="panel-footer">
+      <a href="/" class="btn btn-secondary">Back to Nullpad</a>
+    </div>
+  </div>
+
+  <footer class="site-footer">
+    <a href="https://github.com/angeswe/nullpad" target="_blank" rel="noopener">GitHub</a>
+  </footer>
+</body>
+</html>
