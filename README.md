@@ -1,5 +1,8 @@
 # nullpad
 
+[![CI](https://github.com/angeswe/nullpad/actions/workflows/ci.yml/badge.svg)](https://github.com/angeswe/nullpad/actions/workflows/ci.yml)
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+
 Zero-knowledge encrypted paste and file sharing. Server never sees plaintext.
 
 **Live instance**: [nullpad.io](https://nullpad.io) — Note: nullpad.io is behind Cloudflare, which logs requests. Self-host for maximum privacy.
