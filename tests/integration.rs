@@ -78,6 +78,7 @@ async fn spawn_test_server_with_auth_limit(
         rate_limit_paste_per_min: 10000,
         rate_limit_auth_per_min: limit,
         trusted_proxy_count: 0,
+        max_sessions_per_user: 5,
     };
 
     let state = AppState {
@@ -607,6 +608,127 @@ async fn test_register_alias_validation() {
         .json(&serde_json::json!({"token": "abcdefghijklmnop", "alias": "user@domain", "pubkey": pubkey}))
         .send().await.unwrap();
     assert_eq!(resp.status(), 400);
+}
+
+#[tokio::test]
+async fn test_register_invite_not_consumed_on_validation_failure() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create an invite
+    let invite_token = nanoid::nanoid!(16);
+    let invite = nullpad::models::StoredInvite {
+        token: invite_token.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    nullpad::storage::user::store_invite(&mut con, &invite, 3600)
+        .await
+        .unwrap();
+
+    // Attempt 1: Invalid pubkey (not base64) -> 400
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": "testuser1",
+            "pubkey": "not-valid-base64!!!"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Verify invite still exists
+    let invite_key = format!("invite:{}", invite_token);
+    let exists: bool = con.exists(&invite_key).await.unwrap();
+    assert!(
+        exists,
+        "Invite should not be consumed after pubkey validation failure"
+    );
+
+    // Attempt 2: Invalid pubkey (wrong length) -> 400
+    let wrong_length_pubkey = general_purpose::STANDARD.encode([0u8; 16]); // 16 bytes instead of 32
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": "testuser2",
+            "pubkey": wrong_length_pubkey
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Verify invite still exists
+    let exists: bool = con.exists(&invite_key).await.unwrap();
+    assert!(
+        exists,
+        "Invite should not be consumed after pubkey length validation failure"
+    );
+
+    // Attempt 3: Valid pubkey but alias taken -> 400
+    // First create a user with the alias we want to use
+    let (_key1, pubkey1) = test_keypair();
+    let user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: "taken_alias".to_string(),
+        pubkey: pubkey1,
+        role: "trusted".to_string(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    nullpad::storage::user::store_user(&mut con, &user, 86400)
+        .await
+        .unwrap();
+
+    // Now try to register with the taken alias
+    let (_key2, pubkey2) = test_keypair();
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": "taken_alias",
+            "pubkey": pubkey2
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"].as_str().unwrap().contains("already taken"));
+
+    // Verify invite still exists after alias conflict
+    let exists: bool = con.exists(&invite_key).await.unwrap();
+    assert!(exists, "Invite should not be consumed when alias is taken");
+
+    // Attempt 4: Valid registration with available alias -> 200
+    let (_key3, pubkey3) = test_keypair();
+    let unique_alias = format!("valid_user_{}", nanoid::nanoid!(8));
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": unique_alias,
+            "pubkey": pubkey3
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // NOW the invite should be consumed
+    let exists: bool = con.exists(&invite_key).await.unwrap();
+    assert!(
+        !exists,
+        "Invite should be consumed after successful registration"
+    );
 }
 
 #[tokio::test]

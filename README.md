@@ -140,6 +140,75 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - **Public pastes**: Text/markdown paste only (no file upload), TTL up to 7 days
 - **Trusted users**: Any file type via drag & drop after registration, plus a "forever" (no expiration) option
 
+## Deployment
+
+**IMPORTANT**: Nullpad listens on plain HTTP (default `:3000`) and sets HSTS headers with preload. You MUST deploy behind a TLS-terminating reverse proxy in production.
+
+### Why TLS is Required
+
+The application sets `Strict-Transport-Security: max-age=63072000; includeSubDomains; preload` to ensure all connections use HTTPS. However, the Rust application itself does not handle TLS — this must be configured at the reverse proxy layer.
+
+### Reverse Proxy Examples
+
+#### nginx with TLS
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name paste.example.com;
+
+    ssl_certificate /path/to/fullchain.pem;
+    ssl_certificate_key /path/to/privkey.pem;
+
+    # Modern TLS configuration
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+
+# Redirect HTTP to HTTPS
+server {
+    listen 80;
+    server_name paste.example.com;
+    return 301 https://$server_name$request_uri;
+}
+```
+
+#### Caddy (automatic TLS)
+
+```
+paste.example.com {
+    reverse_proxy localhost:3000
+}
+```
+
+Caddy automatically obtains and renews TLS certificates via Let's Encrypt.
+
+### X-Forwarded-For Configuration
+
+Nullpad uses the `X-Forwarded-For` header for rate limiting when behind a reverse proxy. Set `TRUSTED_PROXY_COUNT` to the number of trusted proxies in your deployment:
+
+- `TRUSTED_PROXY_COUNT=0` (default): Uses the direct connection IP (no proxy)
+- `TRUSTED_PROXY_COUNT=1`: Trusts the first proxy (single nginx/Caddy instance)
+- `TRUSTED_PROXY_COUNT=2`: Trusts two proxies (e.g., Cloudflare + nginx)
+
+Example with Cloudflare + nginx:
+```bash
+TRUSTED_PROXY_COUNT=2
+```
+
+### Docker Deployment with TLS
+
+The provided `docker-compose.yml` exposes the application on port 3015 (HTTP only). In production, place a TLS-terminating reverse proxy in front of it (nginx, Caddy, Traefik, etc.) and do not expose port 3015 publicly.
+
 ## License
 
 AGPL-3.0 — see LICENSE file for details.

@@ -224,21 +224,83 @@ where
 
 /// Delete all pastes owned by a user.
 ///
-/// Also deletes the user_pastes set.
+/// Uses a Lua script to atomically delete all pastes and clean up the user_pastes SET.
+/// Only deletes the tracking SET if ALL pastes were successfully deleted. If some pastes
+/// fail to delete (e.g., Redis errors mid-loop), only removes successfully deleted paste IDs
+/// from the tracking SET, leaving the SET intact with remaining paste IDs.
+///
+/// This prevents orphaning forever pastes if Redis errors during deletion.
 pub async fn delete_user_pastes<C>(con: &mut C, user_id: &str) -> Result<(), redis::RedisError>
 where
     C: AsyncCommands,
 {
-    let paste_ids = get_user_paste_ids(con, user_id).await?;
-
-    // Delete each paste
-    for paste_id in paste_ids {
-        let _ = delete_paste(con, &paste_id).await;
-    }
-
-    // Delete the user_pastes set
     let user_pastes_key = format!("user_pastes:{}", user_id);
-    con.del::<_, ()>(&user_pastes_key).await?;
+
+    // Lua script to atomically delete all user pastes
+    // Returns number of successfully deleted pastes and total count
+    //
+    // KEYS[1] = user_pastes:{user_id}
+    // ARGV[1] = paste key prefix ("paste:")
+    //
+    // Strategy:
+    // - Fetch all paste IDs from the SET
+    // - Try to delete each paste, tracking successes and failures
+    // - If all succeeded, delete the entire SET
+    // - If some failed, only SREM the successfully deleted IDs
+    //
+    // Return format: {deleted_count, total_count}
+    let script = redis::Script::new(
+        r#"
+        local user_pastes_key = KEYS[1]
+        local paste_prefix = ARGV[1]
+
+        local paste_ids = redis.call('SMEMBERS', user_pastes_key)
+        if #paste_ids == 0 then
+            redis.call('DEL', user_pastes_key)
+            return {0, 0}
+        end
+
+        local deleted = {}
+        local failed = 0
+
+        for i, paste_id in ipairs(paste_ids) do
+            local paste_key = paste_prefix .. paste_id
+            local ok = pcall(function()
+                redis.call('DEL', paste_key)
+            end)
+            if ok then
+                table.insert(deleted, paste_id)
+            else
+                failed = failed + 1
+            end
+        end
+
+        if failed == 0 then
+            -- All pastes deleted successfully, delete the tracking SET
+            redis.call('DEL', user_pastes_key)
+        elseif #deleted > 0 then
+            -- Some pastes deleted, some failed: remove only the successfully deleted IDs
+            redis.call('SREM', user_pastes_key, unpack(deleted))
+        end
+        -- If #deleted == 0 and failed > 0, leave the SET intact with all paste IDs
+
+        return {#deleted, #paste_ids}
+        "#,
+    );
+
+    let result: Vec<i32> = script
+        .key(&user_pastes_key)
+        .arg("paste:")
+        .invoke_async(con)
+        .await?;
+
+    // Log if some pastes failed to delete (for debugging)
+    if result.len() >= 2 && result[0] < result[1] {
+        eprintln!(
+            "Warning: Only deleted {}/{} pastes for user {}",
+            result[0], result[1], user_id
+        );
+    }
 
     Ok(())
 }

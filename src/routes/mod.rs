@@ -41,7 +41,7 @@ pub fn client_ip(headers: &HeaderMap, addr: &SocketAddr, trusted_proxy_count: us
             // (proxies append, so rightmost N entries are proxy IPs)
             let target_idx = ips.len().saturating_sub(trusted_proxy_count + 1);
             if let Ok(ip) = ips[target_idx].parse::<IpAddr>() {
-                return ip;
+                return normalize_ip(ip);
             }
         }
     }

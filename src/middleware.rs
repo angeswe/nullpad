@@ -57,6 +57,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     let headers = response.headers_mut();
 
     // nullpad-kry: Essential security headers
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert(
         "x-content-type-options",
@@ -80,6 +81,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
              script-src 'self' 'wasm-unsafe-eval'; \
              style-src 'self' fonts.googleapis.com; \
              font-src fonts.gstatic.com; \
+             object-src 'none'; \
              frame-ancestors 'none'; \
              base-uri 'self'; \
              form-action 'self'",
@@ -120,6 +122,13 @@ mod tests {
 
         let headers = response.headers();
 
+        // Verify cache control
+        assert_eq!(
+            headers.get("cache-control").unwrap(),
+            "no-store",
+            "Cache-Control must be no-store to prevent caching encrypted content"
+        );
+
         // Verify nullpad-kry headers
         assert_eq!(
             headers.get("referrer-policy").unwrap(),
@@ -147,6 +156,7 @@ mod tests {
         assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
         assert!(csp.contains("style-src 'self' fonts.googleapis.com"));
         assert!(csp.contains("font-src fonts.gstatic.com"));
+        assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("base-uri 'self'"));
         assert!(csp.contains("form-action 'self'"));

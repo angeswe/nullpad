@@ -35,6 +35,9 @@ pub struct Config {
 
     // Proxy
     pub trusted_proxy_count: usize,
+
+    // Session management
+    pub max_sessions_per_user: usize,
 }
 
 impl std::fmt::Debug for Config {
@@ -56,6 +59,7 @@ impl std::fmt::Debug for Config {
             .field("rate_limit_paste_per_min", &self.rate_limit_paste_per_min)
             .field("rate_limit_auth_per_min", &self.rate_limit_auth_per_min)
             .field("trusted_proxy_count", &self.trusted_proxy_count)
+            .field("max_sessions_per_user", &self.max_sessions_per_user)
             .finish()
     }
 }
@@ -111,9 +115,26 @@ impl Config {
 
         let admin_alias = env::var("ADMIN_ALIAS").unwrap_or_else(|_| "admin".to_string());
 
-        // Redis
+        // Validate ADMIN_ALIAS: same rules as user aliases (2-64 chars, alphanumeric + hyphen + underscore)
+        if admin_alias.len() < 2 || admin_alias.len() > 64 {
+            return Err(ConfigError::InvalidValue(
+                "ADMIN_ALIAS".to_string(),
+                "must be 2-64 characters".to_string(),
+            ));
+        }
+        if !admin_alias
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(ConfigError::InvalidValue(
+                "ADMIN_ALIAS".to_string(),
+                "may only contain alphanumeric characters, hyphens, and underscores".to_string(),
+            ));
+        }
+
+        // Redis — required to prevent silent unauthenticated connections
         let redis_url =
-            env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+            env::var("REDIS_URL").map_err(|_| ConfigError::MissingVar("REDIS_URL".to_string()))?;
 
         // Server
         let bind_addr_str = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
@@ -149,6 +170,9 @@ impl Config {
         // Proxy configuration
         let trusted_proxy_count = parse_env_or_default("TRUSTED_PROXY_COUNT", 0)?;
 
+        // Session management
+        let max_sessions_per_user = parse_env_or_default("MAX_SESSIONS_PER_USER", 5)?;
+
         Ok(Config {
             admin_pubkey,
             admin_alias,
@@ -166,6 +190,7 @@ impl Config {
             rate_limit_paste_per_min,
             rate_limit_auth_per_min,
             trusted_proxy_count,
+            max_sessions_per_user,
         })
     }
 }
@@ -214,6 +239,7 @@ mod tests {
         env::remove_var("RATE_LIMIT_PASTE_PER_MIN");
         env::remove_var("RATE_LIMIT_AUTH_PER_MIN");
         env::remove_var("TRUSTED_PROXY_COUNT");
+        env::remove_var("MAX_SESSIONS_PER_USER");
     }
 
     #[test]
@@ -238,6 +264,7 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
         env::set_var("BIND_ADDR", "invalid_address");
 
         let result = Config::from_env();
@@ -325,10 +352,124 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
         env::set_var("PUBLIC_ALLOWED_EXTENSIONS", "md, txt, json ");
 
         let config = Config::from_env().unwrap();
         assert_eq!(config.public_allowed_extensions, vec!["md", "txt", "json"]);
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_invalid_admin_alias_too_short() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("ADMIN_ALIAS", "a"); // Only 1 character
+
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ADMIN_ALIAS"
+        ));
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_invalid_admin_alias_too_long() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        // 65 characters (exceeds 64 max)
+        env::set_var("ADMIN_ALIAS", "a".repeat(65));
+
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ADMIN_ALIAS"
+        ));
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_invalid_admin_alias_special_chars() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("ADMIN_ALIAS", "admin@example"); // Contains '@'
+
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ADMIN_ALIAS"
+        ));
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_invalid_admin_alias_spaces() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("ADMIN_ALIAS", "admin user"); // Contains space
+
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ADMIN_ALIAS"
+        ));
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_valid_admin_alias_with_hyphens_underscores() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("ADMIN_ALIAS", "admin_user-123");
+
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.admin_alias, "admin_user-123");
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_valid_admin_alias_edge_lengths() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        // Test minimum length (2 chars)
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("ADMIN_ALIAS", "ab");
+
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.admin_alias, "ab");
+
+        // Test maximum length (64 chars)
+        env::set_var("ADMIN_ALIAS", "a".repeat(64));
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.admin_alias.len(), 64);
 
         clear_test_env();
     }
@@ -360,6 +501,7 @@ mod tests {
         assert_eq!(config.public_allowed_extensions, vec!["md", "txt"]);
         assert_eq!(config.rate_limit_paste_per_min, 10);
         assert_eq!(config.rate_limit_auth_per_min, 5);
+        assert_eq!(config.max_sessions_per_user, 5);
 
         clear_test_env();
     }

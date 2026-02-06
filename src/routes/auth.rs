@@ -197,7 +197,6 @@ pub async fn verify_challenge(
 
     // Create session
     let session = StoredSession {
-        token: token.clone(),
         user_id: user.id.clone(),
         role: role.as_str().to_string(),
         created_at: std::time::SystemTime::now()
@@ -206,7 +205,14 @@ pub async fn verify_challenge(
             .as_secs(),
     };
 
-    storage::session::store_session(&mut con, &session, state.config.session_ttl_secs).await?;
+    storage::session::store_session(
+        &mut con,
+        &token,
+        &session,
+        state.config.session_ttl_secs,
+        state.config.max_sessions_per_user,
+    )
+    .await?;
 
     tracing::info!(action = "auth_success", alias = %req.alias, user_id = %user.id, role = %role.as_str(), "User authenticated");
 
@@ -268,12 +274,7 @@ pub async fn register(
     // Validate invite token format
     super::validate_id(&req.token, "invite token", 16)?;
 
-    // Atomically get and delete invite (single-use)
-    let _invite = storage::user::get_and_delete_invite(&mut con, &req.token)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Invite not found or expired".to_string()))?;
-
-    // Validate pubkey: must be valid base64, 32 bytes, and a valid Ed25519 public key
+    // Validate pubkey FIRST (before touching Redis): must be valid base64, 32 bytes, and a valid Ed25519 public key
     let pubkey_bytes = general_purpose::STANDARD
         .decode(&req.pubkey)
         .map_err(|_| AppError::BadRequest("Invalid public key: not valid base64".to_string()))?;
@@ -290,6 +291,20 @@ pub async fn register(
         AppError::BadRequest("Invalid public key: not a valid Ed25519 key".to_string())
     })?;
 
+    // Check alias availability BEFORE consuming invite
+    let existing_user = storage::user::get_user_by_alias(&mut con, &req.alias).await?;
+    if existing_user.is_some() {
+        return Err(AppError::BadRequest(format!(
+            "Alias '{}' is already taken",
+            req.alias
+        )));
+    }
+
+    // Get and consume invite atomically (validation passed, safe to consume)
+    let _invite = storage::user::get_and_delete_invite(&mut con, &req.token)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Invite not found or expired".to_string()))?;
+
     // Create user
     let user_id = nanoid::nanoid!(12);
     let user = StoredUser {
@@ -303,7 +318,7 @@ pub async fn register(
             .as_secs(),
     };
 
-    // Atomically store user if alias is available (prevents TOCTOU race)
+    // Store user atomically (ensures alias hasn't been taken in a race)
     let created = storage::user::store_user_if_alias_available(
         &mut con,
         &user,
@@ -312,6 +327,8 @@ pub async fn register(
     .await?;
 
     if !created {
+        // Race condition: alias was taken between check and create
+        // Invite was already consumed - this is acceptable as validation passed
         return Err(AppError::BadRequest(format!(
             "Alias '{}' is already taken",
             req.alias

@@ -159,7 +159,6 @@ pub struct StoredChallenge {
 /// Session data as stored in Redis.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
-    pub token: String,
     pub user_id: String,
     pub role: String,
     pub created_at: u64,

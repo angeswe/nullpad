@@ -82,10 +82,21 @@
       return false;
     }
 
+    // Validate encryption key length (must be 32 bytes for AES-256-GCM)
+    if (encryptionKey.length !== 32) {
+      showError('Invalid paste URL: key must be 256 bits.');
+      return false;
+    }
+
     // Validate paste ID format (nanoid: 12 chars, alphanumeric + hyphen + underscore)
     if (!/^[A-Za-z0-9_-]{12}$/.test(pasteId)) {
       showError('Invalid paste ID format.');
       return false;
+    }
+
+    // Clear key material from URL bar and browser history
+    if (window.history && window.history.replaceState) {
+      window.history.replaceState(null, '', window.location.pathname + window.location.search);
     }
 
     return true;

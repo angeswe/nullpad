@@ -105,12 +105,13 @@ impl FromRequestParts<AppState> for Option<AuthSession> {
             return Ok(None);
         }
 
-        // Auth header present — attempt extraction; propagate system errors
-        match AuthSession::from_request_parts(parts, state).await {
-            Ok(session) => Ok(Some(session)),
-            Err(AppError::Unauthorized(_)) => Ok(None), // Invalid/expired token
-            Err(e) => Err(e),                           // System error (Redis down, etc.)
-        }
+        // Auth header present — attempt extraction.
+        // If the header IS present but the token is invalid/expired, return 401
+        // instead of silently downgrading to anonymous access. This prevents
+        // trusted users from unknowingly creating public pastes with expired sessions.
+        AuthSession::from_request_parts(parts, state)
+            .await
+            .map(Some)
     }
 }
 
