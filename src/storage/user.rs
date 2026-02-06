@@ -181,7 +181,7 @@ where
     C: AsyncCommands,
 {
     let mut users = Vec::new();
-    let keys: Vec<String> = redis::cmd("KEYS").arg("user:*").query_async(con).await?;
+    let keys = super::scan_keys(con, "user:*").await?;
 
     for key in keys {
         let json: Option<String> = con.get(&key).await?;
@@ -272,7 +272,7 @@ where
     C: AsyncCommands,
 {
     let mut invites = Vec::new();
-    let keys: Vec<String> = redis::cmd("KEYS").arg("invite:*").query_async(con).await?;
+    let keys = super::scan_keys(con, "invite:*").await?;
 
     for key in keys {
         let json: Option<String> = con.get(&key).await?;

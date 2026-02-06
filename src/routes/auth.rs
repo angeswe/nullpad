@@ -1,6 +1,6 @@
 //! Auth API endpoints.
 
-use crate::auth::middleware::{check_rate_limit, AppState};
+use crate::auth::middleware::{check_rate_limit, AppState, AuthSession};
 use crate::auth::session::{generate_challenge_nonce, generate_session_token};
 use crate::auth::verify::verify_signature;
 use crate::error::AppError;
@@ -11,6 +11,7 @@ use crate::models::{
 use crate::storage;
 use axum::{
     extract::{ConnectInfo, State},
+    http::StatusCode,
     response::IntoResponse,
     Json,
 };
@@ -40,6 +41,22 @@ pub async fn request_challenge(
     )
     .await
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    // Validate alias
+    if req.alias.len() < 2 || req.alias.len() > 64 {
+        return Err(AppError::BadRequest(
+            "Alias must be 2-64 characters".to_string(),
+        ));
+    }
+    if !req
+        .alias
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
+        ));
+    }
 
     if !allowed {
         let mut hasher = std::hash::DefaultHasher::new();
@@ -151,6 +168,22 @@ pub async fn register(
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
+    // Validate alias
+    if req.alias.len() < 2 || req.alias.len() > 64 {
+        return Err(AppError::BadRequest(
+            "Alias must be 2-64 characters".to_string(),
+        ));
+    }
+    if !req
+        .alias
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
+        ));
+    }
+
     // Look up and delete invite (single-use)
     let _invite = storage::user::get_invite(&mut con, &req.token)
         .await?
@@ -189,4 +222,22 @@ pub async fn register(
         "success": true,
         "message": "Registration successful"
     })))
+}
+
+/// POST /api/auth/logout — Invalidate current session
+pub async fn logout(
+    session: AuthSession,
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let mut con = state
+        .redis
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+
+    storage::session::delete_session(&mut con, &session.token).await?;
+
+    tracing::info!(action = "logout", user_id = %session.user_id, "User logged out");
+
+    Ok(StatusCode::NO_CONTENT)
 }

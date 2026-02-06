@@ -104,6 +104,52 @@ where
     }
 }
 
+/// Get a paste atomically, deleting if burn-after-reading.
+///
+/// Single Lua script avoids the check-then-act race condition where two
+/// concurrent requests could both see burn_after_reading=true before either
+/// deletes the paste.
+pub async fn get_paste_atomic<C>(
+    con: &mut C,
+    id: &str,
+) -> Result<Option<StoredPaste>, redis::RedisError>
+where
+    C: AsyncCommands,
+{
+    let key = format!("paste:{}", id);
+
+    // Lua script: GET paste, check burn flag, DEL if burn, return data
+    let script = redis::Script::new(
+        r#"
+        local val = redis.call('GET', KEYS[1])
+        if not val then
+            return nil
+        end
+        -- Check if burn_after_reading is true in the JSON
+        if string.find(val, '"burn_after_reading":true') then
+            redis.call('DEL', KEYS[1])
+        end
+        return val
+        "#,
+    );
+
+    let json: Option<String> = script.key(&key).invoke_async(con).await?;
+
+    match json {
+        Some(data) => {
+            let paste = serde_json::from_str(&data).map_err(|e| {
+                redis::RedisError::from((
+                    redis::ErrorKind::UnexpectedReturnType,
+                    "JSON deserialize",
+                    e.to_string(),
+                ))
+            })?;
+            Ok(Some(paste))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Delete a paste from Redis.
 ///
 /// Returns true if the paste was deleted, false if it didn't exist.

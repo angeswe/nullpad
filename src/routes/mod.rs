@@ -19,6 +19,7 @@ pub fn api_router() -> Router<AppState> {
         // Auth endpoints
         .route("/api/auth/challenge", post(auth::request_challenge))
         .route("/api/auth/verify", post(auth::verify_challenge))
+        .route("/api/auth/logout", post(auth::logout))
         .route("/api/register", post(auth::register))
         // Admin endpoints
         .route(

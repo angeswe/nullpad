@@ -152,7 +152,18 @@
   /**
    * Clear session from sessionStorage
    */
-  function clearSession() {
+  async function clearSession() {
+    const token = sessionStorage.getItem(SESSION_TOKEN_KEY);
+    if (token) {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+      } catch (_) {
+        // Best-effort server-side invalidation
+      }
+    }
     sessionStorage.removeItem(SESSION_TOKEN_KEY);
     sessionStorage.removeItem(SESSION_ROLE_KEY);
   }

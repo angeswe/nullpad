@@ -162,8 +162,8 @@ pub async fn delete_user_sessions<C>(con: &mut C, user_id: &str) -> Result<(), r
 where
     C: AsyncCommands,
 {
-    // Get all session keys
-    let keys: Vec<String> = redis::cmd("KEYS").arg("session:*").query_async(con).await?;
+    // Scan for all session keys (non-blocking)
+    let keys = super::scan_keys(con, "session:*").await?;
 
     // Check each session and delete if it matches the user_id
     for key in keys {

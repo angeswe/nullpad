@@ -168,31 +168,12 @@ pub async fn get_paste(
         .await
         .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
 
-    // Try to get paste
-    let paste_opt = storage::paste::get_paste(&mut con, &id).await?;
+    // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
+    // Returns the paste and deletes it only if burn_after_reading is true.
+    let paste = storage::paste::get_paste_atomic(&mut con, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
-    let paste = paste_opt.ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
-
-    // If burn-after-reading, delete it atomically
-    if paste.burn_after_reading {
-        // Re-fetch with atomic delete
-        let paste = storage::paste::get_and_delete_paste(&mut con, &id)
-            .await?
-            .ok_or_else(|| {
-                AppError::NotFound("Paste already consumed (burn-after-reading)".to_string())
-            })?;
-
-        // Return the paste
-        return Ok(Json(GetPasteResponse {
-            encrypted_content: general_purpose::STANDARD.encode(&paste.encrypted_content),
-            filename: paste.filename,
-            content_type: paste.content_type,
-            burn_after_reading: paste.burn_after_reading,
-            created_at: paste.created_at,
-        }));
-    }
-
-    // Normal read
     Ok(Json(GetPasteResponse {
         encrypted_content: general_purpose::STANDARD.encode(&paste.encrypted_content),
         filename: paste.filename,
