@@ -11,9 +11,10 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <div class="container">
+  <a href="#main-content" class="skip-link">Skip to content</a>
+  <div class="container" id="main-content">
     <div class="page-header">
-      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
+      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon" aria-hidden="true"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
       <p>Register as a trusted user</p>
     </div>
 
@@ -22,7 +23,7 @@
         <h2>Invalid Invite</h2>
       </div>
       <div class="panel-body">
-        <div class="alert alert-error">
+        <div class="alert alert-error" role="alert">
           No valid invite token found in URL. Please use the invite link provided by your administrator.
         </div>
         <a href="/" class="btn btn-secondary">Go to Home</a>
@@ -59,16 +60,16 @@
           <input type="password" id="secret-confirm" name="secret-confirm" placeholder="Re-enter your secret" required>
         </div>
 
-        <div id="error-message" class="alert alert-error hidden"></div>
+        <div id="error-message" class="alert alert-error hidden" role="alert"></div>
 
         <button type="submit" class="btn btn-primary btn-block">
           <span id="register-text">Register</span>
-          <span id="register-spinner" class="spinner hidden"></span>
+          <span id="register-spinner" class="spinner hidden" aria-hidden="true"></span>
         </button>
       </div>
     </form>
 
-    <div id="success-panel" class="panel hidden">
+    <div id="success-panel" class="panel hidden" role="status">
       <div class="panel-header">
         <h2>Registration Successful</h2>
       </div>
@@ -89,6 +90,6 @@
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"></script>
   <script src="/js/vendor/tweetnacl.min.js" integrity="sha384-05+sicyRJQ56XpL4U9HJ8YbtSzFDvAg7apPKOGV6A0JsAJKFM68jp5oLnUjG5mEp"></script>
   <script src="/js/auth.js" integrity="sha384-G6qc4pl4plOuMBilGTFOF4KAQJOMwATqbah6iHskLlgwUWPauPqWum/50C2bTKDF"></script>
-  <script src="/js/invite.js" integrity="sha384-O9Z6N/fIVMJiT61dMl1NTa/ZG/GoVXTW8SJ8plsNgoe7V0bQABtNMebCpdPA3oI/"></script>
+  <script src="/js/invite.js" integrity="sha384-gMhKzwD+3ULLMIKe6hdcf9Tro23zWF1kydoXax0wVZ5BPINPosILhbp6+4amXNSe"></script>
 </body>
 </html>

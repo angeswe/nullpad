@@ -96,6 +96,7 @@
 
   function setLoading(isLoading) {
     submitBtn.disabled = isLoading;
+    registerForm.setAttribute('aria-busy', isLoading);
     if (isLoading) {
       registerText.classList.add('hidden');
       registerSpinner.classList.remove('hidden');

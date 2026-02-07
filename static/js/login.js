@@ -58,6 +58,7 @@
 
   function setLoading(isLoading) {
     submitBtn.disabled = isLoading;
+    loginForm.setAttribute('aria-busy', isLoading);
     if (isLoading) {
       loginText.classList.add('hidden');
       loginSpinner.classList.remove('hidden');

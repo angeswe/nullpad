@@ -12,13 +12,14 @@
   <link rel="stylesheet" href="/css/hljs-dark.min.css">
 </head>
 <body>
-  <div class="container">
+  <a href="#main-content" class="skip-link">Skip to content</a>
+  <div class="container" id="main-content">
     <div class="page-header">
-      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
+      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon" aria-hidden="true"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
       <p>Decrypting paste...</p>
     </div>
 
-    <div id="burn-warning" class="alert alert-warning hidden">
+    <div id="burn-warning" class="alert alert-warning hidden" role="alert">
       <strong>Warning:</strong> This paste will be destroyed after viewing. Make sure to save any content you need.
     </div>
 
@@ -38,9 +39,9 @@
       </div>
     </div>
 
-    <div id="loading" class="panel">
+    <div id="loading" class="panel" aria-busy="true">
       <div class="panel-body text-center">
-        <div class="spinner"></div>
+        <div class="spinner" aria-hidden="true"></div>
         <p class="mt-2">Decrypting content...</p>
       </div>
     </div>
@@ -50,7 +51,7 @@
         <h2>Error</h2>
       </div>
       <div class="panel-body">
-        <div class="alert alert-error">
+        <div class="alert alert-error" role="alert">
           <p id="error-message"></p>
         </div>
         <a href="/" class="btn btn-secondary">Create New Paste</a>
@@ -77,7 +78,7 @@
       </div>
     </div>
 
-    <div id="burn-notice" class="alert alert-info hidden">
+    <div id="burn-notice" class="alert alert-info hidden" role="status">
       <strong>This paste has been destroyed.</strong> It can no longer be accessed.
     </div>
   </div>
@@ -91,6 +92,6 @@
   <script src="/js/vendor/purify.min.js" integrity="sha384-80VlBZnyAwkkqtSfg5NhPyZff6nU4K/qniLBL8Jnm4KDv6jZhLiYtJbhglg/i9ww"></script>
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"></script>
   <script src="/js/crypto.js" integrity="sha384-oEqnHJyXXopvMYc57+/X5IicjLUgOGUriUEhqx/3dQOzezlRHR/fDb7kVIJPnio/"></script>
-  <script src="/js/view.js" integrity="sha384-r/F5aiJx5Isr5o02GRvBgy9wM9Tq19GH5dJC8Lfkuv04d4IZoS5jE6x59qnTO18+"></script>
+  <script src="/js/view.js" integrity="sha384-sVNZj0qaFhr/+B91EFN9aOPOIlTH3DYyuohqfpBfPFJW45Klfhg/P8U4aUU+cxDA"></script>
 </body>
 </html>
