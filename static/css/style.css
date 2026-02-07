@@ -1043,3 +1043,10 @@ input[type="checkbox"]:checked::after {
 .site-footer a:hover {
   color: #4ade80;
 }
+
+.site-footer .build-version {
+  display: block;
+  margin-top: 0.25rem;
+  color: #444;
+  font-size: 0.65rem;
+}
