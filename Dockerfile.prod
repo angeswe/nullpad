@@ -63,6 +63,10 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
+# Inject build version into HTML footers
+ARG BUILD_VERSION=dev
+RUN sed -i "s/__BUILD_VERSION__/${BUILD_VERSION}/g" /app/static/*.html
+
 # Change ownership
 RUN chown -R nullpad:nullpad /app
 
