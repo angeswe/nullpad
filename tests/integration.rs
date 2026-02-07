@@ -1,7 +1,7 @@
 //! Integration tests for nullpad API.
 //!
-//! These tests require a running Redis instance (default: redis://127.0.0.1:6379).
-//! Set REDIS_URL env var to override.
+//! Tests use testcontainers to spin up a throwaway Redis instance automatically.
+//! Only a running Docker daemon is required — no external Redis needed.
 //!
 //! Tests run sequentially (--test-threads=1) because they share a Redis instance.
 //! Each test flushes its database before starting.
@@ -11,11 +11,33 @@ use ed25519_dalek::{Signer, SigningKey};
 use nullpad::{auth::middleware::AppState, config::Config, middleware::security_headers, routes};
 use reqwest::multipart;
 use std::sync::Arc;
+use testcontainers_modules::redis::Redis;
+use testcontainers_modules::testcontainers::runners::AsyncRunner;
+use testcontainers_modules::testcontainers::ContainerAsync;
+use tokio::sync::OnceCell;
 use tower_http::services::ServeDir;
 
-/// Helper to get Redis URL from environment or use default.
-fn redis_url() -> String {
-    std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
+struct TestRedis {
+    _container: ContainerAsync<Redis>,
+    url: String,
+}
+
+static TEST_REDIS: OnceCell<TestRedis> = OnceCell::const_new();
+
+async fn get_redis_url() -> &'static str {
+    let test_redis = TEST_REDIS
+        .get_or_init(|| async {
+            let container = Redis::default().start().await.unwrap();
+            let host = container.get_host().await.unwrap();
+            let port = container.get_host_port_ipv4(6379).await.unwrap();
+            let url = format!("redis://{}:{}", host, port);
+            TestRedis {
+                _container: container,
+                url,
+            }
+        })
+        .await;
+    &test_redis.url
 }
 
 /// Generate an Ed25519 keypair for testing.
@@ -49,7 +71,7 @@ async fn spawn_test_server_with_auth_limit(
     let (admin_key, admin_pubkey) = test_keypair();
     let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
 
-    let test_redis_url = redis_url();
+    let test_redis_url = get_redis_url().await.to_string();
     let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
     let mut con = redis_client
         .get_multiplexed_async_connection()
@@ -1368,8 +1390,12 @@ async fn test_concurrent_burn_after_reading_race() {
 
 #[tokio::test]
 async fn test_max_sessions_per_user() {
-    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    use redis::AsyncCommands;
+    let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
+
+    // Clear stale session tracking from prior tests (all share user_id "admin")
+    let _: () = con.del("user_sessions:admin").await.unwrap();
 
     // Create 5 sessions (the configured max)
     let mut tokens = vec![];
@@ -1389,7 +1415,7 @@ async fn test_max_sessions_per_user() {
         assert_eq!(resp.status(), 200);
     }
 
-    // Create a 6th session - this should evict the oldest
+    // Create a 6th session - this should evict one of the existing 5
     let new_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
 
     // New token should work
@@ -1401,14 +1427,31 @@ async fn test_max_sessions_per_user() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // First token should be invalidated (evicted)
-    let resp = client
-        .get(format!("{}/api/invites", base_url))
-        .header("Authorization", format!("Bearer {}", tokens[0]))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
+    // Exactly one of the original 5 tokens should have been evicted
+    let mut valid_count = 0;
+    let mut evicted_count = 0;
+    for token in &tokens {
+        let resp = client
+            .get(format!("{}/api/invites", base_url))
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .unwrap();
+        if resp.status() == 200 {
+            valid_count += 1;
+        } else {
+            assert_eq!(resp.status(), 401);
+            evicted_count += 1;
+        }
+    }
+    assert_eq!(
+        valid_count, 4,
+        "4 of the original 5 sessions should still be valid"
+    );
+    assert_eq!(
+        evicted_count, 1,
+        "Exactly 1 session should have been evicted"
+    );
 }
 
 // ============================================================================
