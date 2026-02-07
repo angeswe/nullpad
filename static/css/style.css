@@ -935,6 +935,23 @@ input[type="checkbox"]:checked::after {
   border-width: 0;
 }
 
+.skip-link {
+  position: absolute;
+  top: -100%;
+  left: 0;
+  background-color: #4ade80;
+  color: #0a0a0a;
+  padding: 0.5rem 1rem;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 0.9em;
+  z-index: 10000;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  top: 0;
+}
+
 /* ==========================================================================
    Print Styles
    ========================================================================== */

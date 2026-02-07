@@ -1,5 +1,30 @@
 #!/usr/bin/env sh
 
+# --- static file permissions check ---
+# Ensure all static files are world-readable (required for Docker serving)
+STAGED_STATIC=$(git diff --cached --name-only --diff-filter=ACM -- 'static/*')
+if [ -n "$STAGED_STATIC" ]; then
+    BAD_PERMS=""
+    for f in $STAGED_STATIC; do
+        if [ -f "$f" ]; then
+            # Check if file is world-readable (octal ends in 4 or higher)
+            perms=$(stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null)
+            last_digit=$((perms % 10))
+            if [ "$last_digit" -lt 4 ]; then
+                BAD_PERMS="$BAD_PERMS $f"
+            fi
+        fi
+    done
+    if [ -n "$BAD_PERMS" ]; then
+        echo "pre-commit: fixing file permissions (must be world-readable for Docker)..."
+        for f in $BAD_PERMS; do
+            chmod 644 "$f"
+            echo "  fixed: $f"
+        done
+        echo "$STAGED_STATIC" | xargs git add
+    fi
+fi
+
 # --- cargo fmt check ---
 # Auto-format staged Rust files before committing
 STAGED_RS=$(git diff --cached --name-only --diff-filter=ACM -- '*.rs')

@@ -101,6 +101,7 @@
       const limitMB = (MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0);
       const errEl = document.createElement('div');
       errEl.className = 'status-error';
+      errEl.setAttribute('role', 'alert');
       errEl.textContent = `File too large (${sizeMB}MB). Maximum is ${limitMB}MB.`;
       form.prepend(errEl);
       setTimeout(() => errEl.remove(), 5000);
@@ -111,6 +112,7 @@
     if (submitBtn) {
       submitBtn.disabled = true;
       submitBtn.textContent = 'Encrypting...';
+      form.setAttribute('aria-busy', 'true');
     }
 
     try {
@@ -206,9 +208,11 @@
         submitBtn.disabled = false;
         submitBtn.textContent = 'Create Encrypted Paste';
       }
+      form.setAttribute('aria-busy', 'false');
       // Show error inline instead of alert
       const errEl = document.createElement('div');
       errEl.className = 'status-error';
+      errEl.setAttribute('role', 'alert');
       errEl.textContent = err.message;
       form.prepend(errEl);
       setTimeout(() => errEl.remove(), 5000);
@@ -220,6 +224,7 @@
   // ============================================================================
 
   function showSuccess(url, hasPIN, isBurn) {
+    form.setAttribute('aria-busy', 'false');
     form.classList.add('hidden');
     successPanel.classList.remove('hidden');
     pasteUrlInput.value = url;

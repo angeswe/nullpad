@@ -11,9 +11,10 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <div class="container">
+  <a href="#main-content" class="skip-link">Skip to content</a>
+  <div class="container" id="main-content">
     <div class="page-header">
-      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
+      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon" aria-hidden="true"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
       <p>Login with your credentials</p>
     </div>
 
@@ -35,11 +36,11 @@
           </div>
         </div>
 
-        <div id="error-message" class="alert alert-error hidden"></div>
+        <div id="error-message" class="alert alert-error hidden" role="alert"></div>
 
         <button type="submit" class="btn btn-primary btn-block">
           <span id="login-text">Login</span>
-          <span id="login-spinner" class="spinner hidden"></span>
+          <span id="login-spinner" class="spinner hidden" aria-hidden="true"></span>
         </button>
       </div>
     </form>
@@ -61,6 +62,6 @@
 
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"></script>
   <script src="/js/auth.js" integrity="sha384-G6qc4pl4plOuMBilGTFOF4KAQJOMwATqbah6iHskLlgwUWPauPqWum/50C2bTKDF"></script>
-  <script src="/js/login.js" integrity="sha384-PT2yW5g4Z6YNIpMF8lWNjiMZkemT69hKkIuodrldx30+JwPGO3hn4tzLntPTRKPw"></script>
+  <script src="/js/login.js" integrity="sha384-Fh6COYWQwm8DuA0yfROiCfFxB+/HrjYO3c+hch71m5XZo2yczkpKJVF3tTxtR8Y3"></script>
 </body>
 </html>

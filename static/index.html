@@ -11,9 +11,10 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <div class="container">
+  <a href="#main-content" class="skip-link">Skip to content</a>
+  <div class="container" id="main-content">
     <div class="page-header">
-      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
+      <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon" aria-hidden="true"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
       <p>Zero-knowledge encrypted paste sharing. Server never sees your content or keys.</p>
     </div>
 
@@ -34,7 +35,7 @@
       <div class="toggle-wrapper">
         <label class="toggle-switch">
           <input type="checkbox" id="burn-after-reading">
-          <span class="toggle-slider"></span>
+          <span class="toggle-slider" aria-hidden="true"></span>
         </label>
         <label for="burn-after-reading" class="toggle-label">
           Burn after reading (destroy after first view)
@@ -54,7 +55,7 @@
       <button type="submit" class="btn btn-primary btn-block">Create Encrypted Paste</button>
     </form>
 
-    <div id="success-panel" class="panel hidden">
+    <div id="success-panel" class="panel hidden" role="status">
       <div class="panel-header">
         <h2>Paste Created</h2>
       </div>
@@ -93,6 +94,6 @@
 
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W"></script>
   <script src="/js/crypto.js" integrity="sha384-oEqnHJyXXopvMYc57+/X5IicjLUgOGUriUEhqx/3dQOzezlRHR/fDb7kVIJPnio/"></script>
-  <script src="/js/create.js" integrity="sha384-Lg/rqv+JQuQB9/avQof7AKZxYhcdm/z0/NwZOOBkNayhqe/n8W9SsRXSKoU2yUIx"></script>
+  <script src="/js/create.js" integrity="sha384-FB3ePmX+kxpU9FVqq7hnDuE+JclC1zWhaV+DJ6/+f7RtA9J/Z2i99R7PW1wNDQ+F"></script>
 </body>
 </html>

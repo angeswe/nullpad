@@ -11,10 +11,11 @@
   <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-  <div class="container">
+  <a href="#main-content" class="skip-link">Skip to content</a>
+  <div class="container" id="main-content">
     <div class="page-header">
       <div class="flex justify-between items-center">
-        <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
+        <h1><a href="/" class="title-link">nullpad</a> <img src="/favicon.svg" alt="" class="title-icon" aria-hidden="true"> <a href="/info.html" class="info-link" title="How it works">!</a></h1>
         <div class="action-buttons">
           <a href="/trusted.html" class="btn btn-secondary btn-small">Upload</a>
           <button id="logout-btn" class="btn btn-secondary btn-small">Logout</button>
@@ -48,7 +49,7 @@
         </div>
       </div>
       <div class="panel-body">
-        <div id="invite-success" class="alert alert-success hidden">
+        <div id="invite-success" class="alert alert-success hidden" role="status">
           <p><strong>Invite created!</strong> Share this link:</p>
           <div class="copy-wrapper">
             <input type="text" id="invite-url" class="copy-input" readonly>
@@ -59,10 +60,10 @@
         <table id="invites-table">
           <thead>
             <tr>
-              <th>Token</th>
-              <th>Created</th>
-              <th>Expires</th>
-              <th>Actions</th>
+              <th scope="col">Token</th>
+              <th scope="col">Created</th>
+              <th scope="col">Expires</th>
+              <th scope="col">Actions</th>
             </tr>
           </thead>
           <tbody id="invites-list">
@@ -83,10 +84,10 @@
         <table id="users-table">
           <thead>
             <tr>
-              <th>Alias</th>
-              <th>User ID</th>
-              <th>Public Key</th>
-              <th>Actions</th>
+              <th scope="col">Alias</th>
+              <th scope="col">User ID</th>
+              <th scope="col">Public Key</th>
+              <th scope="col">Actions</th>
             </tr>
           </thead>
           <tbody id="users-list">
@@ -113,14 +114,14 @@
             <button type="submit" class="btn btn-danger">Delete Paste</button>
           </div>
         </form>
-        <div id="paste-delete-success" class="alert alert-success hidden mt-2">
+        <div id="paste-delete-success" class="alert alert-success hidden mt-2" role="status">
           Paste deleted successfully.
         </div>
-        <div id="paste-delete-error" class="alert alert-error hidden mt-2"></div>
+        <div id="paste-delete-error" class="alert alert-error hidden mt-2" role="alert"></div>
       </div>
     </div>
 
-    <div id="error-message" class="alert alert-error hidden"></div>
+    <div id="error-message" class="alert alert-error hidden" role="alert"></div>
   </div>
 
   <footer class="site-footer">

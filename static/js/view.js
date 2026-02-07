@@ -295,6 +295,7 @@
 
   function showError(message) {
     loading.classList.add('hidden');
+    loading.setAttribute('aria-busy', 'false');
     pinPrompt.classList.add('hidden');
     errorPanel.classList.remove('hidden');
     errorMessage.textContent = message;
@@ -302,11 +303,13 @@
 
   function showPinPrompt() {
     loading.classList.add('hidden');
+    loading.setAttribute('aria-busy', 'false');
     pinPrompt.classList.remove('hidden');
   }
 
   function showContent(decrypted) {
     loading.classList.add('hidden');
+    loading.setAttribute('aria-busy', 'false');
     pinPrompt.classList.add('hidden');
     contentPanel.classList.remove('hidden');
 
@@ -335,6 +338,7 @@
       if (!errEl) {
         errEl = document.createElement('div');
         errEl.className = 'status-error';
+        errEl.setAttribute('role', 'alert');
         pinForm.parentNode.insertBefore(errEl, pinForm);
       }
       errEl.textContent = `Too many attempts. Wait ${waitSecs}s before trying again.`;
@@ -354,6 +358,7 @@
       if (!errEl) {
         errEl = document.createElement('div');
         errEl.className = 'status-error';
+        errEl.setAttribute('role', 'alert');
         pinForm.parentNode.insertBefore(errEl, pinForm);
       }
       const remainingSecs = Math.ceil((pinBackoffUntil - Date.now()) / 1000);
