@@ -175,6 +175,12 @@
         body: formData
       });
 
+      if (response.status === 401) {
+        if (typeof NullpadAuth !== 'undefined') NullpadAuth.clearSession();
+        window.location.href = '/login.html';
+        return;
+      }
+
       if (!response.ok) {
         const err = await response.json();
         throw new Error(err.error || 'Failed to create paste');

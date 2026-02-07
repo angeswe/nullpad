@@ -63,6 +63,12 @@
       }
     });
 
+    if (response.status === 401) {
+      NullpadAuth.clearSession();
+      window.location.href = '/login.html';
+      return;
+    }
+
     if (!response.ok) {
       const error = await response.json();
       throw new Error(error.error || 'Request failed');
