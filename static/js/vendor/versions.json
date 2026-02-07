@@ -4,7 +4,7 @@
     "version": "15.0.12",
     "license": "MIT",
     "url": "https://marked.js.org",
-    "sha384": "sha384-tkjnnf9Tzhv5ZFrDroGvUExw9C3EVFo0RFRkzKR8ZX4b5Psoec4yb1PlD8Jh4j4H"
+    "sha384": "sha384-KwzR5her+zXi/Bzz4PVrBjkrjsBZy9adZtt3jA6Jgj3/hzPihRUV6HqMONpTe7Ll"
   },
   "highlight.min.js": {
     "package": "highlight.js",
