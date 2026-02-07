@@ -118,6 +118,7 @@
       const rawKey = NullpadCrypto.generateKey();
 
       // 2. Derive key with PIN if provided, get salt
+      // SECURITY: String keys (rawKey, encryptionKey) persist in memory until GC (JS strings are immutable)
       let encryptionKey = rawKey;
       let salt = null;
       const pin = pinInput.value.trim();

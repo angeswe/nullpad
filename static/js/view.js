@@ -440,6 +440,7 @@
   // ============================================================================
 
   function clearSensitiveData() {
+    // SECURITY: String references (decryptedText, sessionStorage copies) cannot be wiped from JS heap
     // Zero out Uint8Array buffers
     if (decryptedBytes instanceof Uint8Array) {
       decryptedBytes.fill(0);

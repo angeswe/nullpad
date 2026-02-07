@@ -85,6 +85,7 @@
    * @returns {Promise<Uint8Array>} 32-byte seed (caller must zero after use)
    */
   async function deriveSeed(secret, alias) {
+    // SECURITY: String params (secret, alias) cannot be zeroed from memory (JS strings are immutable)
     const encoder = new TextEncoder();
 
     // Argon2id requires salt >= 8 bytes. Pad short aliases with fixed suffix.

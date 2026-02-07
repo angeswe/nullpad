@@ -4,6 +4,9 @@
  * Client-side encryption using Web Crypto API.
  * AES-256-GCM for content encryption, Argon2id for PIN-based key derivation.
  * All encryption/decryption happens in the browser — server never sees plaintext or keys.
+ *
+ * SECURITY: JS strings are immutable and cannot be zeroed from memory. String representations
+ * of key material (base64url keys, PINs) persist in memory until garbage collected.
  */
 
 (function() {
@@ -105,6 +108,7 @@
     function generateKey() {
         const keyBytes = new Uint8Array(32); // 256 bits
         crypto.getRandomValues(keyBytes);
+        // SECURITY: Returned string cannot be zeroed from memory (JS strings are immutable)
         return base64urlEncode(keyBytes);
     }
 
@@ -141,6 +145,7 @@
                 outputType: 'binary'
             });
 
+            // SECURITY: Returned key string cannot be zeroed from memory (JS strings are immutable)
             const result = { key: base64urlEncode(new Uint8Array(hash)), salt };
             // Zero the hash output
             new Uint8Array(hash).fill(0);
