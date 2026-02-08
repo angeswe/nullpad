@@ -134,19 +134,18 @@ where
             })?;
 
             // Read content from disk
-            let encrypted_content = blob::read_blob(storage_path, id).await.map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::UnexpectedReturnType,
-                    "Blob read failed",
-                    e.to_string(),
-                ))
-            })?;
-
-            let encrypted_content = match encrypted_content {
-                Some(content) => content,
-                None => {
+            // Treat blob errors as "not found" to gracefully handle orphaned metadata
+            // (e.g., pastes created before blob migration, or disk issues)
+            let encrypted_content = match blob::read_blob(storage_path, id).await {
+                Ok(Some(content)) => content,
+                Ok(None) => {
                     // Blob missing - orphaned metadata, treat as not found
                     tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing");
+                    return Ok(None);
+                }
+                Err(e) => {
+                    // Blob read error - treat as not found, log for debugging
+                    tracing::warn!(paste_id = %id, error = %e, "Blob read error, treating as not found");
                     return Ok(None);
                 }
             };
