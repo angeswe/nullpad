@@ -30,11 +30,8 @@ pub async fn create_paste(
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
     // Rate limit by IP (prefer X-Forwarded-For behind reverse proxy)
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let rate_limit_key = format!("ratelimit:paste:{}", ip);
@@ -233,11 +230,8 @@ pub async fn get_paste(
 ) -> Result<impl IntoResponse, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
 
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     // Rate limit paste reads to prevent burn-after-reading abuse
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
@@ -278,11 +272,8 @@ pub async fn delete_paste(
 ) -> Result<impl IntoResponse, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
 
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     let deleted = storage::paste::delete_paste(&mut con, &id).await?;
 

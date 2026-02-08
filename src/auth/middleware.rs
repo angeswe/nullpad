@@ -11,7 +11,10 @@ use std::sync::Arc;
 /// Application state shared across handlers.
 #[derive(Clone)]
 pub struct AppState {
-    pub redis: redis::Client,
+    /// Redis connection manager with automatic reconnection.
+    /// ConnectionManager handles connection failures with exponential backoff retry,
+    /// eliminating the need for manual pod restarts when Redis becomes temporarily unavailable.
+    pub redis: redis::aio::ConnectionManager,
     pub config: Arc<Config>,
 }
 
@@ -57,12 +60,8 @@ impl FromRequestParts<AppState> for AuthSession {
             ));
         }
 
-        // Get Redis connection
-        let mut con = state
-            .redis
-            .get_multiplexed_async_connection()
-            .await
-            .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+        // Get Redis connection (ConnectionManager handles auto-reconnection)
+        let mut con = state.redis.clone();
 
         // Look up session
         let session = storage::session::get_session(&mut con, &token)
