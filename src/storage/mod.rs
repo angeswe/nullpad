@@ -1,8 +1,12 @@
-//! Redis storage layer for pastes, users, sessions, and challenges.
+//! Storage layer for pastes, users, sessions, and challenges.
 //!
-//! All functions are async and use redis::AsyncCommands.
+//! - Redis: metadata, users, sessions, challenges
+//! - Filesystem: paste content (encrypted blobs)
+//!
+//! All functions are async. Redis uses redis::AsyncCommands.
 //! Data is serialized to JSON for storage in Redis.
 
+pub mod blob;
 pub mod paste;
 pub mod session;
 pub mod user;

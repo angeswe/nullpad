@@ -79,6 +79,7 @@ See `.env.example` for all available options. Key environment variables:
 - `ADMIN_ALIAS` — Admin username (default: "admin")
 - `REDIS_URL` — Redis connection string (default: "redis://127.0.0.1:6379")
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")
+- `PASTE_STORAGE_PATH` — Directory for encrypted paste content (default: "/data/pastes")
 - `MAX_UPLOAD_BYTES` — Max file size (default: 52428800 / 50MB)
 - `DEFAULT_TTL_SECS` — Default paste expiration (default: 86400 / 24h)
 - `MAX_TTL_SECS` — Maximum paste lifetime (default: 604800 / 7d)
@@ -126,7 +127,8 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 **Backend**
 - Rust with Axum 0.8 web framework
-- Redis for ephemeral storage (everything expires)
+- Redis for metadata and sessions (everything expires)
+- Filesystem for encrypted paste content (low memory footprint)
 - ed25519-dalek for signature verification
 - zeroize for secure memory cleanup
 
