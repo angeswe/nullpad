@@ -7,7 +7,6 @@
 If you discover a security vulnerability in nullpad, please report it privately:
 
 1. **GitHub Private Advisory** (preferred): [Report a vulnerability](https://github.com/angeswe/nullpad/security/advisories/new)
-2. **Email**: security@nullpad.io
 
 ### What to include
 
