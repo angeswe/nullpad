@@ -16,11 +16,8 @@ pub async fn create_invite(
     AdminSession(_session): AdminSession,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     // Generate invite token
     let token = nanoid::nanoid!(16);
@@ -49,11 +46,8 @@ pub async fn list_invites(
     AdminSession(_session): AdminSession,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     let invites = storage::user::list_invites(&mut con).await?;
 
@@ -78,11 +72,8 @@ pub async fn revoke_invite(
 ) -> Result<impl IntoResponse, AppError> {
     super::validate_id(&token, "invite token", 16)?;
 
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     let deleted = storage::user::delete_invite(&mut con, &token).await?;
 
@@ -100,11 +91,8 @@ pub async fn list_users(
     AdminSession(_session): AdminSession,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     let users = storage::user::list_users(&mut con).await?;
 
@@ -139,11 +127,8 @@ pub async fn revoke_user(
 
     super::validate_id(&id, "user ID", 12)?;
 
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     // Check if user exists
     let user = storage::user::get_user(&mut con, &id)

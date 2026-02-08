@@ -43,11 +43,8 @@ pub async fn request_challenge(
     }
 
     // Rate limit by IP
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let rate_limit_key = format!("ratelimit:auth:challenge:{}", ip);
@@ -122,11 +119,8 @@ pub async fn verify_challenge(
     headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
@@ -229,11 +223,8 @@ pub async fn register(
     headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
@@ -348,11 +339,8 @@ pub async fn logout(
     session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    let mut con = state
-        .redis
-        .get_multiplexed_async_connection()
-        .await
-        .map_err(|e| AppError::Internal(format!("Redis connection error: {}", e)))?;
+    // Get Redis connection (ConnectionManager handles auto-reconnection)
+    let mut con = state.redis.clone();
 
     storage::session::delete_session(&mut con, &session.token, &session.user_id).await?;
 

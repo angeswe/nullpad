@@ -50,33 +50,24 @@ fn test_keypair() -> (SigningKey, String) {
 }
 
 /// Spin up a test server and return its base URL, Redis connection, and admin signing key.
-async fn spawn_test_server() -> (
-    String,
-    redis::aio::MultiplexedConnection,
-    SigningKey,
-    String,
-) {
+async fn spawn_test_server() -> (String, redis::aio::ConnectionManager, SigningKey, String) {
     spawn_test_server_with_auth_limit(10000).await
 }
 
 /// Spin up a test server with a custom auth rate limit.
 async fn spawn_test_server_with_auth_limit(
     limit: u32,
-) -> (
-    String,
-    redis::aio::MultiplexedConnection,
-    SigningKey,
-    String,
-) {
+) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
     let (admin_key, admin_pubkey) = test_keypair();
     let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
 
     let test_redis_url = get_redis_url().await.to_string();
     let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
-    let mut con = redis_client
-        .get_multiplexed_async_connection()
+    let redis_manager = redis_client
+        .get_connection_manager()
         .await
-        .expect("Failed to connect to Redis");
+        .expect("Failed to get connection manager");
+    let mut con = redis_manager.clone();
 
     // Set up admin user
     nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, &admin_alias)
@@ -104,7 +95,7 @@ async fn spawn_test_server_with_auth_limit(
     };
 
     let state = AppState {
-        redis: redis_client,
+        redis: redis_manager,
         config: Arc::new(config),
     };
 

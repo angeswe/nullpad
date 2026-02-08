@@ -101,24 +101,28 @@ async fn main() {
     let config = Config::from_env().expect("Failed to load config");
     tracing::info!("Starting nullpad on {}", config.bind_addr);
 
-    // Connect to Redis
+    // Connect to Redis with ConnectionManager for automatic reconnection.
+    // ConnectionManager handles connection failures with exponential backoff retry,
+    // eliminating the need for manual pod restarts when Redis becomes temporarily unavailable.
     let redis_client = redis::Client::open(config.redis_url.as_str()).expect("Invalid Redis URL");
-
-    // Verify Redis connection
-    let mut con = redis_client
-        .get_multiplexed_async_connection()
+    let mut redis_manager = redis_client
+        .get_connection_manager()
         .await
         .expect("Failed to connect to Redis");
 
     // Upsert admin user (permanent, no TTL)
-    storage::user::upsert_admin(&mut con, &config.admin_pubkey, &config.admin_alias)
-        .await
-        .expect("Failed to upsert admin user");
+    storage::user::upsert_admin(
+        &mut redis_manager,
+        &config.admin_pubkey,
+        &config.admin_alias,
+    )
+    .await
+    .expect("Failed to upsert admin user");
     tracing::info!("Admin user '{}' configured", config.admin_alias);
 
     // Build shared state
     let state = AppState {
-        redis: redis_client,
+        redis: redis_manager,
         config: Arc::new(config.clone()),
     };
 

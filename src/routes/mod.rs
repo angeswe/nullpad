@@ -68,17 +68,13 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
 ///
 /// Pings Redis and returns 200 if healthy, 503 if Redis is unreachable.
 async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
-    match state.redis.get_multiplexed_async_connection().await {
-        Ok(mut con) => match redis::cmd("PING").query_async::<String>(&mut con).await {
-            Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
-            Err(_) => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"status": "error", "detail": "redis ping failed"})),
-            ),
-        },
+    // ConnectionManager handles auto-reconnection; just try to PING
+    let mut con = state.redis.clone();
+    match redis::cmd("PING").query_async::<String>(&mut con).await {
+        Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"status": "error", "detail": "redis unreachable"})),
+            Json(serde_json::json!({"status": "error", "detail": "redis ping failed"})),
         ),
     }
 }
