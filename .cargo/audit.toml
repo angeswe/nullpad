@@ -1,0 +1,9 @@
+# Cargo audit configuration
+# See: https://rustsec.org/
+
+[advisories]
+# Ignore RUSTSEC-2025-0134: rustls-pemfile unmaintained
+# - This is informational only (not a vulnerability)
+# - Dependency comes from testcontainers (dev-only)
+# - Will be resolved when bollard updates
+ignore = ["RUSTSEC-2025-0134"]
