@@ -430,6 +430,11 @@
     }
   }
 
+  // Clear clipboard on page leave (invite URLs are sensitive)
+  window.addEventListener('pagehide', () => {
+    navigator.clipboard.writeText('').catch(() => {});
+  });
+
   // Start when DOM is ready
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

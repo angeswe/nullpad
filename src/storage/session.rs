@@ -45,6 +45,52 @@ where
     Ok(())
 }
 
+/// Store a challenge only if user exists, atomically.
+///
+/// Uses a Lua script to prevent race conditions between checking user
+/// existence and storing the challenge. Returns true if stored (user exists),
+/// false if user doesn't exist.
+pub async fn store_challenge_if_user_exists<C>(
+    con: &mut C,
+    alias: &str,
+    challenge: &StoredChallenge,
+    ttl_secs: u64,
+) -> Result<bool, redis::RedisError>
+where
+    C: AsyncCommands,
+{
+    let alias_key = format!("alias:{}", alias);
+    let challenge_key = format!("challenge:{}", alias);
+    let json = serde_json::to_string(challenge).map_err(|e| {
+        redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "JSON serialize",
+            e.to_string(),
+        ))
+    })?;
+
+    // Lua script: check if user exists, store challenge atomically
+    let script = redis::Script::new(
+        r"
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+            redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2])
+            return 1
+        end
+        return 0
+        ",
+    );
+
+    let stored: i32 = script
+        .key(&alias_key)
+        .key(&challenge_key)
+        .arg(&json)
+        .arg(ttl_secs)
+        .invoke_async(con)
+        .await?;
+
+    Ok(stored == 1)
+}
+
 /// Get and delete a challenge atomically (single-use nonce).
 ///
 /// Uses a Lua script to prevent race conditions.
