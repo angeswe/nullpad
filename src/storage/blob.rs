@@ -9,7 +9,7 @@
 //!
 //! Uses directory sharding (first 2 chars of ID) to avoid too many files in one directory.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -23,77 +23,33 @@ pub enum BlobError {
     InvalidId(String),
 }
 
-/// Validate paste ID to prevent path traversal attacks.
+/// Sanitize paste ID by validating it contains only safe characters.
 ///
-/// Rejects IDs containing path separators or parent directory references.
-/// Only allows alphanumeric, hyphen, underscore (nanoid charset).
-fn validate_blob_id(id: &str) -> Result<(), BlobError> {
+/// Returns a validated ID string that is safe to use in paths.
+/// This is the security barrier that prevents path traversal attacks.
+///
+/// Allowed characters: `[A-Za-z0-9_-]` (nanoid charset)
+/// Minimum length: 2 characters (for sharding)
+fn sanitize_blob_id(id: &str) -> Result<&str, BlobError> {
+    // Reject IDs that are too short for sharding
     if id.len() < 2 {
         return Err(BlobError::InvalidId(
             "ID must be at least 2 characters".to_string(),
         ));
     }
 
-    // Reject path traversal attempts
-    if id.contains("..") || id.contains('/') || id.contains('\\') {
-        return Err(BlobError::InvalidId(
-            "ID contains invalid characters".to_string(),
-        ));
-    }
-
-    // Only allow alphanumeric, hyphen, underscore (nanoid charset)
-    if !id
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(BlobError::InvalidId(
-            "ID contains invalid characters".to_string(),
-        ));
-    }
-
-    Ok(())
-}
-
-/// Construct path for writing a new blob.
-///
-/// Returns (blob_path, canonical_storage) for post-creation verification.
-fn construct_write_path(storage_path: &Path, id: &str) -> Result<(PathBuf, PathBuf), BlobError> {
-    validate_blob_id(id)?;
-
-    // Storage must exist and be canonicalizable for writes
-    let canonical_storage = storage_path.canonicalize()?;
-    let shard = &id[..2];
-    let path = canonical_storage.join(shard).join(id);
-
-    Ok((path, canonical_storage))
-}
-
-/// Resolve and validate path for reading/deleting existing files.
-///
-/// Canonicalizes the final path to catch symlink attacks - if an attacker
-/// creates a symlink pointing outside storage, canonicalize will resolve it
-/// and the starts_with check will fail.
-fn resolve_existing_path(storage_path: &Path, id: &str) -> Result<Option<PathBuf>, BlobError> {
-    validate_blob_id(id)?;
-
-    let canonical_storage = storage_path.canonicalize()?;
-    let shard = &id[..2];
-    let constructed = canonical_storage.join(shard).join(id);
-
-    // Canonicalize to resolve symlinks - catches symlink attacks
-    match constructed.canonicalize() {
-        Ok(canonical_path) => {
-            // Verify resolved path is within storage directory
-            if !canonical_path.starts_with(&canonical_storage) {
-                return Err(BlobError::InvalidId(
-                    "Path escapes storage directory".to_string(),
-                ));
-            }
-            Ok(Some(canonical_path))
+    // Validate every character is in the safe set [A-Za-z0-9_-]
+    // This prevents path traversal since '.' , '/' , '\' are not allowed
+    for c in id.chars() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
+            return Err(BlobError::InvalidId(
+                "ID contains invalid characters".to_string(),
+            ));
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(BlobError::Io(e)),
     }
+
+    // Return the validated ID - it's now safe to use in paths
+    Ok(id)
 }
 
 /// Initialize the storage directory.
@@ -114,32 +70,41 @@ pub async fn init_storage(storage_path: &Path) -> Result<(), BlobError> {
 /// Write a blob to disk.
 ///
 /// Uses atomic write (write to temp file, then rename) to prevent partial reads.
-/// Verifies the parent directory is within storage after creation.
+/// Path safety is ensured by:
+/// 1. Sanitizing the ID to only allow safe characters
+/// 2. Building the path from canonical storage base
+/// 3. Verifying the final path is within storage after creation
 pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result<(), BlobError> {
-    let (path, canonical_storage) = construct_write_path(storage_path, id)?;
+    // Sanitize ID first - this is the security barrier
+    let safe_id = sanitize_blob_id(id)?;
 
-    // Create parent directory if needed
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
+    // Get canonical storage path
+    let canonical_storage = storage_path.canonicalize()?;
 
-        // Verify parent is within storage directory after creation
-        // This catches any edge cases where the constructed path escapes storage
-        let canonical_parent = parent.canonicalize()?;
-        if !canonical_parent.starts_with(&canonical_storage) {
-            return Err(BlobError::InvalidId(
-                "Path escapes storage directory".to_string(),
-            ));
-        }
+    // Build path using only the safe ID
+    let shard_name = &safe_id[..2];
+    let shard_dir = canonical_storage.join(shard_name);
+
+    // Create shard directory
+    fs::create_dir_all(&shard_dir).await?;
+
+    // Verify shard directory is within storage (defense in depth)
+    let canonical_shard = shard_dir.canonicalize()?;
+    if !canonical_shard.starts_with(&canonical_storage) {
+        return Err(BlobError::InvalidId(
+            "Path escapes storage directory".to_string(),
+        ));
     }
 
-    // Write to temp file first (atomic)
-    let temp_path = path.with_extension("tmp");
+    // Build final path within verified shard directory
+    let blob_path = canonical_shard.join(safe_id);
+    let temp_path = blob_path.with_extension("tmp");
+
+    // Write atomically: temp file -> sync -> rename
     let mut file = fs::File::create(&temp_path).await?;
     file.write_all(content).await?;
     file.sync_all().await?;
-
-    // Rename to final path (atomic on most filesystems)
-    fs::rename(&temp_path, &path).await?;
+    fs::rename(&temp_path, &blob_path).await?;
 
     Ok(())
 }
@@ -147,13 +112,36 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
 /// Read a blob from disk.
 ///
 /// Returns None if the blob doesn't exist.
-/// Canonicalizes path before reading to prevent symlink attacks.
+/// Path safety is ensured by:
+/// 1. Sanitizing the ID to only allow safe characters
+/// 2. Canonicalizing the path to resolve symlinks
+/// 3. Verifying the canonical path is within storage
 pub async fn read_blob(storage_path: &Path, id: &str) -> Result<Option<Vec<u8>>, BlobError> {
-    let canonical_path = match resolve_existing_path(storage_path, id)? {
-        Some(p) => p,
-        None => return Ok(None),
+    // Sanitize ID first - this is the security barrier
+    let safe_id = sanitize_blob_id(id)?;
+
+    // Get canonical storage path
+    let canonical_storage = storage_path.canonicalize()?;
+
+    // Build path using only the safe ID
+    let shard_name = &safe_id[..2];
+    let constructed_path = canonical_storage.join(shard_name).join(safe_id);
+
+    // Canonicalize to resolve any symlinks
+    let canonical_path = match constructed_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(BlobError::Io(e)),
     };
 
+    // Verify canonical path is within storage (catches symlink attacks)
+    if !canonical_path.starts_with(&canonical_storage) {
+        return Err(BlobError::InvalidId(
+            "Path escapes storage directory".to_string(),
+        ));
+    }
+
+    // Safe to read - path is verified
     let mut file = fs::File::open(&canonical_path).await?;
     let mut content = Vec::new();
     file.read_to_end(&mut content).await?;
@@ -163,13 +151,36 @@ pub async fn read_blob(storage_path: &Path, id: &str) -> Result<Option<Vec<u8>>,
 /// Delete a blob from disk.
 ///
 /// Returns true if the blob was deleted, false if it didn't exist.
-/// Canonicalizes path before deleting to prevent symlink attacks.
+/// Path safety is ensured by:
+/// 1. Sanitizing the ID to only allow safe characters
+/// 2. Canonicalizing the path to resolve symlinks
+/// 3. Verifying the canonical path is within storage
 pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
-    let canonical_path = match resolve_existing_path(storage_path, id)? {
-        Some(p) => p,
-        None => return Ok(false),
+    // Sanitize ID first - this is the security barrier
+    let safe_id = sanitize_blob_id(id)?;
+
+    // Get canonical storage path
+    let canonical_storage = storage_path.canonicalize()?;
+
+    // Build path using only the safe ID
+    let shard_name = &safe_id[..2];
+    let constructed_path = canonical_storage.join(shard_name).join(safe_id);
+
+    // Canonicalize to resolve any symlinks
+    let canonical_path = match constructed_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(BlobError::Io(e)),
     };
 
+    // Verify canonical path is within storage (catches symlink attacks)
+    if !canonical_path.starts_with(&canonical_storage) {
+        return Err(BlobError::InvalidId(
+            "Path escapes storage directory".to_string(),
+        ));
+    }
+
+    // Safe to delete - path is verified
     fs::remove_file(&canonical_path).await?;
     Ok(true)
 }
