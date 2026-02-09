@@ -65,47 +65,43 @@ pub async fn request_challenge(
         return Err(AppError::RateLimited);
     }
 
-    // Per-alias rate limit to prevent challenge overwrite attacks
-    // (attacker repeatedly requesting challenges to invalidate legitimate user's nonce)
-    let alias_rate_key = format!("ratelimit:challenge_alias:{}", req.alias);
-    let alias_allowed = check_rate_limit(
-        &mut con,
-        &alias_rate_key,
-        10, // max 10 challenges per alias per 30s window
-        30,
-    )
-    .await
-    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    if !alias_allowed {
-        return Err(AppError::RateLimited);
-    }
-
     // Generate nonce regardless of whether user exists to prevent alias enumeration
     let nonce = generate_challenge_nonce();
 
-    // Look up user by alias — store challenge only if user exists,
-    // but always return the same response shape
-    let user_exists = storage::user::get_user_by_alias(&mut con, &req.alias)
-        .await?
-        .is_some();
+    let challenge = StoredChallenge {
+        nonce: nonce.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
 
+    // Atomically check if user exists and store challenge.
+    // This prevents race conditions between user lookup and challenge storage.
+    let user_exists = storage::session::store_challenge_if_user_exists(
+        &mut con,
+        &req.alias,
+        &challenge,
+        state.config.challenge_ttl_secs,
+    )
+    .await?;
+
+    // Per-alias rate limit only for existing users to prevent challenge overwrite attacks.
+    // Non-existent users don't consume rate limit quota (prevents DoS against real users).
     if user_exists {
-        let challenge = StoredChallenge {
-            nonce: nonce.clone(),
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-
-        storage::session::store_challenge(
+        let alias_rate_key = format!("ratelimit:challenge_alias:{}", req.alias);
+        let alias_allowed = check_rate_limit(
             &mut con,
-            &req.alias,
-            &challenge,
-            state.config.challenge_ttl_secs,
+            &alias_rate_key,
+            10, // max 10 challenges per alias per 30s window
+            30,
         )
-        .await?;
+        .await
+        .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+        if !alias_allowed {
+            return Err(AppError::RateLimited);
+        }
     }
 
     // Always return a challenge response (non-existent users get a throwaway nonce)
