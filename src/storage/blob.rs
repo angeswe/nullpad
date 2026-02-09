@@ -19,19 +19,64 @@ pub enum BlobError {
     InvalidId(String),
 }
 
-/// Get the path for a blob file.
+/// Validate paste ID to prevent path traversal attacks.
 ///
-/// Uses directory sharding: `{storage_path}/{id[0..2]}/{id}`
-fn blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, BlobError> {
+/// Rejects IDs containing path separators or parent directory references.
+/// This provides defense-in-depth even though route handlers also validate IDs.
+fn validate_blob_id(id: &str) -> Result<(), BlobError> {
     if id.len() < 2 {
         return Err(BlobError::InvalidId(
             "ID must be at least 2 characters".to_string(),
         ));
     }
 
+    // Reject path traversal attempts
+    if id.contains("..") || id.contains('/') || id.contains('\\') {
+        return Err(BlobError::InvalidId(
+            "ID contains invalid characters".to_string(),
+        ));
+    }
+
+    // Only allow alphanumeric, hyphen, underscore (nanoid charset)
+    if !id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(BlobError::InvalidId(
+            "ID contains invalid characters".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Get the path for a blob file.
+///
+/// Uses directory sharding: `{storage_path}/{id[0..2]}/{id}`
+/// Validates ID to prevent path traversal attacks.
+fn blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, BlobError> {
+    validate_blob_id(id)?;
+
     // Use first 2 characters for directory sharding
     let shard = &id[..2];
-    Ok(storage_path.join(shard).join(id))
+    let path = storage_path.join(shard).join(id);
+
+    // Defense-in-depth: verify path is within storage directory
+    // This catches any edge cases the character validation might miss
+    let shard_path = storage_path.join(shard);
+    if shard_path.exists() {
+        if let (Ok(canonical_storage), Ok(canonical_shard)) =
+            (storage_path.canonicalize(), shard_path.canonicalize())
+        {
+            if !canonical_shard.starts_with(&canonical_storage) {
+                return Err(BlobError::InvalidId(
+                    "Path escapes storage directory".to_string(),
+                ));
+            }
+        }
+    }
+
+    Ok(path)
 }
 
 /// Initialize the storage directory.
