@@ -53,22 +53,27 @@ fn validate_blob_id(id: &str) -> Result<(), BlobError> {
 /// Get the path for a blob file.
 ///
 /// Uses directory sharding: `{storage_path}/{id[0..2]}/{id}`
-/// Validates ID to prevent path traversal attacks.
+/// Validates ID to prevent path traversal attacks and ensures the
+/// resulting path stays within the storage directory.
 fn blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, BlobError> {
     validate_blob_id(id)?;
 
+    // Canonicalize storage path when possible so containment checks are reliable.
+    // If the directory does not exist yet, fall back to the provided path.
+    let canonical_storage = storage_path
+        .canonicalize()
+        .unwrap_or_else(|_| storage_path.to_path_buf());
+
     // Use first 2 characters for directory sharding
     let shard = &id[..2];
-    let path = storage_path.join(shard).join(id);
+    let path = canonical_storage.join(shard).join(id);
 
-    // Defense-in-depth: verify path is within storage directory
-    // This catches any edge cases the character validation might miss
-    let shard_path = storage_path.join(shard);
-    if shard_path.exists() {
-        if let (Ok(canonical_storage), Ok(canonical_shard)) =
-            (storage_path.canonicalize(), shard_path.canonicalize())
+    // Defense-in-depth: verify that the blob's parent directory is within storage directory.
+    if let Some(parent) = path.parent() {
+        if let (Ok(storage_canonical), Ok(parent_canonical)) =
+            (canonical_storage.canonicalize(), parent.canonicalize())
         {
-            if !canonical_shard.starts_with(&canonical_storage) {
+            if !parent_canonical.starts_with(&storage_canonical) {
                 return Err(BlobError::InvalidId(
                     "Path escapes storage directory".to_string(),
                 ));
