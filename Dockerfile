@@ -49,8 +49,11 @@ RUN apt-get update && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/*
 
+# Create paste storage directory
+RUN mkdir -p /data/pastes
+
 # Change ownership
-RUN chown -R nullpad:nullpad /app
+RUN chown -R nullpad:nullpad /app /data
 
 # Switch to non-root user
 USER nullpad
