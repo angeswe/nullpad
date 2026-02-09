@@ -55,7 +55,7 @@ where
             }
 
             // Skip temp files
-            if file_path.extension().map_or(false, |ext| ext == "tmp") {
+            if file_path.extension().is_some_and(|ext| ext == "tmp") {
                 continue;
             }
 
