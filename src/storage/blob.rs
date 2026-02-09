@@ -73,7 +73,7 @@ pub async fn init_storage(storage_path: &Path) -> Result<(), BlobError> {
 /// Path safety is ensured by:
 /// 1. Sanitizing the ID to only allow safe characters
 /// 2. Building the path from canonical storage base
-/// 3. Verifying the final path is within storage after creation
+/// 3. Verifying the final path is within storage via strip_prefix
 pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result<(), BlobError> {
     // Sanitize ID first - this is the security barrier
     let safe_id = sanitize_blob_id(id)?;
@@ -81,24 +81,28 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
     // Get canonical storage path
     let canonical_storage = storage_path.canonicalize()?;
 
-    // Build path using only the safe ID
+    // Build shard directory path
     let shard_name = &safe_id[..2];
     let shard_dir = canonical_storage.join(shard_name);
 
-    // Create shard directory
+    // Create shard directory first
     fs::create_dir_all(&shard_dir).await?;
 
-    // Verify shard directory is within storage (defense in depth)
+    // Verify shard directory is within storage using strip_prefix
+    // strip_prefix fails if path doesn't start with prefix - this is the barrier
     let canonical_shard = shard_dir.canonicalize()?;
-    if !canonical_shard.starts_with(&canonical_storage) {
-        return Err(BlobError::InvalidId(
-            "Path escapes storage directory".to_string(),
-        ));
-    }
+    canonical_shard
+        .strip_prefix(&canonical_storage)
+        .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    // Build final path within verified shard directory
+    // Build final paths - shard is now verified to be within storage
     let blob_path = canonical_shard.join(safe_id);
     let temp_path = blob_path.with_extension("tmp");
+
+    // Verify blob path is also within storage (belt and suspenders)
+    blob_path
+        .strip_prefix(&canonical_storage)
+        .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
     // Write atomically: temp file -> sync -> rename
     let mut file = fs::File::create(&temp_path).await?;
@@ -115,7 +119,7 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
 /// Path safety is ensured by:
 /// 1. Sanitizing the ID to only allow safe characters
 /// 2. Canonicalizing the path to resolve symlinks
-/// 3. Verifying the canonical path is within storage
+/// 3. Verifying the canonical path is within storage via strip_prefix
 pub async fn read_blob(storage_path: &Path, id: &str) -> Result<Option<Vec<u8>>, BlobError> {
     // Sanitize ID first - this is the security barrier
     let safe_id = sanitize_blob_id(id)?;
@@ -134,14 +138,13 @@ pub async fn read_blob(storage_path: &Path, id: &str) -> Result<Option<Vec<u8>>,
         Err(e) => return Err(BlobError::Io(e)),
     };
 
-    // Verify canonical path is within storage (catches symlink attacks)
-    if !canonical_path.starts_with(&canonical_storage) {
-        return Err(BlobError::InvalidId(
-            "Path escapes storage directory".to_string(),
-        ));
-    }
+    // Verify canonical path is within storage using strip_prefix
+    // strip_prefix fails if path doesn't start with prefix - this catches symlink attacks
+    canonical_path
+        .strip_prefix(&canonical_storage)
+        .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    // Safe to read - path is verified
+    // Safe to read - path is verified to be within storage
     let mut file = fs::File::open(&canonical_path).await?;
     let mut content = Vec::new();
     file.read_to_end(&mut content).await?;
@@ -154,7 +157,7 @@ pub async fn read_blob(storage_path: &Path, id: &str) -> Result<Option<Vec<u8>>,
 /// Path safety is ensured by:
 /// 1. Sanitizing the ID to only allow safe characters
 /// 2. Canonicalizing the path to resolve symlinks
-/// 3. Verifying the canonical path is within storage
+/// 3. Verifying the canonical path is within storage via strip_prefix
 pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
     // Sanitize ID first - this is the security barrier
     let safe_id = sanitize_blob_id(id)?;
@@ -173,14 +176,13 @@ pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobErro
         Err(e) => return Err(BlobError::Io(e)),
     };
 
-    // Verify canonical path is within storage (catches symlink attacks)
-    if !canonical_path.starts_with(&canonical_storage) {
-        return Err(BlobError::InvalidId(
-            "Path escapes storage directory".to_string(),
-        ));
-    }
+    // Verify canonical path is within storage using strip_prefix
+    // strip_prefix fails if path doesn't start with prefix - this catches symlink attacks
+    canonical_path
+        .strip_prefix(&canonical_storage)
+        .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    // Safe to delete - path is verified
+    // Safe to delete - path is verified to be within storage
     fs::remove_file(&canonical_path).await?;
     Ok(true)
 }
