@@ -50,6 +50,24 @@ fn validate_blob_id(id: &str) -> Result<(), BlobError> {
     Ok(())
 }
 
+/// Normalize and validate the storage base path.
+///
+/// - Prefer a canonicalized absolute path when the directory exists.
+/// - If it doesn't exist yet, require that the provided path is absolute and use it as-is.
+fn normalize_storage_base(storage_path: &Path) -> Result<PathBuf, BlobError> {
+    match storage_path.canonicalize() {
+        Ok(p) => Ok(p),
+        Err(_) => {
+            // Directory may not exist yet; use the provided path but ensure it is absolute.
+            if !storage_path.is_absolute() {
+                return Err(BlobError::InvalidId(
+                    "Storage path must be absolute".to_string(),
+                ));
+            }
+            Ok(storage_path.to_path_buf())
+        }
+    }
+}
 /// Get the path for a blob file.
 ///
 /// Uses directory sharding: `{storage_path}/{id[0..2]}/{id}`
@@ -58,22 +76,9 @@ fn validate_blob_id(id: &str) -> Result<(), BlobError> {
 fn blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, BlobError> {
     validate_blob_id(id)?;
 
-    // Canonicalize storage path when possible so containment checks are reliable.
-    // If the directory does not exist yet, fall back to the provided path,
-    // but require that the base path is absolute to avoid writing relative
-    // to the current working directory.
-    let canonical_storage = match storage_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            // Directory may not exist yet; use the provided path but ensure it is absolute.
-            if !storage_path.is_absolute() {
-                return Err(BlobError::InvalidId(
-                    "Storage path must be absolute".to_string(),
-                ));
-            }
-            storage_path.to_path_buf()
-        }
-    };
+    // Normalize the storage base to an absolute path.
+    let canonical_storage = normalize_storage_base(storage_path)?;
+
 
     // Use first 2 characters for directory sharding
     let shard = &id[..2];
@@ -99,17 +104,7 @@ fn blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, BlobError> {
 pub async fn init_storage(storage_path: &Path) -> Result<(), BlobError> {
     // Normalize storage path in the same way as blob_path: prefer the canonical
     // absolute path, but ensure that we never operate on a relative base path.
-    let base = match storage_path.canonicalize() {
-        Ok(p) => p,
-        Err(_) => {
-            if !storage_path.is_absolute() {
-                return Err(BlobError::InvalidId(
-                    "Storage path must be absolute".to_string(),
-                ));
-            }
-            storage_path.to_path_buf()
-        }
-    };
+    let base = normalize_storage_base(storage_path)?;
 
     fs::create_dir_all(&base).await?;
     Ok(())
