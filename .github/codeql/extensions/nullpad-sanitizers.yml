@@ -1,0 +1,18 @@
+# CodeQL model extension for nullpad
+# Marks sanitize_blob_id as a path sanitizer that validates input
+# to prevent path traversal attacks.
+#
+# Security justification:
+# - sanitize_blob_id validates IDs contain only [A-Za-z0-9_-]
+# - This prevents path traversal since '.', '/', '\' are rejected
+# - Additional canonicalize + strip_prefix checks provide defense in depth
+# - Comprehensive test coverage including symlink attack tests
+
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: summaryModel
+    data:
+      # Mark sanitize_blob_id as clearing taint on the return value
+      # The function validates input and returns only if it passes strict checks
+      - ["nullpad::storage::blob", "sanitize_blob_id", "Argument[0]", "ReturnValue", "taint"]

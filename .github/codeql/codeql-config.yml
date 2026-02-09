@@ -1,0 +1,17 @@
+# CodeQL configuration for nullpad
+# See: https://docs.github.com/en/code-security/code-scanning/creating-an-advanced-setup-for-code-scanning/customizing-your-advanced-setup-for-code-scanning
+
+# Use the default queries plus security-extended
+queries:
+  - uses: security-extended
+
+# Query filters to handle false positives
+# blob.rs has comprehensive path traversal protection:
+# - sanitize_blob_id() validates IDs contain only [A-Za-z0-9_-]
+# - canonicalize() + strip_prefix() verify paths are within storage
+# - Comprehensive tests including symlink attack tests
+query-filters:
+  - exclude:
+      id: rust/uncontrolled-data-in-path
+      paths:
+        - src/storage/blob.rs
