@@ -26,6 +26,7 @@ services:
       - ALL
     volumes:
       - ./static:/app/static:ro
+      - paste-data:/data/pastes
     tmpfs:
       - /tmp
 
@@ -71,3 +72,4 @@ networks:
 
 volumes:
   redis-data:
+  paste-data:
