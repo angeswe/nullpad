@@ -2,7 +2,9 @@
 
 use crate::auth::middleware::{check_rate_limit, AdminSession, AppState, AuthSession};
 use crate::error::AppError;
-use crate::models::{CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPaste};
+use crate::models::{
+    CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPaste, StoredPasteMeta,
+};
 use crate::storage;
 use axum::{
     extract::{ConnectInfo, Multipart, Path, State},
@@ -176,22 +178,31 @@ pub async fn create_paste(
     // Generate paste ID
     let paste_id = nanoid::nanoid!(12);
 
-    // Create stored paste
+    // Create stored paste (metadata + content)
     let paste = StoredPaste {
-        id: paste_id.clone(),
+        meta: StoredPasteMeta {
+            id: paste_id.clone(),
+            filename: metadata.filename,
+            content_type: metadata.content_type,
+            burn_after_reading: metadata.burn_after_reading,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
+        },
         encrypted_content,
-        filename: metadata.filename,
-        content_type: metadata.content_type,
-        burn_after_reading: metadata.burn_after_reading,
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
     };
 
-    // Store paste
-    storage::paste::store_paste(&mut con, &paste, ttl_secs, state.config.max_ttl_secs).await?;
+    // Store paste (metadata to Redis, content to disk)
+    storage::paste::store_paste(
+        &mut con,
+        &state.config.paste_storage_path,
+        &paste,
+        ttl_secs,
+        state.config.max_ttl_secs,
+    )
+    .await?;
 
     // On first upload, atomically update user TTL from idle to active.
     // Uses SCARD + TTL comparison to avoid race conditions between concurrent uploads.
@@ -208,7 +219,7 @@ pub async fn create_paste(
     tracing::info!(
         action = "paste_created",
         paste_id = %paste_id,
-        burn = paste.burn_after_reading,
+        burn = paste.meta.burn_after_reading,
         ttl = ttl_secs,
         "Paste created"
     );
@@ -251,16 +262,16 @@ pub async fn get_paste(
 
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.
-    let paste = storage::paste::get_paste_atomic(&mut con, &id)
+    let paste = storage::paste::get_paste_atomic(&mut con, &state.config.paste_storage_path, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
     Ok(Json(GetPasteResponse {
         encrypted_content: general_purpose::STANDARD.encode(&paste.encrypted_content),
-        filename: paste.filename,
-        content_type: paste.content_type,
-        burn_after_reading: paste.burn_after_reading,
-        created_at: paste.created_at,
+        filename: paste.meta.filename,
+        content_type: paste.meta.content_type,
+        burn_after_reading: paste.meta.burn_after_reading,
+        created_at: paste.meta.created_at,
     }))
 }
 
@@ -275,7 +286,8 @@ pub async fn delete_paste(
     // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
-    let deleted = storage::paste::delete_paste(&mut con, &id).await?;
+    let deleted =
+        storage::paste::delete_paste(&mut con, &state.config.paste_storage_path, &id).await?;
 
     if !deleted {
         return Err(AppError::NotFound("Paste not found".to_string()));

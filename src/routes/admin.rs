@@ -142,7 +142,7 @@ pub async fn revoke_user(
     storage::user::delete_user(&mut con, &id).await?;
 
     // Delete user's pastes last
-    storage::paste::delete_user_pastes(&mut con, &id).await?;
+    storage::paste::delete_user_pastes(&mut con, &state.config.paste_storage_path, &id).await?;
 
     tracing::warn!(action = "user_revoked", user_id = %id, alias = %user.alias, "Admin revoked user");
 

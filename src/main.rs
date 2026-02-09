@@ -11,10 +11,12 @@
 //! Also supports `keygen` subcommand for generating admin keypairs.
 
 use nullpad::{
-    auth::middleware::AppState, config::Config, middleware::security_headers, routes, storage,
+    auth::middleware::AppState, cleanup, config::Config, middleware::security_headers, routes,
+    storage,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
@@ -101,6 +103,11 @@ async fn main() {
     let config = Config::from_env().expect("Failed to load config");
     tracing::info!("Starting nullpad on {}", config.bind_addr);
 
+    // Initialize paste storage directory
+    storage::blob::init_storage(&config.paste_storage_path)
+        .await
+        .expect("Failed to initialize paste storage");
+
     // Connect to Redis with ConnectionManager for automatic reconnection.
     // ConnectionManager handles connection failures with exponential backoff retry,
     // eliminating the need for manual pod restarts when Redis becomes temporarily unavailable.
@@ -119,6 +126,9 @@ async fn main() {
     .await
     .expect("Failed to upsert admin user");
     tracing::info!("Admin user '{}' configured", config.admin_alias);
+
+    // Clone redis for cleanup job before building state
+    let cleanup_redis = redis_manager.clone();
 
     // Build shared state
     let state = AppState {
@@ -142,6 +152,13 @@ async fn main() {
         .layer(cors)
         .layer(axum::middleware::from_fn(security_headers))
         .with_state(state);
+
+    // Start cleanup job for orphaned paste files (runs every 5 minutes)
+    let cleanup_path = config.paste_storage_path.clone();
+    tokio::spawn(async move {
+        cleanup::run_cleanup_loop(cleanup_redis, &cleanup_path, Duration::from_secs(300)).await;
+    });
+    tracing::info!("Cleanup job started (5 minute interval)");
 
     // Bind to configured address
     let listener = tokio::net::TcpListener::bind(config.bind_addr)

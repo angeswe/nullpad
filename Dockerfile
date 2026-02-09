@@ -26,9 +26,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -r nullpad && \
-    useradd -r -g nullpad -s /bin/false nullpad
+# Create non-root user with explicit UID 1000 (matches k8s runAsUser)
+RUN groupadd -g 1000 nullpad && \
+    useradd -u 1000 -g nullpad -s /bin/false nullpad
 
 # Create app directory
 WORKDIR /app

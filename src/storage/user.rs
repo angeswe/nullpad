@@ -208,25 +208,28 @@ where
     let script = redis::Script::new(
         r#"
         local old_json = redis.call('GET', KEYS[1])
+        local result = 0
         if old_json then
+            result = 1
             local old_user = cjson.decode(old_json)
             if type(old_user.alias) == 'string' and old_user.alias ~= ARGV[2] then
                 redis.call('DEL', ARGV[3] .. old_user.alias)
+                result = 2
             end
         end
         redis.call('SET', KEYS[1], ARGV[1])
         redis.call('SET', KEYS[2], 'admin')
-        return 1
+        return result
         "#,
     );
 
-    let _: i32 = script
+    script
         .key(user_key)
         .key(&new_alias_key)
         .arg(&json)
         .arg(alias)
         .arg("alias:")
-        .invoke_async(con)
+        .invoke_async::<i32>(con)
         .await?;
 
     Ok(())

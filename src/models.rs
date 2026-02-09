@@ -37,16 +37,24 @@ pub struct GetPasteResponse {
     pub created_at: u64,
 }
 
-/// Paste data as stored in Redis.
+/// Paste metadata as stored in Redis.
+/// Content is stored separately on disk via storage::blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StoredPaste {
+pub struct StoredPasteMeta {
     pub id: String,
-    pub encrypted_content: Vec<u8>,
     pub filename: String,
     pub content_type: String,
     pub burn_after_reading: bool,
     pub created_at: u64,
     pub owner_id: Option<String>,
+}
+
+/// Full paste data (metadata + content) for API operations.
+/// Used when creating/fetching pastes - combines metadata from Redis with content from disk.
+#[derive(Debug, Clone)]
+pub struct StoredPaste {
+    pub meta: StoredPasteMeta,
+    pub encrypted_content: Vec<u8>,
 }
 
 /// Paste info for admin listing.

@@ -8,7 +8,9 @@
 
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
-use nullpad::{auth::middleware::AppState, config::Config, middleware::security_headers, routes};
+use nullpad::{
+    auth::middleware::AppState, config::Config, middleware::security_headers, routes, storage,
+};
 use reqwest::multipart;
 use std::sync::Arc;
 use testcontainers_modules::redis::Redis;
@@ -74,6 +76,13 @@ async fn spawn_test_server_with_auth_limit(
         .await
         .expect("Failed to upsert admin");
 
+    // Create temp directory for paste storage
+    let paste_storage_path =
+        std::env::temp_dir().join(format!("nullpad_test_{}", nanoid::nanoid!(8)));
+    storage::blob::init_storage(&paste_storage_path)
+        .await
+        .expect("Failed to init paste storage");
+
     let config = Config {
         admin_pubkey,
         admin_alias: admin_alias.clone(),
@@ -92,6 +101,7 @@ async fn spawn_test_server_with_auth_limit(
         rate_limit_auth_per_min: limit,
         trusted_proxy_count: 0,
         max_sessions_per_user: 5,
+        paste_storage_path,
     };
 
     let state = AppState {

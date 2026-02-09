@@ -1,18 +1,24 @@
-//! Paste Redis operations.
+//! Paste storage operations.
 //!
 //! Redis key patterns:
-//! - `paste:{nanoid}` — individual paste data (JSON)
+//! - `paste:{nanoid}` — paste metadata (JSON, no content)
 //! - `user_pastes:{user_id}` — SET of paste IDs owned by user
+//!
+//! Filesystem:
+//! - `{storage_path}/{id[0..2]}/{id}` — encrypted content
 
-use crate::models::StoredPaste;
+use crate::models::{StoredPaste, StoredPasteMeta};
+use crate::storage::blob;
 use redis::AsyncCommands;
+use std::path::Path;
 
-/// Store a paste in Redis with TTL.
+/// Store a paste: content on disk, metadata in Redis.
 ///
 /// If the paste has an owner_id, also add the paste ID to the user's paste set.
 /// `max_ttl_secs` is used for the user_pastes SET expiry (from config.max_ttl_secs).
 pub async fn store_paste<C>(
     con: &mut C,
+    storage_path: &Path,
     paste: &StoredPaste,
     ttl_secs: u64,
     max_ttl_secs: u64,
@@ -20,8 +26,19 @@ pub async fn store_paste<C>(
 where
     C: AsyncCommands,
 {
-    let key = format!("paste:{}", paste.id);
-    let json = serde_json::to_string(paste).map_err(|e| {
+    // Write content to disk first (so we don't have orphan metadata)
+    blob::write_blob(storage_path, &paste.meta.id, &paste.encrypted_content)
+        .await
+        .map_err(|e| {
+            redis::RedisError::from((
+                redis::ErrorKind::UnexpectedReturnType,
+                "Blob write failed",
+                e.to_string(),
+            ))
+        })?;
+
+    let key = format!("paste:{}", paste.meta.id);
+    let json = serde_json::to_string(&paste.meta).map_err(|e| {
         redis::RedisError::from((
             redis::ErrorKind::UnexpectedReturnType,
             "JSON serialize",
@@ -29,7 +46,7 @@ where
         ))
     })?;
 
-    // Store paste: ttl_secs=0 means forever (no expiration)
+    // Store metadata: ttl_secs=0 means forever (no expiration)
     if ttl_secs == 0 {
         con.set::<_, _, ()>(&key, json).await?;
     } else {
@@ -37,9 +54,10 @@ where
     }
 
     // If paste has an owner, add to user's paste set
-    if let Some(ref owner_id) = paste.owner_id {
+    if let Some(ref owner_id) = paste.meta.owner_id {
         let user_pastes_key = format!("user_pastes:{}", owner_id);
-        con.sadd::<_, _, ()>(&user_pastes_key, &paste.id).await?;
+        con.sadd::<_, _, ()>(&user_pastes_key, &paste.meta.id)
+            .await?;
         if ttl_secs == 0 {
             // Forever paste: persist the user_pastes set (remove any TTL)
             con.persist::<_, ()>(&user_pastes_key).await?;
@@ -64,10 +82,14 @@ where
 ///
 /// Single Lua script avoids the check-then-act race condition where two
 /// concurrent requests could both see burn_after_reading=true before either
-/// deletes the paste. Uses cjson.decode for reliable JSON parsing and
+/// deletes the metadata. Uses cjson.decode for reliable JSON parsing and
 /// cleans up user_pastes SET on burn deletion.
+///
+/// Content is read from disk after Redis operation succeeds.
+/// For burn-after-reading, deletes blob BEFORE returning (atomic burn).
 pub async fn get_paste_atomic<C>(
     con: &mut C,
+    storage_path: &Path,
     id: &str,
 ) -> Result<Option<StoredPaste>, redis::RedisError>
 where
@@ -75,8 +97,8 @@ where
 {
     let key = format!("paste:{}", id);
 
-    // Lua script: GET paste, parse JSON for burn flag, DEL if burn + SREM from user_pastes
-    // Key prefixes passed as ARGV to avoid hardcoding in Lua
+    // Lua script: GET metadata, parse JSON for burn flag, DEL if burn + SREM from user_pastes
+    // Now fast since metadata is small (~200 bytes vs 10MB+ content)
     let script = redis::Script::new(
         r#"
         local val = redis.call('GET', KEYS[1])
@@ -103,26 +125,59 @@ where
 
     match json {
         Some(data) => {
-            let paste = serde_json::from_str(&data).map_err(|e| {
+            let meta: StoredPasteMeta = serde_json::from_str(&data).map_err(|e| {
                 redis::RedisError::from((
                     redis::ErrorKind::UnexpectedReturnType,
                     "JSON deserialize",
                     e.to_string(),
                 ))
             })?;
-            Ok(Some(paste))
+
+            // Read content from disk
+            // Treat blob errors as "not found" to gracefully handle orphaned metadata
+            // (e.g., pastes created before blob migration, or disk issues)
+            let encrypted_content = match blob::read_blob(storage_path, id).await {
+                Ok(Some(content)) => content,
+                Ok(None) => {
+                    // Blob missing - orphaned metadata, treat as not found
+                    tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing");
+                    return Ok(None);
+                }
+                Err(e) => {
+                    // Blob read error - treat as not found, log for debugging
+                    tracing::warn!(paste_id = %id, error = %e, "Blob read error, treating as not found");
+                    return Ok(None);
+                }
+            };
+
+            // For burn-after-reading, delete the blob now (metadata already deleted by Lua)
+            if meta.burn_after_reading {
+                if let Err(e) = blob::delete_blob(storage_path, id).await {
+                    tracing::error!(paste_id = %id, error = %e, "Failed to delete burn blob");
+                    // Continue anyway - content was already read
+                }
+            }
+
+            Ok(Some(StoredPaste {
+                meta,
+                encrypted_content,
+            }))
         }
         None => Ok(None),
     }
 }
 
-/// Delete a paste from Redis, cleaning up the owner's user_pastes SET.
+/// Delete a paste from Redis and disk, cleaning up the owner's user_pastes SET.
 ///
-/// Uses a Lua script to atomically fetch the paste (for owner_id), delete it,
-/// and SREM from the owner's user_pastes SET.
+/// Uses a Lua script to atomically fetch the metadata (for owner_id), delete it,
+/// and SREM from the owner's user_pastes SET. Then deletes the blob from disk.
 ///
 /// Returns true if the paste was deleted, false if it didn't exist.
-pub async fn delete_paste<C>(con: &mut C, id: &str) -> Result<bool, redis::RedisError>
+pub async fn delete_paste<C>(
+    con: &mut C,
+    storage_path: &Path,
+    id: &str,
+) -> Result<bool, redis::RedisError>
 where
     C: AsyncCommands,
 {
@@ -150,6 +205,15 @@ where
         .arg("user_pastes:")
         .invoke_async(con)
         .await?;
+
+    if deleted > 0 {
+        // Delete blob from disk
+        if let Err(e) = blob::delete_blob(storage_path, id).await {
+            tracing::warn!(paste_id = %id, error = %e, "Failed to delete blob (may not exist)");
+            // Continue anyway - metadata is already deleted
+        }
+    }
+
     Ok(deleted > 0)
 }
 
@@ -222,33 +286,31 @@ where
     Ok(())
 }
 
-/// Delete all pastes owned by a user.
+/// Delete all pastes owned by a user (Redis metadata + disk blobs).
 ///
-/// Uses a Lua script to atomically delete all pastes and clean up the user_pastes SET.
-/// Only deletes the tracking SET if ALL pastes were successfully deleted. If some pastes
-/// fail to delete (e.g., Redis errors mid-loop), only removes successfully deleted paste IDs
-/// from the tracking SET, leaving the SET intact with remaining paste IDs.
-///
-/// This prevents orphaning forever pastes if Redis errors during deletion.
-pub async fn delete_user_pastes<C>(con: &mut C, user_id: &str) -> Result<(), redis::RedisError>
+/// First fetches paste IDs, then deletes Redis metadata via Lua script,
+/// then deletes blobs from disk. Blob deletion failures are logged but
+/// don't fail the operation (orphaned blobs are cleaned up by cleanup job).
+pub async fn delete_user_pastes<C>(
+    con: &mut C,
+    storage_path: &Path,
+    user_id: &str,
+) -> Result<(), redis::RedisError>
 where
     C: AsyncCommands,
 {
     let user_pastes_key = format!("user_pastes:{}", user_id);
 
-    // Lua script to atomically delete all user pastes
-    // Returns number of successfully deleted pastes and total count
-    //
-    // KEYS[1] = user_pastes:{user_id}
-    // ARGV[1] = paste key prefix ("paste:")
-    //
-    // Strategy:
-    // - Fetch all paste IDs from the SET
-    // - Try to delete each paste, tracking successes and failures
-    // - If all succeeded, delete the entire SET
-    // - If some failed, only SREM the successfully deleted IDs
-    //
-    // Return format: {deleted_count, total_count}
+    // First get the list of paste IDs (for blob deletion)
+    let paste_ids: Vec<String> = con.smembers(&user_pastes_key).await?;
+
+    if paste_ids.is_empty() {
+        // Clean up empty set if it exists
+        con.del::<_, ()>(&user_pastes_key).await?;
+        return Ok(());
+    }
+
+    // Delete Redis metadata via Lua script
     let script = redis::Script::new(
         r#"
         local user_pastes_key = KEYS[1]
@@ -276,13 +338,10 @@ where
         end
 
         if failed == 0 then
-            -- All pastes deleted successfully, delete the tracking SET
             redis.call('DEL', user_pastes_key)
         elseif #deleted > 0 then
-            -- Some pastes deleted, some failed: remove only the successfully deleted IDs
             redis.call('SREM', user_pastes_key, unpack(deleted))
         end
-        -- If #deleted == 0 and failed > 0, leave the SET intact with all paste IDs
 
         return {#deleted, #paste_ids}
         "#,
@@ -294,7 +353,6 @@ where
         .invoke_async(con)
         .await?;
 
-    // Log if some pastes failed to delete (for debugging)
     if result.len() >= 2 && result[0] < result[1] {
         tracing::warn!(
             action = "paste_cleanup_partial",
@@ -302,6 +360,13 @@ where
             total = result[1],
             "Partial paste deletion during user cleanup"
         );
+    }
+
+    // Delete blobs from disk (best effort - failures logged but don't fail operation)
+    for paste_id in paste_ids {
+        if let Err(e) = blob::delete_blob(storage_path, &paste_id).await {
+            tracing::warn!(paste_id = %paste_id, error = %e, "Failed to delete user paste blob");
+        }
     }
 
     Ok(())
