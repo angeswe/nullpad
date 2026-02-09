@@ -79,7 +79,6 @@ fn blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, BlobError> {
     // Normalize the storage base to an absolute path.
     let canonical_storage = normalize_storage_base(storage_path)?;
 
-
     // Use first 2 characters for directory sharding
     let shard = &id[..2];
     let path = canonical_storage.join(shard).join(id);
