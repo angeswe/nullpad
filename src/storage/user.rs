@@ -160,17 +160,10 @@ where
     con.del::<_, ()>(&user_key).await?;
 
     // Delete alias key if user was found
-    if let Some(ref user) = user {
+    if let Some(user) = user {
         let alias_key = format!("alias:{}", user.alias);
         con.del::<_, ()>(&alias_key).await?;
     }
-
-    // Log for debugging mysterious deletion bug (nullpad-nank)
-    tracing::warn!(
-        user_id = %id,
-        alias = user.as_ref().map(|u| u.alias.as_str()),
-        "delete_user called - investigate if unexpected"
-    );
 
     Ok(())
 }
@@ -212,7 +205,6 @@ where
 
     // Atomic upsert: read old admin, delete stale alias, write new admin + alias
     // Alias key prefix passed as ARGV[3] to avoid hardcoding in Lua
-    // Returns: 0 = new admin, 1 = updated (same alias), 2 = updated (deleted old alias)
     let script = redis::Script::new(
         r#"
         local old_json = redis.call('GET', KEYS[1])
@@ -231,22 +223,14 @@ where
         "#,
     );
 
-    let result: i32 = script
+    script
         .key(user_key)
         .key(&new_alias_key)
         .arg(&json)
         .arg(alias)
         .arg("alias:")
-        .invoke_async(con)
+        .invoke_async::<i32>(con)
         .await?;
-
-    // Log for debugging mysterious deletion bug (nullpad-nank)
-    if result == 2 {
-        tracing::warn!(
-            new_alias = %alias,
-            "upsert_admin deleted old alias - investigate if unexpected"
-        );
-    }
 
     Ok(())
 }
