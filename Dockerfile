@@ -52,8 +52,8 @@ RUN apt-get update && \
 # Create paste storage directory
 RUN mkdir -p /data/pastes
 
-# Change ownership
-RUN chown -R nullpad:nullpad /app /data
+# Ensure static files are world-readable and change ownership
+RUN chmod -R a+rX /app/static && chown -R nullpad:nullpad /app /data
 
 # Switch to non-root user
 USER nullpad
