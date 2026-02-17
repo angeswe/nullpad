@@ -1,4 +1,4 @@
-# nullpad
+# nullpad <img src="static/favicon.svg" alt="nullpad logo" width="32" height="32" align="top">
 
 [![CI](https://github.com/angeswe/nullpad/actions/workflows/ci.yml/badge.svg)](https://github.com/angeswe/nullpad/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
@@ -89,11 +89,13 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 ## Security Model
 
 **Encryption**
+
 - Content: AES-256-GCM via Web Crypto API
 - Key derivation: Argon2id (m=19456, t=2, p=1) — OWASP recommended params
 - Keys never leave the browser or touch the server
 
 **Authentication**
+
 - Ed25519 challenge-response (no passwords)
 - Single-use nonces with 30s TTL
 - Session tokens expire in 15 minutes
@@ -101,6 +103,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - ADMIN_PUBKEY validated as correct Ed25519 key at startup (fail-fast)
 
 **Transport & Headers**
+
 - Strict CSP: `default-src 'self'`
 - SRI hashes on all script tags
 - HSTS, no-referrer policy
@@ -108,15 +111,18 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - Request body size limit enforced at framework level
 
 **Rate Limiting**
+
 - IP-based rate limiting on paste creation, paste retrieval, and auth endpoints
 - Uses X-Forwarded-For / X-Real-IP behind reverse proxies, falls back to direct IP
 
 **Data Expiration**
+
 - All Redis keys have TTLs by default — trusted users may create "forever" pastes with no expiration
 - Burn-after-reading uses atomic Lua script (no race conditions)
 - Burn and admin delete clean up user_pastes references atomically
 
 **Logging**
+
 - No HTTP access logs — nullpad does not log request paths, paste IDs, or IP addresses
 - Only security-relevant events are logged: rate limit triggers (hashed IP), auth failures, admin actions
 - This is intentional — access logs would undermine the zero-knowledge model
@@ -126,6 +132,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 ## Tech Stack
 
 **Backend**
+
 - Rust with Axum 0.8 web framework
 - Redis for metadata and sessions (everything expires)
 - Filesystem for encrypted paste content (low memory footprint)
@@ -133,6 +140,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - zeroize for secure memory cleanup
 
 **Frontend**
+
 - Vanilla HTML/JS (no build step)
 - Web Crypto API for AES-256-GCM and Ed25519
 - TweetNaCl.js for Ed25519 public key derivation (Firefox compatibility)
@@ -227,6 +235,7 @@ Nullpad uses the `X-Forwarded-For` header for rate limiting when behind a revers
 - `TRUSTED_PROXY_COUNT=2`: Trusts two proxies (e.g., Cloudflare + nginx)
 
 Example with Cloudflare + nginx:
+
 ```bash
 TRUSTED_PROXY_COUNT=2
 ```
