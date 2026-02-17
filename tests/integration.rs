@@ -902,7 +902,7 @@ async fn test_admin_create_and_list_invites() {
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body.as_array().unwrap().len() >= 1);
+    assert!(!body.as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1360,15 +1360,12 @@ async fn test_concurrent_burn_after_reading_race() {
     let mut not_found_count = 0;
     for handle in handles {
         let result = handle.await.unwrap();
-        match result {
-            Ok(resp) => {
-                if resp.status() == 200 {
-                    success_count += 1;
-                } else if resp.status() == 404 {
-                    not_found_count += 1;
-                }
+        if let Ok(resp) = result {
+            if resp.status() == 200 {
+                success_count += 1;
+            } else if resp.status() == 404 {
+                not_found_count += 1;
             }
-            Err(_) => {}
         }
     }
 
