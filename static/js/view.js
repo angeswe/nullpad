@@ -121,8 +121,24 @@
       const response = await fetch(`/api/paste/${pasteId}`);
 
       if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.error || 'Failed to fetch paste');
+        // Try to parse JSON error, fall back to status-based message
+        let errorMessage;
+        try {
+          const error = await response.json();
+          errorMessage = error.error;
+        } catch {
+          // Response wasn't JSON (proxy error, network issue, etc.)
+        }
+        if (!errorMessage) {
+          if (response.status === 404) {
+            errorMessage = 'Paste not found or has expired';
+          } else if (response.status === 429) {
+            errorMessage = 'Too many requests. Please wait.';
+          } else {
+            errorMessage = 'Server error (' + response.status + ')';
+          }
+        }
+        throw new Error(errorMessage);
       }
 
       const data = await response.json();
@@ -135,7 +151,7 @@
 
       return data;
     } catch (err) {
-      throw new Error('Failed to fetch paste: ' + err.message);
+      throw new Error(err.message || 'Failed to fetch paste');
     }
   }
 
