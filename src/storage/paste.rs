@@ -94,16 +94,15 @@ where
     let key = format!("paste:{}", id);
 
     // Step 1: Verify blob exists on disk BEFORE touching metadata.
-    let blob_path = blob::blob_path(storage_path, id);
-    match blob_path {
-        Ok(path) => {
-            if !path.exists() {
-                let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(con).await?;
-                if exists {
-                    tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing on disk");
-                }
-                return Ok(None);
+    // Uses canonicalized path check to prevent path traversal.
+    match blob::blob_exists(storage_path, id).await {
+        Ok(true) => { /* blob exists, proceed to metadata */ }
+        Ok(false) => {
+            let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(con).await?;
+            if exists {
+                tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing on disk");
             }
+            return Ok(None);
         }
         Err(_) => return Ok(None),
     }
