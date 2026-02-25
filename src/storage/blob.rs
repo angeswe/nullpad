@@ -113,28 +113,6 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
     Ok(())
 }
 
-/// Check if a blob exists on disk (for pre-flight checks).
-///
-/// Uses the same canonicalization and path-containment verification as
-/// read_blob/delete_blob to prevent path traversal and symlink attacks.
-pub async fn blob_exists(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
-    let safe_id = sanitize_blob_id(id)?;
-    let canonical_storage = storage_path.canonicalize()?;
-    let shard_name = &safe_id[..2];
-    let constructed_path = canonical_storage.join(shard_name).join(safe_id);
-
-    match constructed_path.canonicalize() {
-        Ok(canonical_path) => {
-            canonical_path
-                .strip_prefix(&canonical_storage)
-                .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
-            Ok(canonical_path.is_file())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(BlobError::Io(e)),
-    }
-}
-
 /// Read a blob from disk.
 ///
 /// Returns None if the blob doesn't exist.
