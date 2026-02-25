@@ -127,6 +127,13 @@
 
     // Set up form submission
     registerForm.addEventListener('submit', handleRegister);
+
+    // Clear secret inputs on page unload
+    window.addEventListener('pagehide', () => {
+      secretInput.value = '';
+      secretConfirmInput.value = '';
+      aliasInput.value = '';
+    });
   }
 
   // Start when DOM is ready

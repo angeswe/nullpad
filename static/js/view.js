@@ -33,6 +33,15 @@
   let pinAttempts = 0;
   let pinBackoffUntil = 0;
   let clipboardDirty = false;
+  let imageBlobUrl = null;
+
+  function sanitizeFilename(name) {
+    return name
+      .replace(/[/\\]/g, '_')         // strip path separators
+      .replace(/[\x00-\x1f\x7f]/g, '') // strip null bytes and control chars
+      .slice(0, 255)                    // truncate to 255 chars
+      || 'file';                        // fallback if empty after sanitization
+  }
 
   // ============================================================================
   // URL Parsing
@@ -159,8 +168,17 @@
   // Decryption
   // ============================================================================
 
+  // Minimum encrypted payload: 12-byte IV + 16-byte GCM auth tag = 28 bytes
+  const MIN_ENCRYPTED_BYTES = 28;
+
   async function decryptPaste(pin = null) {
     try {
+      // Validate encrypted data minimum length before attempting decryption
+      const decoded = NullpadCrypto.base64Decode(encryptedData);
+      if (decoded.length < MIN_ENCRYPTED_BYTES) {
+        throw new Error('Encrypted data too short');
+      }
+
       // Derive key with PIN if provided (pass existing salt from URL)
       let decryptionKey = encryptionKey;
       if (pin) {
@@ -197,30 +215,29 @@
       'em', 'strong', 'del', 's', 'a',
       'table', 'thead', 'tbody', 'tr', 'th', 'td',
       'div', 'span', 'sup', 'sub', 'details', 'summary',
-      'dl', 'dt', 'dd', 'kbd', 'mark', 'abbr', 'img'
+      'dl', 'dt', 'dd', 'kbd', 'mark', 'abbr'
     ],
     ALLOWED_ATTR: [
-      'href', 'src', 'alt', 'title', 'class',
+      'href', 'alt', 'title', 'class',
       'align', 'colspan', 'rowspan', 'scope', 'open'
     ],
     ALLOW_DATA_ATTR: false,
     RETURN_DOM_FRAGMENT: true
   };
 
-  function canRenderMarkdown() {
-    return typeof marked !== 'undefined' && typeof DOMPurify !== 'undefined';
-  }
+  // Private DOMPurify instance (avoids hook accumulation on global singleton)
+  const purify = (typeof DOMPurify !== 'undefined') ? DOMPurify(window) : null;
 
-  function renderMarkdownView(text) {
-    const rawHtml = marked.parse(text);
+  // One-time hook setup on private instance
+  if (purify) {
     // Allow class only on <code> elements (for highlight.js syntax themes)
-    DOMPurify.addHook('uponSanitizeAttribute', function(node, data) {
+    purify.addHook('uponSanitizeAttribute', function(node, data) {
       if (data.attrName === 'class' && node.tagName !== 'CODE') {
         data.keepAttr = false;
       }
     });
     // Force external links to open in new tab with noopener
-    DOMPurify.addHook('afterSanitizeAttributes', function(node) {
+    purify.addHook('afterSanitizeAttributes', function(node) {
       if (node.tagName === 'A' && node.hasAttribute('href')) {
         const href = node.getAttribute('href');
         if (href && (href.startsWith('http://') || href.startsWith('https://'))) {
@@ -229,13 +246,17 @@
         }
       }
     });
-    try {
-      const fragment = DOMPurify.sanitize(rawHtml, purifyConfig);
-      contentDisplay.replaceChildren();
-      contentDisplay.appendChild(fragment);
-    } finally {
-      DOMPurify.removeAllHooks();
-    }
+  }
+
+  function canRenderMarkdown() {
+    return typeof marked !== 'undefined' && purify !== null;
+  }
+
+  function renderMarkdownView(text) {
+    const rawHtml = marked.parse(text);
+    const fragment = purify.sanitize(rawHtml, purifyConfig);
+    contentDisplay.replaceChildren();
+    contentDisplay.appendChild(fragment);
     contentDisplay.classList.add('markdown-body');
     contentDisplay.classList.remove('hidden');
     rawContent.classList.add('hidden');
@@ -285,8 +306,9 @@
     } else if (metadata.mimetype && metadata.mimetype.startsWith('image/')) {
       // Image file - display inline
       const blob = new Blob([decrypted.bytes], { type: metadata.mimetype });
+      imageBlobUrl = URL.createObjectURL(blob);
       const img = document.createElement('img');
-      img.src = URL.createObjectURL(blob);
+      img.src = imageBlobUrl;
       img.alt = metadata.filename || 'Image';
       img.style.maxWidth = '100%';
       contentDisplay.appendChild(img);
@@ -394,7 +416,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = metadata.filename;
+    a.download = sanitizeFilename(metadata.filename);
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -462,6 +484,11 @@
 
   function clearSensitiveData() {
     // SECURITY: String references (decryptedText, sessionStorage copies) cannot be wiped from JS heap
+    // Revoke image blob URL to free decrypted image from memory
+    if (imageBlobUrl) {
+      URL.revokeObjectURL(imageBlobUrl);
+      imageBlobUrl = null;
+    }
     // Zero out Uint8Array buffers
     if (decryptedBytes instanceof Uint8Array) {
       decryptedBytes.fill(0);
@@ -479,6 +506,11 @@
     encryptedData = null;
     pinSalt = null;
     metadata = null;
+    // Clear sessionStorage key material
+    if (pasteId) {
+      const storageKey = 'np_' + pasteId;
+      try { sessionStorage.removeItem(storageKey); } catch (e) { /* ignore */ }
+    }
     // Best-effort clipboard clear (may fail without user gesture)
     if (clipboardDirty && navigator.clipboard) {
       navigator.clipboard.writeText('').catch(() => {});

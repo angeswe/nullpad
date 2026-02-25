@@ -96,6 +96,12 @@
 
     // Set up form submission
     loginForm.addEventListener('submit', handleLogin);
+
+    // Clear secret inputs on page unload
+    window.addEventListener('pagehide', () => {
+      secretInput.value = '';
+      aliasInput.value = '';
+    });
   }
 
   // Start when DOM is ready
