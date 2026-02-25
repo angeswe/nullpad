@@ -17,3 +17,4 @@ Thumbs.db
 .vscode/
 *.iml
 .build/
+.githooks/
