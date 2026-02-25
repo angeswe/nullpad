@@ -80,9 +80,9 @@ where
 
 /// Get a paste atomically, deleting if burn-after-reading.
 ///
-/// For burn-after-reading pastes, the blob is verified to exist on disk
-/// BEFORE metadata is deleted from Redis. This prevents permanent data loss
-/// if the disk read would fail.
+/// Reads the blob from disk FIRST to ensure content is available before
+/// touching metadata. For burn-after-reading pastes, metadata is only
+/// deleted after confirming the blob can be read, preventing data loss.
 pub async fn get_paste_atomic<C>(
     con: &mut C,
     storage_path: &Path,
@@ -93,11 +93,12 @@ where
 {
     let key = format!("paste:{}", id);
 
-    // Step 1: Verify blob exists on disk BEFORE touching metadata.
-    // Uses canonicalized path check to prevent path traversal.
-    match blob::blob_exists(storage_path, id).await {
-        Ok(true) => { /* blob exists, proceed to metadata */ }
-        Ok(false) => {
+    // Step 1: Read blob from disk BEFORE touching metadata.
+    // This ensures content is available before we atomically delete
+    // metadata for burn-after-reading pastes.
+    let encrypted_content = match blob::read_blob(storage_path, id).await {
+        Ok(Some(content)) => content,
+        Ok(None) => {
             let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(con).await?;
             if exists {
                 tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing on disk");
@@ -105,7 +106,7 @@ where
             return Ok(None);
         }
         Err(_) => return Ok(None),
-    }
+    };
 
     // Step 2: Lua script — GET metadata, DEL if burn + SREM from user_pastes
     let script = redis::Script::new(
@@ -142,18 +143,7 @@ where
                 ))
             })?;
 
-            // Step 3: Read full blob content from disk
-            let encrypted_content = match blob::read_blob(storage_path, id).await {
-                Ok(Some(content)) => content,
-                Ok(None) | Err(_) => {
-                    if meta.burn_after_reading {
-                        tracing::error!(paste_id = %id, "Burn paste blob disappeared after metadata deleted");
-                    }
-                    return Ok(None);
-                }
-            };
-
-            // Step 4: For burn-after-reading, delete the blob now
+            // Step 3: For burn-after-reading, delete the blob now
             if meta.burn_after_reading {
                 if let Err(e) = blob::delete_blob(storage_path, id).await {
                     tracing::error!(paste_id = %id, error = %e, "Failed to delete burn blob");
