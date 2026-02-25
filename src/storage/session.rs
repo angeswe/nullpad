@@ -235,13 +235,28 @@ where
         );
     }
 
-    // Store session with TTL
-    con.set_ex::<_, _, ()>(&session_key, json, ttl_secs).await?;
+    // Atomically: store session, add to tracking set, and extend set TTL (never shrink).
+    // Uses Lua to prevent race conditions where a concurrent login shrinks the set TTL.
+    let store_script = redis::Script::new(
+        r"
+        redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
+        redis.call('SADD', KEYS[2], ARGV[3])
+        local current_ttl = redis.call('TTL', KEYS[2])
+        local new_ttl = tonumber(ARGV[1])
+        if current_ttl < new_ttl then
+            redis.call('EXPIRE', KEYS[2], new_ttl)
+        end
+        return 1
+        ",
+    );
 
-    // Track session token in user's session set
-    con.sadd::<_, _, ()>(&user_sessions_key, token).await?;
-    // Keep the set alive at least as long as the session
-    con.expire::<_, ()>(&user_sessions_key, ttl_secs as i64)
+    store_script
+        .key(&session_key)
+        .key(&user_sessions_key)
+        .arg(ttl_secs)
+        .arg(&json)
+        .arg(token)
+        .invoke_async::<i32>(con)
         .await?;
 
     Ok(())
@@ -300,27 +315,43 @@ where
     Ok(deleted > 0)
 }
 
-/// Delete all sessions for a user.
+/// Delete all sessions for a user atomically.
 ///
-/// Uses the `user_sessions:{user_id}` tracking set for O(1) lookup
-/// instead of scanning all session keys.
+/// Uses a Lua script to atomically SMEMBERS + DEL all session keys + DEL
+/// the tracking set, preventing new sessions from sneaking in between
+/// the read and delete steps. Capped at 100 sessions to bound Lua runtime.
 pub async fn delete_user_sessions<C>(con: &mut C, user_id: &str) -> Result<(), redis::RedisError>
 where
     C: AsyncCommands,
 {
     let user_sessions_key = format!("user_sessions:{}", user_id);
 
-    // Get all session tokens for this user
-    let tokens: Vec<String> = con.smembers(&user_sessions_key).await?;
+    // Lua script: atomically get all tokens (capped), delete their session keys,
+    // then delete the tracking set.
+    // KEYS[1] = user_sessions:{user_id}
+    // ARGV[1] = session key prefix ("session:")
+    // ARGV[2] = max sessions to process (cap to bound Lua runtime)
+    // Returns: number of session keys deleted
+    let script = redis::Script::new(
+        r"
+        local tokens = redis.call('SMEMBERS', KEYS[1])
+        local max_cap = tonumber(ARGV[2])
+        local deleted = 0
+        for i, token in ipairs(tokens) do
+            if i > max_cap then break end
+            deleted = deleted + redis.call('DEL', ARGV[1] .. token)
+        end
+        redis.call('DEL', KEYS[1])
+        return deleted
+        ",
+    );
 
-    // Delete each session key
-    for token in &tokens {
-        let session_key = format!("session:{}", token);
-        con.del::<_, ()>(&session_key).await?;
-    }
-
-    // Delete the tracking set itself
-    con.del::<_, ()>(&user_sessions_key).await?;
+    script
+        .key(&user_sessions_key)
+        .arg("session:")
+        .arg(100)
+        .invoke_async::<i32>(con)
+        .await?;
 
     Ok(())
 }
