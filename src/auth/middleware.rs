@@ -16,6 +16,8 @@ pub struct AppState {
     /// eliminating the need for manual pod restarts when Redis becomes temporarily unavailable.
     pub redis: redis::aio::ConnectionManager,
     pub config: Arc<Config>,
+    /// Random 32-byte salt for HMAC-SHA256 hashing of client IPs in Redis keys.
+    pub ip_hmac_salt: Arc<[u8; 32]>,
 }
 
 /// Authenticated session extractor.

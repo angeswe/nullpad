@@ -23,25 +23,37 @@ pub fn verify_signature(
     // Decode public key from base64
     let pubkey_bytes = general_purpose::STANDARD
         .decode(pubkey_base64)
-        .map_err(|e| AppError::BadRequest(format!("Invalid pubkey base64: {}", e)))?;
+        .map_err(|e| {
+            tracing::debug!(error = %e, "Invalid pubkey base64");
+            AppError::BadRequest("Invalid public key format".to_string())
+        })?;
 
     if pubkey_bytes.len() != 32 {
-        return Err(AppError::BadRequest(format!(
-            "Invalid pubkey length: expected 32 bytes, got {}",
-            pubkey_bytes.len()
-        )));
+        tracing::debug!(
+            expected = 32,
+            got = pubkey_bytes.len(),
+            "Invalid pubkey length"
+        );
+        return Err(AppError::BadRequest(
+            "Invalid public key format".to_string(),
+        ));
     }
 
     // Decode signature from base64
     let signature_bytes = general_purpose::STANDARD
         .decode(signature_base64)
-        .map_err(|e| AppError::BadRequest(format!("Invalid signature base64: {}", e)))?;
+        .map_err(|e| {
+            tracing::debug!(error = %e, "Invalid signature base64");
+            AppError::BadRequest("Invalid signature format".to_string())
+        })?;
 
     if signature_bytes.len() != 64 {
-        return Err(AppError::BadRequest(format!(
-            "Invalid signature length: expected 64 bytes, got {}",
-            signature_bytes.len()
-        )));
+        tracing::debug!(
+            expected = 64,
+            got = signature_bytes.len(),
+            "Invalid signature length"
+        );
+        return Err(AppError::BadRequest("Invalid signature format".to_string()));
     }
 
     // Create VerifyingKey from pubkey bytes
@@ -49,8 +61,10 @@ pub fn verify_signature(
         .try_into()
         .map_err(|_| AppError::Internal("Failed to convert pubkey to array".to_string()))?;
 
-    let verifying_key = VerifyingKey::from_bytes(&pubkey_array)
-        .map_err(|e| AppError::BadRequest(format!("Invalid public key: {}", e)))?;
+    let verifying_key = VerifyingKey::from_bytes(&pubkey_array).map_err(|e| {
+        tracing::debug!(error = %e, "Invalid Ed25519 public key");
+        AppError::BadRequest("Invalid public key format".to_string())
+    })?;
 
     // Create Signature from signature bytes
     let signature_array: [u8; 64] = signature_bytes

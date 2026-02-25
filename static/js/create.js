@@ -31,6 +31,14 @@
   let currentFile = null;
   let clipboardDirty = false;
 
+  function sanitizeFilename(name) {
+    return name
+      .replace(/[/\\]/g, '_')         // strip path separators
+      .replace(/[\x00-\x1f\x7f]/g, '') // strip null bytes and control chars
+      .slice(0, 255)                    // truncate to 255 chars
+      || 'file';                        // fallback if empty after sanitization
+  }
+
   // ============================================================================
   // File Upload Handling (trusted users only - public page has no file upload)
   // ============================================================================
@@ -137,7 +145,7 @@
 
       if (currentFile) {
         contentBytes = new Uint8Array(await currentFile.arrayBuffer());
-        filename = currentFile.name;
+        filename = sanitizeFilename(currentFile.name);
         contentType = currentFile.type || 'application/octet-stream';
       } else {
         contentBytes = NullpadCrypto.textEncode(text);
@@ -185,8 +193,12 @@
       }
 
       if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || 'Failed to create paste');
+        let msg;
+        try {
+          const err = await response.json();
+          msg = err.error;
+        } catch { /* non-JSON response */ }
+        throw new Error(msg || 'Failed to create paste');
       }
 
       const result = await response.json();
@@ -239,6 +251,7 @@
 
   function resetForm() {
     form.reset();
+    pasteUrlInput.value = '';
     currentFile = null;
     if (fileInfo) fileInfo.classList.add('hidden');
     contentTextarea.disabled = false;

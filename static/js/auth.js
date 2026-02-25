@@ -149,7 +149,9 @@
         throw new Error('TweetNaCl not loaded. Cannot derive public key.');
       }
       const naclKeypair = nacl.sign.keyPair.fromSeed(seed);
-      const pubKeyBytes = naclKeypair.publicKey;
+      const pubKeyBytes = new Uint8Array(naclKeypair.publicKey);
+      // Zero the 64-byte expanded secret key from TweetNaCl
+      naclKeypair.secretKey.fill(0);
 
       return {
         publicKey: b64Encode(pubKeyBytes),
@@ -240,8 +242,12 @@
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Failed to request challenge');
+      let msg;
+      try {
+        const error = await response.json();
+        msg = error.error;
+      } catch { /* non-JSON response */ }
+      throw new Error(msg || 'Failed to request challenge');
     }
 
     return await response.json();
@@ -261,8 +267,12 @@
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Authentication failed');
+      let msg;
+      try {
+        const error = await response.json();
+        msg = error.error;
+      } catch { /* non-JSON response */ }
+      throw new Error(msg || 'Authentication failed');
     }
 
     return await response.json();
@@ -283,8 +293,12 @@
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Registration failed');
+      let msg;
+      try {
+        const error = await response.json();
+        msg = error.error;
+      } catch { /* non-JSON response */ }
+      throw new Error(msg || 'Registration failed');
     }
 
     return await response.json();
@@ -298,15 +312,25 @@
    */
   async function login(secret, alias) {
     const privateKey = await derivePrivateKey(secret, alias);
-    const { nonce } = await requestChallenge(alias);
-    const signature = await signChallenge(nonce, privateKey);
+    const challengeData = await requestChallenge(alias);
+
+    // Validate challenge nonce format before signing
+    if (!challengeData || typeof challengeData.nonce !== 'string' || challengeData.nonce.length === 0) {
+      throw new Error('Invalid challenge response from server');
+    }
+    // Server nonce should be 32 bytes base64-encoded (44 chars with padding, 43 without)
+    if (challengeData.nonce.length < 20 || challengeData.nonce.length > 100) {
+      throw new Error('Challenge nonce has unexpected length');
+    }
+
+    const signature = await signChallenge(challengeData.nonce, privateKey);
     const { token, role } = await submitVerification(alias, signature);
     saveSession(token, role);
     return { token, role };
   }
 
-  // Export to global object
-  window.NullpadAuth = {
+  // Export to global object (frozen + non-writable to prevent tampering)
+  const NullpadAuth = Object.freeze({
     deriveKeypair,
     signChallenge,
     login,
@@ -317,6 +341,12 @@
     requestChallenge,
     submitVerification,
     register
-  };
+  });
+
+  Object.defineProperty(window, 'NullpadAuth', {
+    value: NullpadAuth,
+    writable: false,
+    configurable: false
+  });
 
 })();

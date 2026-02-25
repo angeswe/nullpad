@@ -24,10 +24,7 @@ pub async fn create_invite(
 
     let invite = StoredInvite {
         token: token.clone(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        created_at: crate::util::now_secs(),
     };
 
     // Store invite with TTL

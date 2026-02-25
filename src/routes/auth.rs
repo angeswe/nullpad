@@ -16,7 +16,6 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
 /// POST /api/auth/challenge — Request challenge nonce
@@ -47,7 +46,8 @@ pub async fn request_challenge(
     let mut con = state.redis.clone();
 
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:auth:challenge:{}", ip);
+    let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
+    let rate_limit_key = format!("ratelimit:auth:challenge:{}", ip_hash);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -58,9 +58,6 @@ pub async fn request_challenge(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !allowed {
-        let mut hasher = std::hash::DefaultHasher::new();
-        ip.hash(&mut hasher);
-        let ip_hash = format!("{:x}", hasher.finish());
         tracing::warn!(action = "rate_limited", endpoint = "auth/challenge", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
     }
@@ -70,10 +67,7 @@ pub async fn request_challenge(
 
     let challenge = StoredChallenge {
         nonce: nonce.clone(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        created_at: crate::util::now_secs(),
     };
 
     // Atomically check if user exists and store challenge.
@@ -120,7 +114,8 @@ pub async fn verify_challenge(
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:auth:verify:{}", ip);
+    let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
+    let rate_limit_key = format!("ratelimit:auth:verify:{}", ip_hash);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -131,9 +126,6 @@ pub async fn verify_challenge(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !allowed {
-        let mut hasher = std::hash::DefaultHasher::new();
-        ip.hash(&mut hasher);
-        let ip_hash = format!("{:x}", hasher.finish());
         tracing::warn!(action = "rate_limited", endpoint = "auth/verify", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
     }
@@ -189,10 +181,7 @@ pub async fn verify_challenge(
     let session = StoredSession {
         user_id: user.id.clone(),
         role: role.as_str().to_string(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        created_at: crate::util::now_secs(),
     };
 
     storage::session::store_session(
@@ -224,7 +213,8 @@ pub async fn register(
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:auth:register:{}", ip);
+    let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
+    let rate_limit_key = format!("ratelimit:auth:register:{}", ip_hash);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -235,9 +225,6 @@ pub async fn register(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !allowed {
-        let mut hasher = std::hash::DefaultHasher::new();
-        ip.hash(&mut hasher);
-        let ip_hash = format!("{:x}", hasher.finish());
         tracing::warn!(action = "rate_limited", endpoint = "auth/register", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
     }
@@ -266,16 +253,21 @@ pub async fn register(
         .decode(&req.pubkey)
         .map_err(|_| AppError::BadRequest("Invalid public key: not valid base64".to_string()))?;
     if pubkey_bytes.len() != 32 {
-        return Err(AppError::BadRequest(format!(
-            "Invalid public key: expected 32 bytes, got {}",
-            pubkey_bytes.len()
-        )));
+        tracing::debug!(
+            expected = 32,
+            got = pubkey_bytes.len(),
+            "Invalid pubkey length in registration"
+        );
+        return Err(AppError::BadRequest(
+            "Invalid public key format".to_string(),
+        ));
     }
     let key_array: [u8; 32] = pubkey_bytes
         .try_into()
-        .map_err(|_| AppError::BadRequest("Invalid public key: wrong length".to_string()))?;
-    ed25519_dalek::VerifyingKey::from_bytes(&key_array).map_err(|_| {
-        AppError::BadRequest("Invalid public key: not a valid Ed25519 key".to_string())
+        .map_err(|_| AppError::BadRequest("Invalid public key format".to_string()))?;
+    ed25519_dalek::VerifyingKey::from_bytes(&key_array).map_err(|e| {
+        tracing::debug!(error = %e, "Invalid Ed25519 public key in registration");
+        AppError::BadRequest("Invalid public key format".to_string())
     })?;
 
     // Check alias availability BEFORE consuming invite
@@ -299,10 +291,7 @@ pub async fn register(
         alias: req.alias.clone(),
         pubkey: req.pubkey,
         role: Role::Trusted.as_str().to_string(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        created_at: crate::util::now_secs(),
     };
 
     // Store user atomically (ensures alias hasn't been taken in a race)

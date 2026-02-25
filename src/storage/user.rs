@@ -186,10 +186,7 @@ where
         alias: alias.to_string(),
         pubkey: pubkey.to_string(),
         role: "admin".to_string(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        created_at: crate::util::now_secs(),
     };
 
     let user_key = "user:admin";

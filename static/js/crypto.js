@@ -265,7 +265,7 @@
     // Export Public API
     // ============================================================================
 
-    window.NullpadCrypto = {
+    const NullpadCrypto = Object.freeze({
         // Key generation
         generateKey,
         deriveKeyWithPin,
@@ -281,6 +281,12 @@
         base64Decode,
         textEncode,
         textDecode
-    };
+    });
+
+    Object.defineProperty(window, 'NullpadCrypto', {
+        value: NullpadCrypto,
+        writable: false,
+        configurable: false
+    });
 
 })();

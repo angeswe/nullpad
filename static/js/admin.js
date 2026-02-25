@@ -70,8 +70,12 @@
     }
 
     if (!response.ok) {
-      const error = await response.json();
-      throw new Error(error.error || 'Request failed');
+      let msg;
+      try {
+        const error = await response.json();
+        msg = error.error;
+      } catch { /* non-JSON response */ }
+      throw new Error(msg || 'Request failed');
     }
 
     // DELETE endpoints return 204 No Content with no body
@@ -368,8 +372,11 @@
   // Copy to Clipboard
   // ============================================================================
 
+  let clipboardDirty = false;
+
   function copyInviteUrl() {
     navigator.clipboard.writeText(inviteUrl.value).then(() => {
+      clipboardDirty = true;
       const originalText = copyInviteBtn.textContent;
       copyInviteBtn.textContent = 'Copied!';
 
@@ -432,7 +439,10 @@
 
   // Clear clipboard on page leave (invite URLs are sensitive)
   window.addEventListener('pagehide', () => {
-    navigator.clipboard.writeText('').catch(() => {});
+    if (clipboardDirty && navigator.clipboard) {
+      navigator.clipboard.writeText('').catch(() => {});
+      clipboardDirty = false;
+    }
   });
 
   // Start when DOM is ready

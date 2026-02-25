@@ -13,8 +13,34 @@ use axum::{
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
+
+/// Basic MIME type validation: must match `type/subtype` pattern with optional parameters.
+/// Accepts formats like `text/plain`, `application/octet-stream`, `text/html; charset=utf-8`.
+fn is_valid_mime(s: &str) -> bool {
+    // Split off parameters (e.g., "; charset=utf-8")
+    let base = match s.split_once(';') {
+        Some((base, _)) => base.trim(),
+        None => s.trim(),
+    };
+
+    // Must contain exactly one slash separating type and subtype
+    let (typ, subtype) = match base.split_once('/') {
+        Some(parts) => parts,
+        None => return false,
+    };
+
+    // Both type and subtype must be non-empty and contain only valid token chars
+    // RFC 7231: token = 1*tchar, tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*"
+    //           / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
+    fn is_token(s: &str) -> bool {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+    }
+
+    is_token(typ) && is_token(subtype)
+}
 
 /// POST /api/paste — Create paste
 ///
@@ -36,7 +62,8 @@ pub async fn create_paste(
     let mut con = state.redis.clone();
 
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:paste:{}", ip);
+    let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
+    let rate_limit_key = format!("ratelimit:paste:{}", ip_hash);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,
@@ -47,9 +74,6 @@ pub async fn create_paste(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !allowed {
-        let mut hasher = std::hash::DefaultHasher::new();
-        ip.hash(&mut hasher);
-        let ip_hash = format!("{:x}", hasher.finish());
         tracing::warn!(action = "rate_limited", endpoint = "paste", ip_hash = %ip_hash, "Rate limit exceeded");
         return Err(AppError::RateLimited);
     }
@@ -114,7 +138,7 @@ pub async fn create_paste(
         return Err(AppError::BadRequest("Filename cannot be empty".to_string()));
     }
 
-    // Validate content_type: max 127 chars, ASCII only, no null bytes
+    // Validate content_type: max 127 chars, ASCII only, no null bytes, valid MIME format
     if metadata.content_type.len() > 127 {
         return Err(AppError::BadRequest(
             "Content type too long (max 127 characters)".to_string(),
@@ -123,6 +147,11 @@ pub async fn create_paste(
     if !metadata.content_type.is_ascii() || metadata.content_type.contains('\0') {
         return Err(AppError::BadRequest(
             "Content type contains invalid characters".to_string(),
+        ));
+    }
+    if !is_valid_mime(&metadata.content_type) {
+        return Err(AppError::BadRequest(
+            "Invalid content type format".to_string(),
         ));
     }
 
@@ -185,10 +214,7 @@ pub async fn create_paste(
             filename: metadata.filename,
             content_type: metadata.content_type,
             burn_after_reading: metadata.burn_after_reading,
-            created_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
+            created_at: crate::util::now_secs(),
             owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
         },
         encrypted_content,
@@ -246,7 +272,8 @@ pub async fn get_paste(
 
     // Rate limit paste reads to prevent burn-after-reading abuse
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
-    let rate_limit_key = format!("ratelimit:paste_read:{}", ip);
+    let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
+    let rate_limit_key = format!("ratelimit:paste_read:{}", ip_hash);
     let allowed = check_rate_limit(
         &mut con,
         &rate_limit_key,

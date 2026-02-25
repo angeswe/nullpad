@@ -14,10 +14,17 @@ use axum::{
     routing::post,
     Json, Router,
 };
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::net::{IpAddr, SocketAddr};
 
 /// Validate that a string is a valid nanoid (alphanumeric, hyphens, underscores).
+///
+/// Requires expected_len >= 2 to prevent accepting empty strings.
 pub fn validate_id(id: &str, label: &str, expected_len: usize) -> Result<(), AppError> {
+    if expected_len < 2 {
+        return Err(AppError::BadRequest(format!("Invalid {} format", label)));
+    }
     if id.len() != expected_len
         || !id
             .chars()
@@ -26,6 +33,20 @@ pub fn validate_id(id: &str, label: &str, expected_len: usize) -> Result<(), App
         return Err(AppError::BadRequest(format!("Invalid {} format", label)));
     }
     Ok(())
+}
+
+/// Hash an IP address with HMAC-SHA256 for use in Redis keys and logs.
+pub fn hash_ip(salt: &[u8], ip: &IpAddr) -> String {
+    type HmacSha256 = Hmac<Sha256>;
+    let mut mac = HmacSha256::new_from_slice(salt).expect("HMAC accepts any key size");
+    mac.update(ip.to_string().as_bytes());
+    let result = mac.finalize();
+    let bytes = result.into_bytes();
+    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+        s
+    })
 }
 
 /// Extract client IP from X-Forwarded-For header, falling back to ConnectInfo.
@@ -160,8 +181,14 @@ mod tests {
 
     #[test]
     fn test_validate_id_zero_length() {
-        // Zero-length expected
-        assert!(validate_id("", "test", 0).is_ok());
+        // Zero-length expected: rejected because expected_len < 2
+        assert!(validate_id("", "test", 0).is_err());
+    }
+
+    #[test]
+    fn test_validate_id_length_one() {
+        // Length 1: rejected because expected_len < 2
+        assert!(validate_id("a", "test", 1).is_err());
     }
 
     // --- client_ip tests ---
