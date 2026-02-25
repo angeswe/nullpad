@@ -53,11 +53,25 @@ use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Resp
 ///     .layer(middleware::from_fn(security_headers));
 /// ```
 pub async fn security_headers(request: Request, next: Next) -> Response {
+    let is_api = {
+        let path = request.uri().path();
+        path.starts_with("/api/") || path == "/healthz"
+    };
+
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
+    // Cache control: no-store for API responses, long-lived cache for static assets
+    if is_api {
+        headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    } else {
+        headers.insert(
+            "cache-control",
+            HeaderValue::from_static("public, max-age=31536000, immutable"),
+        );
+    }
+
     // nullpad-kry: Essential security headers
-    headers.insert("cache-control", HeaderValue::from_static("no-store"));
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     headers.insert(
         "x-content-type-options",
@@ -82,6 +96,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
              style-src 'self' fonts.googleapis.com; \
              font-src fonts.gstatic.com; \
              img-src 'self' data: blob:; \
+             connect-src 'self'; \
              object-src 'none'; \
              frame-ancestors 'none'; \
              base-uri 'self'; \
@@ -123,11 +138,11 @@ mod tests {
 
         let headers = response.headers();
 
-        // Verify cache control
+        // Verify cache control (static route gets long-lived cache)
         assert_eq!(
             headers.get("cache-control").unwrap(),
-            "no-store",
-            "Cache-Control must be no-store to prevent caching encrypted content"
+            "public, max-age=31536000, immutable",
+            "Cache-Control for static assets must allow caching"
         );
 
         // Verify nullpad-kry headers
@@ -158,6 +173,7 @@ mod tests {
         assert!(csp.contains("style-src 'self' fonts.googleapis.com"));
         assert!(csp.contains("font-src fonts.gstatic.com"));
         assert!(csp.contains("img-src 'self' data: blob:"));
+        assert!(csp.contains("connect-src 'self'"));
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("base-uri 'self'"));
@@ -182,5 +198,51 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(body, "test response");
+    }
+
+    #[tokio::test]
+    async fn test_api_route_gets_no_store_cache() {
+        let app = Router::new()
+            .route("/api/paste", axum::routing::get(test_handler))
+            .layer(middleware::from_fn(security_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/paste")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers().get("cache-control").unwrap(),
+            "no-store",
+            "API routes must use no-store cache control"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_healthz_gets_no_store_cache() {
+        let app = Router::new()
+            .route("/healthz", axum::routing::get(test_handler))
+            .layer(middleware::from_fn(security_headers));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers().get("cache-control").unwrap(),
+            "no-store",
+            "Health check must use no-store cache control"
+        );
     }
 }

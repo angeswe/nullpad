@@ -113,6 +113,16 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
     Ok(())
 }
 
+/// Get the expected filesystem path for a blob (for stat checks).
+///
+/// Returns the path without reading or verifying the file exists.
+/// Uses the same sanitization as read/write to ensure safe paths.
+pub fn blob_path(storage_path: &Path, id: &str) -> Result<std::path::PathBuf, BlobError> {
+    let safe_id = sanitize_blob_id(id)?;
+    let shard_name = &safe_id[..2];
+    Ok(storage_path.join(shard_name).join(safe_id))
+}
+
 /// Read a blob from disk.
 ///
 /// Returns None if the blob doesn't exist.

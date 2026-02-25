@@ -48,8 +48,12 @@ fn keygen(alias: &str, secret: &str) -> Result<String, String> {
     let signing_key = SigningKey::from_bytes(&seed);
     let verifying_key = signing_key.verifying_key();
 
-    // Zero the seed
-    seed.fill(0);
+    // Zeroize the seed (compiler cannot optimize this away)
+    {
+        use zeroize::Zeroize;
+        seed.zeroize();
+    }
+    drop(signing_key);
 
     // Return base64-encoded public key
     Ok(base64::Engine::encode(
@@ -130,10 +134,14 @@ async fn main() {
     // Clone redis for cleanup job before building state
     let cleanup_redis = redis_manager.clone();
 
+    // Generate random 32-byte salt for HMAC-SHA256 IP hashing.
+    let ip_hmac_salt: [u8; 32] = rand::random();
+
     // Build shared state
     let state = AppState {
         redis: redis_manager,
         config: Arc::new(config.clone()),
+        ip_hmac_salt: Arc::new(ip_hmac_salt),
     };
 
     // Build router:

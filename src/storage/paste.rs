@@ -80,13 +80,9 @@ where
 
 /// Get a paste atomically, deleting if burn-after-reading.
 ///
-/// Single Lua script avoids the check-then-act race condition where two
-/// concurrent requests could both see burn_after_reading=true before either
-/// deletes the metadata. Uses cjson.decode for reliable JSON parsing and
-/// cleans up user_pastes SET on burn deletion.
-///
-/// Content is read from disk after Redis operation succeeds.
-/// For burn-after-reading, deletes blob BEFORE returning (atomic burn).
+/// For burn-after-reading pastes, the blob is verified to exist on disk
+/// BEFORE metadata is deleted from Redis. This prevents permanent data loss
+/// if the disk read would fail.
 pub async fn get_paste_atomic<C>(
     con: &mut C,
     storage_path: &Path,
@@ -97,8 +93,22 @@ where
 {
     let key = format!("paste:{}", id);
 
-    // Lua script: GET metadata, parse JSON for burn flag, DEL if burn + SREM from user_pastes
-    // Now fast since metadata is small (~200 bytes vs 10MB+ content)
+    // Step 1: Verify blob exists on disk BEFORE touching metadata.
+    let blob_path = blob::blob_path(storage_path, id);
+    match blob_path {
+        Ok(path) => {
+            if !path.exists() {
+                let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(con).await?;
+                if exists {
+                    tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing on disk");
+                }
+                return Ok(None);
+            }
+        }
+        Err(_) => return Ok(None),
+    }
+
+    // Step 2: Lua script — GET metadata, DEL if burn + SREM from user_pastes
     let script = redis::Script::new(
         r#"
         local val = redis.call('GET', KEYS[1])
@@ -133,28 +143,21 @@ where
                 ))
             })?;
 
-            // Read content from disk
-            // Treat blob errors as "not found" to gracefully handle orphaned metadata
-            // (e.g., pastes created before blob migration, or disk issues)
+            // Step 3: Read full blob content from disk
             let encrypted_content = match blob::read_blob(storage_path, id).await {
                 Ok(Some(content)) => content,
-                Ok(None) => {
-                    // Blob missing - orphaned metadata, treat as not found
-                    tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing");
-                    return Ok(None);
-                }
-                Err(e) => {
-                    // Blob read error - treat as not found, log for debugging
-                    tracing::warn!(paste_id = %id, error = %e, "Blob read error, treating as not found");
+                Ok(None) | Err(_) => {
+                    if meta.burn_after_reading {
+                        tracing::error!(paste_id = %id, "Burn paste blob disappeared after metadata deleted");
+                    }
                     return Ok(None);
                 }
             };
 
-            // For burn-after-reading, delete the blob now (metadata already deleted by Lua)
+            // Step 4: For burn-after-reading, delete the blob now
             if meta.burn_after_reading {
                 if let Err(e) = blob::delete_blob(storage_path, id).await {
                     tracing::error!(paste_id = %id, error = %e, "Failed to delete burn blob");
-                    // Continue anyway - content was already read
                 }
             }
 

@@ -107,6 +107,7 @@ async fn spawn_test_server_with_auth_limit(
     let state = AppState {
         redis: redis_manager,
         config: Arc::new(config),
+        ip_hmac_salt: Arc::new(rand::random()),
     };
 
     let app = routes::api_router()

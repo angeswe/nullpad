@@ -25,6 +25,8 @@ argon2 = "0.5"
 rand = "0.10.0"
 base64 = "0.22.1"
 zeroize = { version = "1.8", features = ["derive"] }
+hmac = "0.12"
+sha2 = "0.10"
 
 # ID generation
 nanoid = "0.4.0"
