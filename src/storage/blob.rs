@@ -149,8 +149,8 @@ pub async fn read_blob(
         .strip_prefix(&canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    // Safe to read - path is verified to be within storage
-    let file = fs::File::open(&canonical_path).await?;
+    // Safe to read - path is sanitized (alphanumeric only), canonicalized, and verified within storage
+    let file = fs::File::open(&canonical_path).await?; // codeql[rust/path-injection] path is sanitized+canonicalized+strip_prefix verified
     let metadata = file.metadata().await?;
     let file_size = metadata.len();
 
