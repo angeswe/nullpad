@@ -67,39 +67,75 @@ pub async fn init_storage(storage_path: &Path) -> Result<(), BlobError> {
     Ok(())
 }
 
+use std::path::PathBuf;
+
+/// Resolved blob path that has been sanitized, canonicalized, and verified
+/// to be within the storage directory. This type guarantees the path is safe
+/// to use for filesystem operations.
+struct VerifiedBlobPath {
+    /// The verified canonical path to the blob file
+    path: PathBuf,
+    /// The verified canonical path to the shard directory
+    shard_dir: PathBuf,
+}
+
+/// Resolve and verify a blob path from a user-provided ID.
+///
+/// Security: This is the central path resolution function. All blob operations
+/// must use this to get a verified path. It enforces:
+/// 1. ID contains only safe characters `[A-Za-z0-9_-]` (prevents path traversal)
+/// 2. Path is canonicalized (resolves symlinks)
+/// 3. Canonical path is within storage directory (prevents symlink escape)
+///
+/// Returns `Ok(None)` if the blob doesn't exist on disk (only when `must_exist` is false).
+fn resolve_blob_path(
+    canonical_storage: &Path,
+    id: &str,
+    must_exist: bool,
+) -> Result<Option<VerifiedBlobPath>, BlobError> {
+    let safe_id = sanitize_blob_id(id)?;
+    let shard_name = &safe_id[..2];
+    let shard_dir = canonical_storage.join(shard_name);
+    let constructed_path = shard_dir.join(safe_id);
+
+    let canonical_path = match constructed_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) if !must_exist && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(BlobError::Io(e)),
+    };
+
+    canonical_path
+        .strip_prefix(canonical_storage)
+        .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
+
+    Ok(Some(VerifiedBlobPath {
+        path: canonical_path,
+        shard_dir,
+    }))
+}
+
 /// Write a blob to disk.
 ///
 /// Uses atomic write (write to temp file, then rename) to prevent partial reads.
-/// Path safety is ensured by:
-/// 1. Sanitizing the ID to only allow safe characters
-/// 2. Building the path from canonical storage base
-/// 3. Verifying the final path is within storage via strip_prefix
 pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result<(), BlobError> {
-    // Sanitize ID first - this is the security barrier
     let safe_id = sanitize_blob_id(id)?;
-
-    // Get canonical storage path
     let canonical_storage = storage_path.canonicalize()?;
 
-    // Build shard directory path
+    // Build and create shard directory
     let shard_name = &safe_id[..2];
     let shard_dir = canonical_storage.join(shard_name);
-
-    // Create shard directory first
     fs::create_dir_all(&shard_dir).await?;
 
-    // Verify shard directory is within storage using strip_prefix
-    // strip_prefix fails if path doesn't start with prefix - this is the barrier
+    // Verify shard directory is within storage
     let canonical_shard = shard_dir.canonicalize()?;
     canonical_shard
         .strip_prefix(&canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    // Build final paths - shard is now verified to be within storage
+    // Build final paths from verified shard
     let blob_path = canonical_shard.join(safe_id);
     let temp_path = blob_path.with_extension("tmp");
 
-    // Verify blob path is also within storage (belt and suspenders)
     blob_path
         .strip_prefix(&canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
@@ -117,44 +153,21 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
 ///
 /// Returns None if the blob doesn't exist.
 /// `max_bytes` caps how large a blob we'll read (prevents OOM from corrupt files).
-/// Path safety is ensured by:
-/// 1. Sanitizing the ID to only allow safe characters
-/// 2. Canonicalizing the path to resolve symlinks
-/// 3. Verifying the canonical path is within storage via strip_prefix
 pub async fn read_blob(
     storage_path: &Path,
     id: &str,
     max_bytes: u64,
 ) -> Result<Option<Vec<u8>>, BlobError> {
-    // Sanitize ID first - this is the security barrier
-    let safe_id = sanitize_blob_id(id)?;
-
-    // Get canonical storage path
     let canonical_storage = storage_path.canonicalize()?;
-
-    // Build path using only the safe ID
-    let shard_name = &safe_id[..2];
-    let constructed_path = canonical_storage.join(shard_name).join(safe_id);
-
-    // Canonicalize to resolve any symlinks
-    let canonical_path = match constructed_path.canonicalize() {
-        Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(BlobError::Io(e)),
+    let verified = match resolve_blob_path(&canonical_storage, id, false)? {
+        Some(v) => v,
+        None => return Ok(None),
     };
 
-    // Verify canonical path is within storage using strip_prefix
-    // strip_prefix fails if path doesn't start with prefix - this catches symlink attacks
-    canonical_path
-        .strip_prefix(&canonical_storage)
-        .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
-
-    // Safe to read - path is sanitized (alphanumeric only), canonicalized, and verified within storage
-    let file = fs::File::open(&canonical_path).await?; // codeql[rust/path-injection] path is sanitized+canonicalized+strip_prefix verified
+    let file = fs::File::open(&verified.path).await?;
     let metadata = file.metadata().await?;
     let file_size = metadata.len();
 
-    // Reject files larger than the configured limit to prevent OOM
     if file_size > max_bytes {
         return Err(BlobError::InvalidId(format!(
             "Blob too large: {} bytes exceeds {}",
@@ -171,36 +184,17 @@ pub async fn read_blob(
 /// Delete a blob from disk.
 ///
 /// Returns true if the blob was deleted, false if it didn't exist.
-/// Path safety is ensured by:
-/// 1. Sanitizing the ID to only allow safe characters
-/// 2. Canonicalizing the path to resolve symlinks
-/// 3. Verifying the canonical path is within storage via strip_prefix
 pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
-    // Sanitize ID first - this is the security barrier
-    let safe_id = sanitize_blob_id(id)?;
-
-    // Get canonical storage path
     let canonical_storage = storage_path.canonicalize()?;
-
-    // Build path using only the safe ID
-    let shard_name = &safe_id[..2];
-    let constructed_path = canonical_storage.join(shard_name).join(safe_id);
-
-    // Canonicalize to resolve any symlinks
-    let canonical_path = match constructed_path.canonicalize() {
-        Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(BlobError::Io(e)),
+    let verified = match resolve_blob_path(&canonical_storage, id, false)? {
+        Some(v) => v,
+        None => return Ok(false),
     };
 
-    // Verify canonical path is within storage using strip_prefix
-    // strip_prefix fails if path doesn't start with prefix - this catches symlink attacks
-    canonical_path
-        .strip_prefix(&canonical_storage)
-        .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
+    fs::remove_file(&verified.path).await?;
 
-    // Safe to delete - path is verified to be within storage
-    fs::remove_file(&canonical_path).await?;
+    // Try to remove empty shard directory (best-effort cleanup)
+    let _ = fs::remove_dir(&verified.shard_dir).await;
     Ok(true)
 }
 
