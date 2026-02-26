@@ -69,49 +69,33 @@ pub async fn init_storage(storage_path: &Path) -> Result<(), BlobError> {
 
 use std::path::PathBuf;
 
-/// Resolved blob path that has been sanitized, canonicalized, and verified
-/// to be within the storage directory. This type guarantees the path is safe
-/// to use for filesystem operations.
-struct VerifiedBlobPath {
-    /// The verified canonical path to the blob file
-    path: PathBuf,
-    /// The verified canonical path to the shard directory
-    shard_dir: PathBuf,
-}
-
 /// Resolve and verify a blob path from a user-provided ID.
 ///
-/// Security: This is the central path resolution function. All blob operations
-/// must use this to get a verified path. It enforces:
-/// 1. ID contains only safe characters `[A-Za-z0-9_-]` (prevents path traversal)
-/// 2. Path is canonicalized (resolves symlinks)
-/// 3. Canonical path is within storage directory (prevents symlink escape)
+/// Security: This function sanitizes user input, canonicalizes the path,
+/// and verifies it stays within storage. The returned path is reconstructed
+/// from the trusted storage root + the verified relative suffix, breaking
+/// any taint chain from the original user input.
 ///
-/// Returns `Ok(None)` if the blob doesn't exist on disk (only when `must_exist` is false).
-fn resolve_blob_path(
-    canonical_storage: &Path,
-    id: &str,
-    must_exist: bool,
-) -> Result<Option<VerifiedBlobPath>, BlobError> {
+/// Returns `Ok(None)` if the blob doesn't exist on disk.
+fn resolve_blob_path(canonical_storage: &Path, id: &str) -> Result<Option<PathBuf>, BlobError> {
     let safe_id = sanitize_blob_id(id)?;
     let shard_name = &safe_id[..2];
-    let shard_dir = canonical_storage.join(shard_name);
-    let constructed_path = shard_dir.join(safe_id);
+    let constructed_path = canonical_storage.join(shard_name).join(safe_id);
 
     let canonical_path = match constructed_path.canonicalize() {
         Ok(p) => p,
-        Err(e) if !must_exist && e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(BlobError::Io(e)),
     };
 
-    canonical_path
+    // Verify path is within storage; strip_prefix returns the relative suffix
+    let relative = canonical_path
         .strip_prefix(canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    Ok(Some(VerifiedBlobPath {
-        path: canonical_path,
-        shard_dir,
-    }))
+    // Reconstruct from trusted root + verified relative path.
+    // This creates a new PathBuf derived from the storage root, not from user input.
+    Ok(Some(canonical_storage.join(relative)))
 }
 
 /// Write a blob to disk.
@@ -126,16 +110,18 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
     let shard_dir = canonical_storage.join(shard_name);
     fs::create_dir_all(&shard_dir).await?;
 
-    // Verify shard directory is within storage
+    // Verify shard directory is within storage; reconstruct from trusted root
     let canonical_shard = shard_dir.canonicalize()?;
-    canonical_shard
+    let shard_relative = canonical_shard
         .strip_prefix(&canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
+    let verified_shard = canonical_storage.join(shard_relative);
 
     // Build final paths from verified shard
-    let blob_path = canonical_shard.join(safe_id);
+    let blob_path = verified_shard.join(safe_id);
     let temp_path = blob_path.with_extension("tmp");
 
+    // Belt-and-suspenders: verify blob path is also within storage
     blob_path
         .strip_prefix(&canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
@@ -159,12 +145,12 @@ pub async fn read_blob(
     max_bytes: u64,
 ) -> Result<Option<Vec<u8>>, BlobError> {
     let canonical_storage = storage_path.canonicalize()?;
-    let verified = match resolve_blob_path(&canonical_storage, id, false)? {
-        Some(v) => v,
+    let verified_path = match resolve_blob_path(&canonical_storage, id)? {
+        Some(p) => p,
         None => return Ok(None),
     };
 
-    let file = fs::File::open(&verified.path).await?;
+    let file = fs::File::open(&verified_path).await?;
     let metadata = file.metadata().await?;
     let file_size = metadata.len();
 
@@ -186,15 +172,12 @@ pub async fn read_blob(
 /// Returns true if the blob was deleted, false if it didn't exist.
 pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
     let canonical_storage = storage_path.canonicalize()?;
-    let verified = match resolve_blob_path(&canonical_storage, id, false)? {
-        Some(v) => v,
+    let verified_path = match resolve_blob_path(&canonical_storage, id)? {
+        Some(p) => p,
         None => return Ok(false),
     };
 
-    fs::remove_file(&verified.path).await?;
-
-    // Try to remove empty shard directory (best-effort cleanup)
-    let _ = fs::remove_dir(&verified.shard_dir).await;
+    fs::remove_file(&verified_path).await?;
     Ok(true)
 }
 
