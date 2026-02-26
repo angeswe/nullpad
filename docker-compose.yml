@@ -14,6 +14,12 @@ services:
     restart: unless-stopped
     networks:
       - internal
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
     deploy:
       resources:
         limits:
@@ -34,30 +40,31 @@ services:
     image: redis:7-alpine
     volumes:
       - redis-data:/data
-    environment:
-      - REDIS_PASSWORD=${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+    env_file:
+      - .env
     restart: unless-stopped
     # NOTE: AOF persistence means burn-after-reading pastes persist in the AOF
     # file until rewrite. Aggressive rewrite settings below minimize this window.
     # For stronger burn guarantees, disable AOF (--appendonly no --save "").
     command: >-
-      redis-server --appendonly yes
+      sh -c 'redis-server --appendonly yes
       --auto-aof-rewrite-percentage 50
       --auto-aof-rewrite-min-size 16mb
-      --requirepass "${REDIS_PASSWORD:?REDIS_PASSWORD must be set}"
-      --maxmemory "${REDIS_MAXMEMORY:-2gb}"
+      --requirepass "$$REDIS_PASSWORD"
+      --maxmemory "$${REDIS_MAXMEMORY:-2gb}"
       --maxmemory-policy volatile-lru
       --rename-command FLUSHALL ""
       --rename-command FLUSHDB ""
       --rename-command DEBUG ""
-      --rename-command CONFIG ""
+      --rename-command CONFIG ""'
     healthcheck:
-      test: ["CMD-SHELL", "REDISCLI_AUTH=$REDIS_PASSWORD redis-cli ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping"]
       interval: 5s
       timeout: 3s
       retries: 5
     networks:
       - internal
+    read_only: true
     deploy:
       resources:
         limits:
@@ -65,6 +72,10 @@ services:
           cpus: '1.0'
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp
 
 networks:
   internal:

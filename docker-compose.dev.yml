@@ -1,0 +1,16 @@
+# Development overrides for docker-compose.yml
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Adds volume mounts for live-reload of static files during development.
+# Do NOT use in production.
+
+services:
+  nullpad:
+    build:
+      context: .
+      args:
+        BUILD_VERSION: dev
+    volumes:
+      - ./static:/app/static:ro
+    environment:
+      - RUST_LOG=debug

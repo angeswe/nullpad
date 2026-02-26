@@ -37,8 +37,7 @@ use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Resp
 /// Implements a strict CSP that:
 /// - Allows resources only from same origin (`default-src 'self'`)
 /// - Permits scripts only from same origin (no inline, no eval)
-/// - Allows styles from same origin + Google Fonts
-/// - Loads fonts from Google Fonts CDN
+/// - Allows styles and fonts only from same origin (self-hosted)
 /// - Prevents framing (`frame-ancestors 'none'`)
 /// - Restricts base URLs and form actions to same origin
 ///
@@ -61,13 +60,15 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
-    // Cache control: no-store for API responses, long-lived cache for static assets
+    // Cache control: no-store for API responses, short revalidating cache for static assets.
+    // Static assets are unversioned (no content-hash filenames), so aggressive caching
+    // would prevent security updates from reaching users.
     if is_api {
         headers.insert("cache-control", HeaderValue::from_static("no-store"));
     } else {
         headers.insert(
             "cache-control",
-            HeaderValue::from_static("public, max-age=31536000, immutable"),
+            HeaderValue::from_static("public, no-cache"),
         );
     }
 
@@ -88,13 +89,14 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
     );
 
     // nullpad-2hm: Content Security Policy hardening
+    // Fonts are self-hosted (no external font-src needed)
     headers.insert(
         "content-security-policy",
         HeaderValue::from_static(
             "default-src 'self'; \
              script-src 'self' 'wasm-unsafe-eval'; \
-             style-src 'self' fonts.googleapis.com; \
-             font-src fonts.gstatic.com; \
+             style-src 'self'; \
+             font-src 'self'; \
              img-src 'self' data: blob:; \
              connect-src 'self'; \
              object-src 'none'; \
@@ -138,11 +140,11 @@ mod tests {
 
         let headers = response.headers();
 
-        // Verify cache control (static route gets long-lived cache)
+        // Verify cache control (static route gets short revalidating cache)
         assert_eq!(
             headers.get("cache-control").unwrap(),
-            "public, max-age=31536000, immutable",
-            "Cache-Control for static assets must allow caching"
+            "public, no-cache",
+            "Cache-Control for unversioned static assets must use no-cache"
         );
 
         // Verify nullpad-kry headers
@@ -170,8 +172,8 @@ mod tests {
             .unwrap();
         assert!(csp.contains("default-src 'self'"));
         assert!(csp.contains("script-src 'self' 'wasm-unsafe-eval'"));
-        assert!(csp.contains("style-src 'self' fonts.googleapis.com"));
-        assert!(csp.contains("font-src fonts.gstatic.com"));
+        assert!(csp.contains("style-src 'self'"));
+        assert!(csp.contains("font-src 'self'"));
         assert!(csp.contains("img-src 'self' data: blob:"));
         assert!(csp.contains("connect-src 'self'"));
         assert!(csp.contains("object-src 'none'"));
