@@ -9,7 +9,7 @@
 //!
 //! Uses directory sharding (first 2 chars of ID) to avoid too many files in one directory.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -67,14 +67,27 @@ pub async fn init_storage(storage_path: &Path) -> Result<(), BlobError> {
     Ok(())
 }
 
-use std::path::PathBuf;
+/// Canonicalize and validate the storage root path.
+///
+/// This function establishes the trust boundary for all blob operations.
+/// After this point, the returned `PathBuf` is treated as a trusted,
+/// absolute, canonical root directory — not derived from user input.
+fn canonicalize_storage_root(storage_path: &Path) -> Result<PathBuf, BlobError> {
+    if !storage_path.is_absolute() {
+        return Err(BlobError::InvalidId(
+            "Storage path must be absolute".to_string(),
+        ));
+    }
+    Ok(storage_path.canonicalize()?)
+}
 
 /// Resolve and verify a blob path from a user-provided ID.
 ///
-/// Security: This function sanitizes user input, canonicalizes the path,
-/// and verifies it stays within storage. The returned path is reconstructed
-/// from the trusted storage root + the verified relative suffix, breaking
-/// any taint chain from the original user input.
+/// Security: `canonical_storage` must come from `canonicalize_storage_root`,
+/// which establishes it as a trusted root. This function sanitizes the user
+/// ID, canonicalizes the constructed path, verifies it stays within storage
+/// via `strip_prefix`, and reconstructs from the trusted root + verified
+/// relative suffix.
 ///
 /// Returns `Ok(None)` if the blob doesn't exist on disk.
 fn resolve_blob_path(canonical_storage: &Path, id: &str) -> Result<Option<PathBuf>, BlobError> {
@@ -103,7 +116,7 @@ fn resolve_blob_path(canonical_storage: &Path, id: &str) -> Result<Option<PathBu
 /// Uses atomic write (write to temp file, then rename) to prevent partial reads.
 pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result<(), BlobError> {
     let safe_id = sanitize_blob_id(id)?;
-    let canonical_storage = storage_path.canonicalize()?;
+    let canonical_storage = canonicalize_storage_root(storage_path)?;
 
     // Build and create shard directory
     let shard_name = &safe_id[..2];
@@ -144,7 +157,7 @@ pub async fn read_blob(
     id: &str,
     max_bytes: u64,
 ) -> Result<Option<Vec<u8>>, BlobError> {
-    let canonical_storage = storage_path.canonicalize()?;
+    let canonical_storage = canonicalize_storage_root(storage_path)?;
     let verified_path = match resolve_blob_path(&canonical_storage, id)? {
         Some(p) => p,
         None => return Ok(None),
@@ -171,7 +184,7 @@ pub async fn read_blob(
 ///
 /// Returns true if the blob was deleted, false if it didn't exist.
 pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
-    let canonical_storage = storage_path.canonicalize()?;
+    let canonical_storage = canonicalize_storage_root(storage_path)?;
     let verified_path = match resolve_blob_path(&canonical_storage, id)? {
         Some(p) => p,
         None => return Ok(false),
