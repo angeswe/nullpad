@@ -185,7 +185,11 @@ where
     );
 
     let (count, ttl): (u32, i64) = script.key(key).arg(window_secs).invoke_async(con).await?;
-    let retry_after = if ttl > 0 { Some(ttl as u64) } else { Some(window_secs) };
+    let retry_after = if ttl > 0 {
+        Some(ttl as u64)
+    } else {
+        Some(window_secs)
+    };
 
     Ok(RateLimitResult {
         allowed: count <= max,

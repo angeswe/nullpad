@@ -59,7 +59,9 @@ pub async fn request_challenge(
 
     if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "auth/challenge", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
+        return Err(AppError::RateLimited {
+            retry_after: rate_result.retry_after,
+        });
     }
 
     // Per-alias rate limit BEFORE storing challenge to prevent challenge overwrite DoS.
@@ -75,7 +77,9 @@ pub async fn request_challenge(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !alias_rate_result.allowed {
-        return Err(AppError::RateLimited { retry_after: alias_rate_result.retry_after });
+        return Err(AppError::RateLimited {
+            retry_after: alias_rate_result.retry_after,
+        });
     }
 
     // Generate nonce regardless of whether user exists to prevent alias enumeration
@@ -126,7 +130,9 @@ pub async fn verify_challenge(
 
     if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "auth/verify", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
+        return Err(AppError::RateLimited {
+            retry_after: rate_result.retry_after,
+        });
     }
 
     // Validate alias
@@ -225,7 +231,9 @@ pub async fn register(
 
     if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "auth/register", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
+        return Err(AppError::RateLimited {
+            retry_after: rate_result.retry_after,
+        });
     }
 
     // Validate alias

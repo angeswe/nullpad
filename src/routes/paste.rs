@@ -75,7 +75,9 @@ pub async fn create_paste(
 
     if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "paste", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
+        return Err(AppError::RateLimited {
+            retry_after: rate_result.retry_after,
+        });
     }
 
     let mut metadata: Option<PasteMetadata> = None;
@@ -91,7 +93,9 @@ pub async fn create_paste(
     {
         field_count += 1;
         if field_count > MAX_MULTIPART_FIELDS {
-            return Err(AppError::BadRequest("Too many multipart fields".to_string()));
+            return Err(AppError::BadRequest(
+                "Too many multipart fields".to_string(),
+            ));
         }
         let name = field
             .name()
@@ -213,8 +217,7 @@ pub async fn create_paste(
     // Enforce per-user paste count limit (0 = unlimited)
     if let Some(ref session) = auth_session {
         if state.config.max_pastes_per_user > 0 {
-            let paste_ids =
-                storage::paste::get_user_paste_ids(&mut con, &session.user_id).await?;
+            let paste_ids = storage::paste::get_user_paste_ids(&mut con, &session.user_id).await?;
             if paste_ids.len() >= state.config.max_pastes_per_user {
                 return Err(AppError::BadRequest(format!(
                     "Paste limit reached ({} max)",
@@ -304,14 +307,21 @@ pub async fn get_paste(
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
     if !rate_result.allowed {
-        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
+        return Err(AppError::RateLimited {
+            retry_after: rate_result.retry_after,
+        });
     }
 
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.
-    let paste = storage::paste::get_paste_atomic(&mut con, &state.config.paste_storage_path, &id, state.config.max_upload_bytes as u64)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
+    let paste = storage::paste::get_paste_atomic(
+        &mut con,
+        &state.config.paste_storage_path,
+        &id,
+        state.config.max_upload_bytes as u64,
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
     Ok(Json(GetPasteResponse {
         encrypted_content: general_purpose::STANDARD.encode(&paste.encrypted_content),

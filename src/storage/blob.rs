@@ -121,7 +121,11 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
 /// 1. Sanitizing the ID to only allow safe characters
 /// 2. Canonicalizing the path to resolve symlinks
 /// 3. Verifying the canonical path is within storage via strip_prefix
-pub async fn read_blob(storage_path: &Path, id: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, BlobError> {
+pub async fn read_blob(
+    storage_path: &Path,
+    id: &str,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, BlobError> {
     // Sanitize ID first - this is the security barrier
     let safe_id = sanitize_blob_id(id)?;
 

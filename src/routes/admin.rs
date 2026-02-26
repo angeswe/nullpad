@@ -26,7 +26,9 @@ async fn check_admin_rate_limit(
 
     if !result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "admin", user_id = %user_id, "Admin rate limit exceeded");
-        return Err(AppError::RateLimited { retry_after: result.retry_after });
+        return Err(AppError::RateLimited {
+            retry_after: result.retry_after,
+        });
     }
     Ok(())
 }

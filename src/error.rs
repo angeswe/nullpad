@@ -60,7 +60,10 @@ impl IntoResponse for AppError {
         let mut response = (status, body).into_response();
 
         // Add Retry-After header for rate-limited responses (RFC 6585)
-        if let AppError::RateLimited { retry_after: Some(secs) } = &self {
+        if let AppError::RateLimited {
+            retry_after: Some(secs),
+        } = &self
+        {
             if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
                 response.headers_mut().insert("retry-after", val);
             }
@@ -154,7 +157,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limited_with_retry_after() {
-        let err = AppError::RateLimited { retry_after: Some(42) };
+        let err = AppError::RateLimited {
+            retry_after: Some(42),
+        };
         let response = err.into_response();
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(response.headers().get("retry-after").unwrap(), "42");

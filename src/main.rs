@@ -138,7 +138,7 @@ async fn main() {
     // This prevents orphaning rate limit keys when the server restarts.
     // Uses SHA-256 of pubkey as a deterministic 32-byte salt.
     let ip_hmac_salt: [u8; 32] = {
-        use sha2::{Sha256, Digest};
+        use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"nullpad-ip-hmac-salt:");
         hasher.update(config.admin_pubkey.as_bytes());

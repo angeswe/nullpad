@@ -194,10 +194,7 @@ impl Config {
         if max_ttl_secs < default_ttl_secs {
             return Err(ConfigError::InvalidValue(
                 "MAX_TTL_SECS".to_string(),
-                format!(
-                    "must be >= DEFAULT_TTL_SECS ({})",
-                    default_ttl_secs
-                ),
+                format!("must be >= DEFAULT_TTL_SECS ({})", default_ttl_secs),
             ));
         }
 
