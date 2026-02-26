@@ -164,7 +164,7 @@ pub async fn verify_challenge(
     let valid = verify_signature(&user.pubkey, &nonce_bytes, &req.signature)?;
 
     if !valid {
-        tracing::warn!(action = "auth_failed", alias = %req.alias, "Invalid signature");
+        tracing::warn!(action = "auth_failed", "Invalid signature");
         return Err(AppError::Unauthorized("Authentication failed".to_string()));
     }
 
@@ -193,7 +193,7 @@ pub async fn verify_challenge(
     )
     .await?;
 
-    tracing::info!(action = "auth_success", alias = %req.alias, user_id = %user.id, role = %role.as_str(), "User authenticated");
+    tracing::info!(action = "auth_success", user_id = %user.id, role = %role.as_str(), "User authenticated");
 
     Ok(Json(VerifyResponse {
         token,
@@ -311,7 +311,7 @@ pub async fn register(
         )));
     }
 
-    tracing::info!(action = "user_registered", user_id = %user.id, alias = %user.alias, "New user registered via invite");
+    tracing::info!(action = "user_registered", user_id = %user.id, "New user registered via invite");
 
     Ok(Json(serde_json::json!({
         "success": true,

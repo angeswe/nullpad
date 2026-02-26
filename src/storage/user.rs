@@ -232,7 +232,10 @@ where
     Ok(())
 }
 
-/// Update a user's TTL (both user key and alias key).
+/// Update a user's TTL (both user key and alias key) atomically.
+///
+/// Uses a Lua script to prevent the user key and alias key from having
+/// different TTLs due to a non-atomic two-step update.
 pub async fn update_user_ttl<C>(
     con: &mut C,
     id: &str,
@@ -242,13 +245,32 @@ where
     C: AsyncCommands,
 {
     let user_key = format!("user:{}", id);
-    con.expire::<_, ()>(&user_key, ttl_secs as i64).await?;
 
-    // Also update alias key TTL to stay in sync
-    if let Some(user) = get_user(con, id).await? {
-        let alias_key = format!("alias:{}", user.alias);
-        con.expire::<_, ()>(&alias_key, ttl_secs as i64).await?;
-    }
+    // Lua script: read user JSON to get alias, then EXPIRE both keys atomically.
+    // KEYS[1] = user:{id}
+    // ARGV[1] = TTL in seconds
+    // ARGV[2] = alias key prefix ("alias:")
+    let script = redis::Script::new(
+        r#"
+        local user_json = redis.call('GET', KEYS[1])
+        if not user_json then
+            return 0
+        end
+        redis.call('EXPIRE', KEYS[1], ARGV[1])
+        local user = cjson.decode(user_json)
+        if type(user.alias) == 'string' then
+            redis.call('EXPIRE', ARGV[2] .. user.alias, ARGV[1])
+        end
+        return 1
+        "#,
+    );
+
+    script
+        .key(&user_key)
+        .arg(ttl_secs as i64)
+        .arg("alias:")
+        .invoke_async::<i32>(con)
+        .await?;
 
     Ok(())
 }
