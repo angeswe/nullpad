@@ -113,14 +113,15 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
     Ok(())
 }
 
-/// Read a blob from disk.
+/// Read a blob from disk with a size limit.
 ///
 /// Returns None if the blob doesn't exist.
+/// `max_bytes` caps how large a blob we'll read (prevents OOM from corrupt files).
 /// Path safety is ensured by:
 /// 1. Sanitizing the ID to only allow safe characters
 /// 2. Canonicalizing the path to resolve symlinks
 /// 3. Verifying the canonical path is within storage via strip_prefix
-pub async fn read_blob(storage_path: &Path, id: &str) -> Result<Option<Vec<u8>>, BlobError> {
+pub async fn read_blob(storage_path: &Path, id: &str, max_bytes: u64) -> Result<Option<Vec<u8>>, BlobError> {
     // Sanitize ID first - this is the security barrier
     let safe_id = sanitize_blob_id(id)?;
 
@@ -145,9 +146,21 @@ pub async fn read_blob(storage_path: &Path, id: &str) -> Result<Option<Vec<u8>>,
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
     // Safe to read - path is verified to be within storage
-    let mut file = fs::File::open(&canonical_path).await?;
-    let mut content = Vec::new();
-    file.read_to_end(&mut content).await?;
+    let file = fs::File::open(&canonical_path).await?;
+    let metadata = file.metadata().await?;
+    let file_size = metadata.len();
+
+    // Reject files larger than the configured limit to prevent OOM
+    if file_size > max_bytes {
+        return Err(BlobError::InvalidId(format!(
+            "Blob too large: {} bytes exceeds {}",
+            file_size, max_bytes
+        )));
+    }
+
+    let mut content = Vec::with_capacity(file_size as usize);
+    let mut reader = file;
+    reader.read_to_end(&mut content).await?;
     Ok(Some(content))
 }
 
@@ -206,7 +219,7 @@ mod tests {
         write_blob(storage_path, id, content).await.unwrap();
 
         // Read
-        let read_content = read_blob(storage_path, id).await.unwrap();
+        let read_content = read_blob(storage_path, id, 1024 * 1024).await.unwrap();
         assert_eq!(read_content, Some(content.to_vec()));
 
         // Delete
@@ -214,7 +227,7 @@ mod tests {
         assert!(deleted);
 
         // Read after delete
-        let read_content = read_blob(storage_path, id).await.unwrap();
+        let read_content = read_blob(storage_path, id, 1024 * 1024).await.unwrap();
         assert_eq!(read_content, None);
 
         // Delete again (should return false)
@@ -433,7 +446,7 @@ mod tests {
 
         // Attempt to read via the symlink - should fail because resolved path
         // is outside storage directory
-        let result = read_blob(storage_path, "symlink_attack").await;
+        let result = read_blob(storage_path, "symlink_attack", 1024 * 1024).await;
         assert!(
             matches!(result, Err(BlobError::InvalidId(_))),
             "Expected InvalidId for symlink attack, got {:?}",

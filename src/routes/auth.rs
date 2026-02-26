@@ -48,7 +48,7 @@ pub async fn request_challenge(
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:auth:challenge:{}", ip_hash);
-    let allowed = check_rate_limit(
+    let rate_result = check_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_auth_per_min,
@@ -57,9 +57,25 @@ pub async fn request_challenge(
     .await
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
-    if !allowed {
+    if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "auth/challenge", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited);
+        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
+    }
+
+    // Per-alias rate limit BEFORE storing challenge to prevent challenge overwrite DoS.
+    // Check unconditionally (alias existence is checked atomically when storing).
+    let alias_rate_key = format!("ratelimit:challenge_alias:{}", req.alias);
+    let alias_rate_result = check_rate_limit(
+        &mut con,
+        &alias_rate_key,
+        10, // max 10 challenges per alias per 30s window
+        30,
+    )
+    .await
+    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    if !alias_rate_result.allowed {
+        return Err(AppError::RateLimited { retry_after: alias_rate_result.retry_after });
     }
 
     // Generate nonce regardless of whether user exists to prevent alias enumeration
@@ -72,31 +88,14 @@ pub async fn request_challenge(
 
     // Atomically check if user exists and store challenge.
     // This prevents race conditions between user lookup and challenge storage.
-    let user_exists = storage::session::store_challenge_if_user_exists(
+    // Non-existent users get a throwaway nonce (alias enumeration prevention).
+    storage::session::store_challenge_if_user_exists(
         &mut con,
         &req.alias,
         &challenge,
         state.config.challenge_ttl_secs,
     )
     .await?;
-
-    // Per-alias rate limit only for existing users to prevent challenge overwrite attacks.
-    // Non-existent users don't consume rate limit quota (prevents DoS against real users).
-    if user_exists {
-        let alias_rate_key = format!("ratelimit:challenge_alias:{}", req.alias);
-        let alias_allowed = check_rate_limit(
-            &mut con,
-            &alias_rate_key,
-            10, // max 10 challenges per alias per 30s window
-            30,
-        )
-        .await
-        .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-        if !alias_allowed {
-            return Err(AppError::RateLimited);
-        }
-    }
 
     // Always return a challenge response (non-existent users get a throwaway nonce)
     Ok(Json(ChallengeResponse { nonce }))
@@ -116,7 +115,7 @@ pub async fn verify_challenge(
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:auth:verify:{}", ip_hash);
-    let allowed = check_rate_limit(
+    let rate_result = check_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_auth_per_min,
@@ -125,9 +124,9 @@ pub async fn verify_challenge(
     .await
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
-    if !allowed {
+    if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "auth/verify", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited);
+        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
     }
 
     // Validate alias
@@ -215,7 +214,7 @@ pub async fn register(
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:auth:register:{}", ip_hash);
-    let allowed = check_rate_limit(
+    let rate_result = check_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_auth_per_min,
@@ -224,9 +223,9 @@ pub async fn register(
     .await
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
-    if !allowed {
+    if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "auth/register", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited);
+        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
     }
 
     // Validate alias
@@ -270,21 +269,7 @@ pub async fn register(
         AppError::BadRequest("Invalid public key format".to_string())
     })?;
 
-    // Check alias availability BEFORE consuming invite
-    let existing_user = storage::user::get_user_by_alias(&mut con, &req.alias).await?;
-    if existing_user.is_some() {
-        return Err(AppError::BadRequest(format!(
-            "Alias '{}' is already taken",
-            req.alias
-        )));
-    }
-
-    // Get and consume invite atomically (validation passed, safe to consume)
-    let _invite = storage::user::get_and_delete_invite(&mut con, &req.token)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Invite not found or expired".to_string()))?;
-
-    // Create user
+    // Create user ID upfront (needed for Lua script)
     let user_id = nanoid::nanoid!(12);
     let user = StoredUser {
         id: user_id,
@@ -294,21 +279,30 @@ pub async fn register(
         created_at: crate::util::now_secs(),
     };
 
-    // Store user atomically (ensures alias hasn't been taken in a race)
-    let created = storage::user::store_user_if_alias_available(
+    // Atomically: check alias availability, consume invite, create user.
+    // Single Lua script prevents race where concurrent registrations both
+    // consume invites but only one user is created (wasting an invite).
+    let created = storage::user::consume_invite_and_create_user(
         &mut con,
+        &req.token,
         &user,
         state.config.user_idle_ttl_secs,
     )
     .await?;
 
-    if !created {
-        // Race condition: alias was taken between check and create
-        // Invite was already consumed - this is acceptable as validation passed
-        return Err(AppError::BadRequest(format!(
-            "Alias '{}' is already taken",
-            req.alias
-        )));
+    match created {
+        storage::user::RegisterResult::Success => {}
+        storage::user::RegisterResult::AliasTaken => {
+            return Err(AppError::BadRequest(format!(
+                "Alias '{}' is already taken",
+                req.alias
+            )));
+        }
+        storage::user::RegisterResult::InviteNotFound => {
+            return Err(AppError::NotFound(
+                "Invite not found or expired".to_string(),
+            ));
+        }
     }
 
     tracing::info!(action = "user_registered", user_id = %user.id, "New user registered via invite");

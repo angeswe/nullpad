@@ -128,7 +128,11 @@
 
   /**
    * Derive Ed25519 keypair from user secret and alias (for registration/keygen)
-   * Uses Argon2id with alias as salt (portability vs stronger salt tradeoff)
+   * Uses Argon2id with alias as salt (portability vs stronger salt tradeoff).
+   * NOTE: Short aliases (2 chars) are padded to 8 bytes with null bytes. While this meets
+   * Argon2id's minimum salt requirement, short aliases provide less entropy. Consider
+   * hashing the alias (e.g., SHA-256) for a fixed-length, higher-entropy salt if
+   * changing the derivation scheme in the future (would break existing keypairs).
    * @param {string} secret - User's secret password
    * @param {string} alias - User's alias (used as salt)
    * @returns {Promise<{publicKey: string, privateKey: CryptoKey}>}
@@ -144,14 +148,9 @@
         throw new Error('Ed25519 PKCS8 import failed: ' + e.message + '. Your browser may not support Ed25519 PKCS8 import.');
       }
 
-      // Use TweetNaCl for public key derivation (works in all browsers)
-      if (typeof nacl === 'undefined' || !nacl.sign) {
-        throw new Error('TweetNaCl not loaded. Cannot derive public key.');
-      }
-      const naclKeypair = nacl.sign.keyPair.fromSeed(seed);
-      const pubKeyBytes = new Uint8Array(naclKeypair.publicKey);
-      // Zero the 64-byte expanded secret key from TweetNaCl
-      naclKeypair.secretKey.fill(0);
+      // Extract public key via JWK export (pure Web Crypto, no TweetNaCl dependency)
+      const jwk = await crypto.subtle.exportKey('jwk', privateKey);
+      const pubKeyBytes = b64urlDecode(jwk.x);
 
       return {
         publicKey: b64Encode(pubKeyBytes),

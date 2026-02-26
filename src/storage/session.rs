@@ -237,13 +237,18 @@ where
 
     // Atomically: store session, add to tracking set, and extend set TTL (never shrink).
     // Uses Lua to prevent race conditions where a concurrent login shrinks the set TTL.
+    // TTL returns -1 for persistent keys (no expiry) and -2 for non-existent keys.
+    // Only set EXPIRE if key is new (-2) or has a smaller TTL than the new value.
+    // Never downgrade a persistent key (-1) to a finite TTL.
     let store_script = redis::Script::new(
         r"
         redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
         redis.call('SADD', KEYS[2], ARGV[3])
         local current_ttl = redis.call('TTL', KEYS[2])
         local new_ttl = tonumber(ARGV[1])
-        if current_ttl < new_ttl then
+        if current_ttl == -2 then
+            redis.call('EXPIRE', KEYS[2], new_ttl)
+        elseif current_ttl >= 0 and current_ttl < new_ttl then
             redis.call('EXPIRE', KEYS[2], new_ttl)
         end
         return 1
@@ -326,8 +331,9 @@ where
 {
     let user_sessions_key = format!("user_sessions:{}", user_id);
 
-    // Lua script: atomically get all tokens (capped), delete their session keys,
-    // then delete the tracking set.
+    // Lua script: atomically get all tokens (capped), delete their session keys.
+    // Only DEL the tracking SET if all tokens were processed; otherwise SREM
+    // the processed tokens and keep the SET for a follow-up call.
     // KEYS[1] = user_sessions:{user_id}
     // ARGV[1] = session key prefix ("session:")
     // ARGV[2] = max sessions to process (cap to bound Lua runtime)
@@ -337,11 +343,17 @@ where
         local tokens = redis.call('SMEMBERS', KEYS[1])
         local max_cap = tonumber(ARGV[2])
         local deleted = 0
+        local processed = {}
         for i, token in ipairs(tokens) do
             if i > max_cap then break end
             deleted = deleted + redis.call('DEL', ARGV[1] .. token)
+            table.insert(processed, token)
         end
-        redis.call('DEL', KEYS[1])
+        if #processed >= #tokens then
+            redis.call('DEL', KEYS[1])
+        elseif #processed > 0 then
+            redis.call('SREM', KEYS[1], unpack(processed))
+        end
         return deleted
         ",
     );

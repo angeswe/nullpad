@@ -64,7 +64,7 @@ pub async fn create_paste(
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:paste:{}", ip_hash);
-    let allowed = check_rate_limit(
+    let rate_result = check_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_paste_per_min,
@@ -73,20 +73,26 @@ pub async fn create_paste(
     .await
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
-    if !allowed {
+    if !rate_result.allowed {
         tracing::warn!(action = "rate_limited", endpoint = "paste", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited);
+        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
     }
 
     let mut metadata: Option<PasteMetadata> = None;
     let mut encrypted_content: Option<Vec<u8>> = None;
+    let mut field_count: u32 = 0;
+    const MAX_MULTIPART_FIELDS: u32 = 4;
 
-    // Parse multipart form
+    // Parse multipart form (capped at MAX_MULTIPART_FIELDS to prevent DoS)
     while let Some(field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid multipart: {}", e)))?
     {
+        field_count += 1;
+        if field_count > MAX_MULTIPART_FIELDS {
+            return Err(AppError::BadRequest("Too many multipart fields".to_string()));
+        }
         let name = field
             .name()
             .ok_or_else(|| AppError::BadRequest("Field missing name".to_string()))?
@@ -204,6 +210,20 @@ pub async fn create_paste(
         requested_ttl.clamp(60, state.config.max_ttl_secs)
     };
 
+    // Enforce per-user paste count limit (0 = unlimited)
+    if let Some(ref session) = auth_session {
+        if state.config.max_pastes_per_user > 0 {
+            let paste_ids =
+                storage::paste::get_user_paste_ids(&mut con, &session.user_id).await?;
+            if paste_ids.len() >= state.config.max_pastes_per_user {
+                return Err(AppError::BadRequest(format!(
+                    "Paste limit reached ({} max)",
+                    state.config.max_pastes_per_user
+                )));
+            }
+        }
+    }
+
     // Generate paste ID
     let paste_id = nanoid::nanoid!(12);
 
@@ -274,7 +294,7 @@ pub async fn get_paste(
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:paste_read:{}", ip_hash);
-    let allowed = check_rate_limit(
+    let rate_result = check_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_paste_per_min * 5, // 5x write limit for reads
@@ -283,13 +303,13 @@ pub async fn get_paste(
     .await
     .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
 
-    if !allowed {
-        return Err(AppError::RateLimited);
+    if !rate_result.allowed {
+        return Err(AppError::RateLimited { retry_after: rate_result.retry_after });
     }
 
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.
-    let paste = storage::paste::get_paste_atomic(&mut con, &state.config.paste_storage_path, &id)
+    let paste = storage::paste::get_paste_atomic(&mut con, &state.config.paste_storage_path, &id, state.config.max_upload_bytes as u64)
         .await?
         .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 

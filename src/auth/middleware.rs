@@ -141,6 +141,14 @@ impl FromRequestParts<AppState> for AdminSession {
     }
 }
 
+/// Result of a rate limit check.
+pub struct RateLimitResult {
+    /// Whether the request is allowed (under limit).
+    pub allowed: bool,
+    /// Seconds remaining in the current window (for Retry-After header).
+    pub retry_after: Option<u64>,
+}
+
 /// Check rate limit using Redis INCR with TTL.
 ///
 /// # Arguments
@@ -150,18 +158,18 @@ impl FromRequestParts<AppState> for AdminSession {
 /// * `window_secs` - Time window in seconds
 ///
 /// # Returns
-/// * `Ok(true)` if under limit
-/// * `Ok(false)` if limit exceeded
+/// * `Ok(RateLimitResult)` with allowed=true if under limit, allowed=false with retry_after if exceeded
 pub async fn check_rate_limit<C>(
     con: &mut C,
     key: &str,
     max: u32,
     window_secs: u64,
-) -> Result<bool, redis::RedisError>
+) -> Result<RateLimitResult, redis::RedisError>
 where
     C: AsyncCommands,
 {
     // Atomic INCR + conditional EXPIRE via Lua script.
+    // Returns [count, ttl] where ttl is the remaining window time.
     // Prevents race condition where server crash between INCR and EXPIRE
     // leaves the key without a TTL, permanently blocking that IP.
     let script = redis::Script::new(
@@ -170,13 +178,19 @@ where
         if count == 1 then
             redis.call('EXPIRE', KEYS[1], ARGV[1])
         end
-        return count
+        local ttl = redis.call('TTL', KEYS[1])
+        if ttl < 0 then ttl = tonumber(ARGV[1]) end
+        return {count, ttl}
         "#,
     );
 
-    let count: u32 = script.key(key).arg(window_secs).invoke_async(con).await?;
+    let (count, ttl): (u32, i64) = script.key(key).arg(window_secs).invoke_async(con).await?;
+    let retry_after = if ttl > 0 { Some(ttl as u64) } else { Some(window_secs) };
 
-    Ok(count <= max)
+    Ok(RateLimitResult {
+        allowed: count <= max,
+        retry_after: if count > max { retry_after } else { None },
+    })
 }
 
 #[cfg(test)]
@@ -214,22 +228,26 @@ mod tests {
         // First request should succeed
         let result = check_rate_limit(&mut con, test_key, 3, 60).await;
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        let r = result.unwrap();
+        assert!(r.allowed);
+        assert!(r.retry_after.is_none());
 
         // Second request should succeed
         let result = check_rate_limit(&mut con, test_key, 3, 60).await;
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(result.unwrap().allowed);
 
         // Third request should succeed
         let result = check_rate_limit(&mut con, test_key, 3, 60).await;
         assert!(result.is_ok());
-        assert!(result.unwrap());
+        assert!(result.unwrap().allowed);
 
-        // Fourth request should fail (over limit)
+        // Fourth request should fail (over limit) with retry_after
         let result = check_rate_limit(&mut con, test_key, 3, 60).await;
         assert!(result.is_ok());
-        assert!(!result.unwrap());
+        let r = result.unwrap();
+        assert!(!r.allowed);
+        assert!(r.retry_after.is_some());
 
         // Clean up
         let _: Result<(), _> = con.del(test_key).await;

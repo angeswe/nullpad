@@ -83,10 +83,19 @@ where
 /// Reads the blob from disk FIRST to ensure content is available before
 /// touching metadata. For burn-after-reading pastes, metadata is only
 /// deleted after confirming the blob can be read, preventing data loss.
+/// `max_blob_bytes` limits the blob size to prevent OOM.
+///
+/// NOTE: If Redis AOF persistence is enabled, burn-after-reading metadata may
+/// be retained in the AOF log even after deletion. The Lua DEL command is
+/// recorded in the AOF. On AOF rewrite, the key won't appear (since it's
+/// already deleted), but between rewrites the original SET + DEL are both
+/// present. Consider periodic AOF rewrite (BGREWRITEAOF) or disabling AOF
+/// if metadata retention is a concern.
 pub async fn get_paste_atomic<C>(
     con: &mut C,
     storage_path: &Path,
     id: &str,
+    max_blob_bytes: u64,
 ) -> Result<Option<StoredPaste>, redis::RedisError>
 where
     C: AsyncCommands,
@@ -96,7 +105,7 @@ where
     // Step 1: Read blob from disk BEFORE touching metadata.
     // This ensures content is available before we atomically delete
     // metadata for burn-after-reading pastes.
-    let encrypted_content = match blob::read_blob(storage_path, id).await {
+    let encrypted_content = match blob::read_blob(storage_path, id, max_blob_bytes).await {
         Ok(Some(content)) => content,
         Ok(None) => {
             let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(con).await?;

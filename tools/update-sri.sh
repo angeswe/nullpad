@@ -32,4 +32,20 @@ for html in $HTML_FILES; do
   echo "Updated: $html"
 done
 
+# For each CSS file referenced in HTML, update its integrity attribute
+for html in $HTML_FILES; do
+  grep -oP 'href="/css/[^"]+' "$html" | sed 's/^href="//' | while read -r href_path; do
+    file_path="${STATIC_DIR}${href_path}"
+    if [ ! -f "$file_path" ]; then
+      echo "WARNING: $file_path not found (referenced in $html)"
+      continue
+    fi
+
+    hash=$(sri_hash "$file_path")
+
+    # Replace: href="/css/..." with or without existing integrity
+    sed -i "s|href=\"${href_path}\"[^>]*>|href=\"${href_path}\" integrity=\"${hash}\" crossorigin=\"anonymous\">|g" "$html"
+  done || true
+done
+
 echo "SRI hashes updated."

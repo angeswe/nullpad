@@ -26,7 +26,10 @@ pub enum AppError {
     NotFound(String),
 
     #[error("Rate limited")]
-    RateLimited,
+    RateLimited {
+        /// Seconds until the rate limit window resets (for Retry-After header).
+        retry_after: Option<u64>,
+    },
 }
 
 impl IntoResponse for AppError {
@@ -44,7 +47,7 @@ impl IntoResponse for AppError {
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
-            AppError::RateLimited => (
+            AppError::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Rate limit exceeded".to_string(),
             ),
@@ -54,7 +57,16 @@ impl IntoResponse for AppError {
             "error": message
         }));
 
-        (status, body).into_response()
+        let mut response = (status, body).into_response();
+
+        // Add Retry-After header for rate-limited responses (RFC 6585)
+        if let AppError::RateLimited { retry_after: Some(secs) } = &self {
+            if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+                response.headers_mut().insert("retry-after", val);
+            }
+        }
+
+        response
     }
 }
 
@@ -135,9 +147,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limited() {
-        let (status, body) = error_response(AppError::RateLimited).await;
+        let (status, body) = error_response(AppError::RateLimited { retry_after: None }).await;
         assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(body["error"], "Rate limit exceeded");
+    }
+
+    #[tokio::test]
+    async fn test_rate_limited_with_retry_after() {
+        let err = AppError::RateLimited { retry_after: Some(42) };
+        let response = err.into_response();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(response.headers().get("retry-after").unwrap(), "42");
     }
 
     #[test]
