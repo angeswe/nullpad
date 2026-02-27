@@ -168,10 +168,7 @@ async fn main() {
     // Load or generate a random HMAC salt for IP hashing in rate-limit keys.
     // Persisted to data/hmac_salt so rate-limit keys survive restarts.
     let ip_hmac_salt: [u8; 32] = {
-        let salt_path = std::path::Path::new(&config.paste_storage_path)
-            .parent()
-            .unwrap_or(std::path::Path::new("."))
-            .join("hmac_salt");
+        let salt_path = std::path::Path::new(&config.paste_storage_path).join(".hmac_salt");
         match std::fs::read(&salt_path) {
             Ok(bytes) if bytes.len() == 32 => {
                 let mut salt = [0u8; 32];
