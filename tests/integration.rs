@@ -170,18 +170,25 @@ async fn admin_login(
 }
 
 /// Helper: create a paste via multipart.
+///
+/// `paste_type` should be "text" or "file".
 async fn create_paste(
     client: &reqwest::Client,
     base_url: &str,
-    filename: &str,
+    paste_type: &str,
     content: &[u8],
     burn: bool,
     ttl: u64,
     token: Option<&str>,
 ) -> reqwest::Response {
+    let paste_id = nanoid::nanoid!(12);
+    // Use a dummy base64 blob as encrypted_metadata (server stores opaquely)
+    let encrypted_metadata = general_purpose::STANDARD.encode(b"encrypted-file-metadata");
+
     let metadata = serde_json::json!({
-        "filename": filename,
-        "content_type": "application/octet-stream",
+        "paste_id": paste_id,
+        "encrypted_metadata": encrypted_metadata,
+        "paste_type": paste_type,
         "ttl_secs": ttl,
         "burn_after_reading": burn
     });
@@ -196,7 +203,7 @@ async fn create_paste(
         .part(
             "file",
             multipart::Part::bytes(content.to_vec())
-                .file_name(filename.to_string())
+                .file_name("encrypted")
                 .mime_str("application/octet-stream")
                 .unwrap(),
         );
@@ -225,7 +232,7 @@ async fn test_create_and_get_paste() {
     let resp = create_paste(
         &client,
         &base_url,
-        "test.md",
+        "text",
         b"encrypted data",
         false,
         3600,
@@ -247,7 +254,7 @@ async fn test_create_and_get_paste() {
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["filename"].as_str().unwrap(), "test.md");
+    assert!(body["encrypted_metadata"].as_str().is_some());
     assert!(!body["burn_after_reading"].as_bool().unwrap());
 
     // Decode content
@@ -263,16 +270,7 @@ async fn test_burn_after_reading() {
     let client = reqwest::Client::new();
 
     // Create a burn paste
-    let resp = create_paste(
-        &client,
-        &base_url,
-        "secret.txt",
-        b"burn me",
-        true,
-        3600,
-        None,
-    )
-    .await;
+    let resp = create_paste(&client, &base_url, "text", b"burn me", true, 3600, None).await;
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -321,30 +319,83 @@ async fn test_paste_not_found() {
 }
 
 #[tokio::test]
-async fn test_public_extension_restriction() {
+async fn test_public_paste_type_restriction() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // .exe should be rejected for public uploads
-    let resp = create_paste(
-        &client,
-        &base_url,
-        "malware.exe",
-        b"data",
-        false,
-        3600,
-        None,
-    )
-    .await;
+    // "file" type should be rejected for public uploads
+    let resp = create_paste(&client, &base_url, "file", b"data", false, 3600, None).await;
     assert_eq!(resp.status(), 403);
 
-    // .md should be allowed
-    let resp = create_paste(&client, &base_url, "readme.md", b"data", false, 3600, None).await;
+    // "text" type should be allowed for public uploads
+    let resp = create_paste(&client, &base_url, "text", b"data", false, 3600, None).await;
+    assert_eq!(resp.status(), 200);
+}
+
+#[tokio::test]
+async fn test_duplicate_paste_id_returns_409() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Use a fixed paste ID for both requests
+    let paste_id = nanoid::nanoid!(12);
+    let encrypted_metadata = general_purpose::STANDARD.encode(b"encrypted-file-metadata");
+
+    let metadata = serde_json::json!({
+        "paste_id": paste_id,
+        "encrypted_metadata": encrypted_metadata,
+        "paste_type": "text",
+        "ttl_secs": 3600,
+        "burn_after_reading": false
+    });
+
+    let form = multipart::Form::new()
+        .part(
+            "metadata",
+            multipart::Part::text(metadata.to_string())
+                .mime_str("application/json")
+                .unwrap(),
+        )
+        .part(
+            "file",
+            multipart::Part::bytes(b"data".to_vec())
+                .file_name("encrypted")
+                .mime_str("application/octet-stream")
+                .unwrap(),
+        );
+
+    // First request should succeed
+    let resp = client
+        .post(format!("{}/api/paste", base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // .txt should be allowed
-    let resp = create_paste(&client, &base_url, "notes.txt", b"data", false, 3600, None).await;
-    assert_eq!(resp.status(), 200);
+    // Second request with same paste ID should return 409 Conflict
+    let form2 = multipart::Form::new()
+        .part(
+            "metadata",
+            multipart::Part::text(metadata.to_string())
+                .mime_str("application/json")
+                .unwrap(),
+        )
+        .part(
+            "file",
+            multipart::Part::bytes(b"different data".to_vec())
+                .file_name("encrypted")
+                .mime_str("application/octet-stream")
+                .unwrap(),
+        );
+
+    let resp = client
+        .post(format!("{}/api/paste", base_url))
+        .multipart(form2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 409);
 }
 
 // ============================================================================
@@ -950,16 +1001,7 @@ async fn test_admin_delete_paste() {
     let client = reqwest::Client::new();
 
     // Create a paste
-    let resp = create_paste(
-        &client,
-        &base_url,
-        "deleteme.txt",
-        b"data",
-        false,
-        3600,
-        None,
-    )
-    .await;
+    let resp = create_paste(&client, &base_url, "text", b"data", false, 3600, None).await;
     let body: serde_json::Value = resp.json().await.unwrap();
     let paste_id = body["id"].as_str().unwrap().to_string();
 
@@ -1023,7 +1065,7 @@ async fn test_admin_revoke_user() {
     let resp = create_paste(
         &client,
         &base_url,
-        "user_paste.md",
+        "text",
         b"data",
         false,
         3600,
@@ -1221,7 +1263,7 @@ async fn test_activate_user_on_first_upload() {
     let resp = create_paste(
         &client,
         &base_url,
-        "first.txt",
+        "text",
         b"first upload",
         false,
         3600,
@@ -1249,7 +1291,7 @@ async fn test_activate_user_on_first_upload() {
     let resp = create_paste(
         &client,
         &base_url,
-        "second.txt",
+        "text",
         b"second upload",
         false,
         3600,
@@ -1338,7 +1380,7 @@ async fn test_concurrent_burn_after_reading_race() {
     let resp = create_paste(
         &client,
         &base_url,
-        "race.txt",
+        "text",
         b"race condition test",
         true,
         3600,
@@ -1464,7 +1506,7 @@ async fn test_forever_paste_requires_auth() {
     let client = reqwest::Client::new();
 
     // Public user trying to create forever paste (ttl=0) should be rejected
-    let resp = create_paste(&client, &base_url, "forever.md", b"data", false, 0, None).await;
+    let resp = create_paste(&client, &base_url, "text", b"data", false, 0, None).await;
     assert_eq!(resp.status(), 403);
 
     // Login as admin (trusted user)
@@ -1474,7 +1516,7 @@ async fn test_forever_paste_requires_auth() {
     let resp = create_paste(
         &client,
         &base_url,
-        "forever.md",
+        "text",
         b"forever data",
         false,
         0,
@@ -1701,7 +1743,7 @@ async fn test_session_invalid_after_logout_on_all_endpoints() {
 }
 
 #[tokio::test]
-async fn test_trusted_user_can_upload_any_extension() {
+async fn test_trusted_user_can_upload_files() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
@@ -1712,12 +1754,12 @@ async fn test_trusted_user_can_upload_any_extension() {
     let (_user_key, _user_alias, user_token) =
         create_trusted_user(&client, &base_url, &admin_token).await;
 
-    // Trusted user can upload .exe (blocked for public)
+    // Trusted user can upload "file" type (blocked for public)
     let resp = create_paste(
         &client,
         &base_url,
-        "program.exe",
-        b"MZ...",
+        "file",
+        b"binary data",
         false,
         3600,
         Some(&user_token),
@@ -1725,38 +1767,12 @@ async fn test_trusted_user_can_upload_any_extension() {
     .await;
     assert_eq!(resp.status(), 200);
 
-    // Trusted user can upload .zip
+    // Trusted user can also create text pastes
     let resp = create_paste(
         &client,
         &base_url,
-        "archive.zip",
-        b"PK...",
-        false,
-        3600,
-        Some(&user_token),
-    )
-    .await;
-    assert_eq!(resp.status(), 200);
-
-    // Trusted user can upload .pdf
-    let resp = create_paste(
-        &client,
-        &base_url,
-        "document.pdf",
-        b"%PDF...",
-        false,
-        3600,
-        Some(&user_token),
-    )
-    .await;
-    assert_eq!(resp.status(), 200);
-
-    // Trusted user can upload file with no extension
-    let resp = create_paste(
-        &client,
-        &base_url,
-        "Makefile",
-        b"all: build",
+        "text",
+        b"some text",
         false,
         3600,
         Some(&user_token),

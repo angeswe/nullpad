@@ -139,8 +139,25 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
         .strip_prefix(&canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    // Write atomically: temp file -> sync -> rename
-    let mut file = fs::File::create(&temp_path).await?;
+    // Write atomically: temp file (exclusive create) -> sync -> rename.
+    // If a stale temp file exists from a previous crash, remove it first.
+    let open_result = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temp_path)
+        .await;
+    let mut file = match open_result {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            fs::remove_file(&temp_path).await?;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)
+                .await?
+        }
+        Err(e) => return Err(e.into()),
+    };
     file.write_all(content).await?;
     file.sync_all().await?;
     fs::rename(&temp_path, &blob_path).await?;

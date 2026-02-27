@@ -184,6 +184,7 @@
       const metadata = JSON.stringify({
         paste_id: clientPasteId,
         encrypted_metadata: encryptedMetadata,
+        paste_type: currentFile ? 'file' : 'text',
         ttl_secs: parseInt(ttlSelect.value, 10),
         burn_after_reading: burnCheckbox.checked
       });

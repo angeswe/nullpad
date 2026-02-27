@@ -5,6 +5,10 @@
 
 use serde::{Deserialize, Serialize};
 
+fn default_paste_type() -> String {
+    "text".to_string()
+}
+
 // ============================================================================
 // Paste Models
 // ============================================================================
@@ -12,8 +16,12 @@ use serde::{Deserialize, Serialize};
 /// Metadata for paste creation (sent as JSON in multipart form).
 #[derive(Debug, Deserialize)]
 pub struct PasteMetadata {
-    pub filename: String,
-    pub content_type: String,
+    /// Client-generated paste ID (nanoid, 12 chars). Used as AES-GCM AAD.
+    pub paste_id: String,
+    /// Encrypted filename + content_type blob (base64). Server stores opaquely.
+    pub encrypted_metadata: String,
+    /// Paste type: "text" or "file". Public users restricted to "text".
+    pub paste_type: String,
     /// TTL in seconds. If omitted, uses server config DEFAULT_TTL_SECS.
     pub ttl_secs: Option<u64>,
     #[serde(default)]
@@ -31,8 +39,15 @@ pub struct CreatePasteResponse {
 #[derive(Debug, Serialize)]
 pub struct GetPasteResponse {
     pub encrypted_content: String, // base64
-    pub filename: String,
-    pub content_type: String,
+    /// Encrypted metadata blob (new pastes). Empty for legacy pastes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_metadata: Option<String>,
+    /// Legacy plaintext filename (old pastes only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filename: Option<String>,
+    /// Legacy plaintext content type (old pastes only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
     pub burn_after_reading: bool,
     pub created_at: u64,
 }
@@ -42,8 +57,18 @@ pub struct GetPasteResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPasteMeta {
     pub id: String,
-    pub filename: String,
-    pub content_type: String,
+    /// Encrypted metadata blob (new pastes).
+    #[serde(default)]
+    pub encrypted_metadata: String,
+    /// Paste type: "text" or "file". Defaults to "text" for legacy pastes.
+    #[serde(default = "default_paste_type")]
+    pub paste_type: String,
+    /// Legacy plaintext filename (old pastes only).
+    #[serde(default)]
+    pub filename: Option<String>,
+    /// Legacy plaintext content type (old pastes only).
+    #[serde(default)]
+    pub content_type: Option<String>,
     pub burn_after_reading: bool,
     pub created_at: u64,
     pub owner_id: Option<String>,
@@ -61,8 +86,7 @@ pub struct StoredPaste {
 #[derive(Debug, Serialize)]
 pub struct PasteInfo {
     pub id: String,
-    pub filename: String,
-    pub content_type: String,
+    pub paste_type: String,
     pub created_at: u64,
     pub ttl: u64,
     pub burn_after_reading: bool,
