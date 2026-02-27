@@ -75,6 +75,37 @@ fn print_keygen_usage() {
     eprintln!("  ADMIN_PUBKEY=<output>");
 }
 
+/// Generate a new random HMAC salt and persist it to disk with restrictive permissions.
+fn generate_hmac_salt(path: &std::path::Path) -> [u8; 32] {
+    let mut salt = [0u8; 32];
+    rand::fill(&mut salt);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .expect("Failed to create parent directory for HMAC salt file");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .expect("Failed to create HMAC salt file");
+        f.write_all(&salt).expect("Failed to write HMAC salt file");
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, salt).expect("Failed to write HMAC salt file");
+    }
+
+    tracing::info!("Generated new HMAC salt at {}", path.display());
+    salt
+}
+
 #[tokio::main]
 async fn main() {
     // Check for keygen subcommand
@@ -148,15 +179,24 @@ async fn main() {
                 tracing::info!("Loaded HMAC salt from {}", salt_path.display());
                 salt
             }
-            _ => {
-                let mut salt = [0u8; 32];
-                rand::fill(&mut salt);
-                if let Some(parent) = salt_path.parent() {
-                    std::fs::create_dir_all(parent).ok();
-                }
-                std::fs::write(&salt_path, salt).expect("Failed to write HMAC salt file");
-                tracing::info!("Generated new HMAC salt at {}", salt_path.display());
-                salt
+            Ok(bytes) => {
+                tracing::warn!(
+                    path = %salt_path.display(),
+                    actual_len = bytes.len(),
+                    "HMAC salt file has wrong size; regenerating (rate-limit keys will reset)"
+                );
+                generate_hmac_salt(&salt_path)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!("No HMAC salt file found; generating new one");
+                generate_hmac_salt(&salt_path)
+            }
+            Err(e) => {
+                panic!(
+                    "Failed to read HMAC salt file at {}: {}",
+                    salt_path.display(),
+                    e
+                );
             }
         }
     };
