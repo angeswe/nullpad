@@ -68,8 +68,13 @@ impl IntoResponse for AppError {
             retry_after: Some(secs),
         } = &self
         {
-            if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
-                response.headers_mut().insert("retry-after", val);
+            match axum::http::HeaderValue::from_str(&secs.to_string()) {
+                Ok(val) => {
+                    response.headers_mut().insert("retry-after", val);
+                }
+                Err(e) => {
+                    tracing::warn!(retry_after = secs, error = %e, "Failed to construct Retry-After header value");
+                }
             }
         }
 

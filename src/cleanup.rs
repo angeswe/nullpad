@@ -79,23 +79,31 @@ where
 
             // Handle .tmp files: delete if stale (older than 1 hour)
             if file_path.extension().is_some_and(|ext| ext == "tmp") {
-                if let Ok(metadata) = fs::metadata(&file_path).await {
-                    if let Ok(modified) = metadata.modified() {
-                        let modified_secs = modified
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs();
-                        if now.saturating_sub(modified_secs) > STALE_TMP_SECS {
-                            if let Err(e) = fs::remove_file(&file_path).await {
-                                tracing::warn!(
-                                    path = %file_path.display(),
-                                    error = %e,
-                                    "Failed to delete stale tmp file"
-                                );
-                            } else {
-                                tmp_deleted_count += 1;
+                match fs::metadata(&file_path).await {
+                    Ok(metadata) => match metadata.modified() {
+                        Ok(modified) => {
+                            let modified_secs = modified
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs();
+                            if now.saturating_sub(modified_secs) > STALE_TMP_SECS {
+                                if let Err(e) = fs::remove_file(&file_path).await {
+                                    tracing::warn!(
+                                        path = %file_path.display(),
+                                        error = %e,
+                                        "Failed to delete stale tmp file"
+                                    );
+                                } else {
+                                    tmp_deleted_count += 1;
+                                }
                             }
                         }
+                        Err(e) => {
+                            tracing::debug!(path = %file_path.display(), error = %e, "Failed to get modified time for tmp file");
+                        }
+                    },
+                    Err(e) => {
+                        tracing::debug!(path = %file_path.display(), error = %e, "Failed to get metadata for tmp file");
                     }
                 }
                 continue;

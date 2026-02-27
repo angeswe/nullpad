@@ -75,6 +75,37 @@ fn print_keygen_usage() {
     eprintln!("  ADMIN_PUBKEY=<output>");
 }
 
+/// Generate a new random HMAC salt and persist it to disk with restrictive permissions.
+fn generate_hmac_salt(path: &std::path::Path) -> [u8; 32] {
+    let mut salt = [0u8; 32];
+    rand::fill(&mut salt);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .expect("Failed to create parent directory for HMAC salt file");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(path)
+            .expect("Failed to create HMAC salt file");
+        f.write_all(&salt).expect("Failed to write HMAC salt file");
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, salt).expect("Failed to write HMAC salt file");
+    }
+
+    tracing::info!("Generated new HMAC salt at {}", path.display());
+    salt
+}
+
 #[tokio::main]
 async fn main() {
     // Check for keygen subcommand
@@ -134,15 +165,37 @@ async fn main() {
     // Clone redis for cleanup job before building state
     let cleanup_redis = redis_manager.clone();
 
-    // Derive HMAC salt from ADMIN_PUBKEY so it's stable across restarts.
-    // This prevents orphaning rate limit keys when the server restarts.
-    // Uses SHA-256 of pubkey as a deterministic 32-byte salt.
+    // Load or generate a random HMAC salt for IP hashing in rate-limit keys.
+    // Persisted to data/hmac_salt so rate-limit keys survive restarts.
     let ip_hmac_salt: [u8; 32] = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(b"nullpad-ip-hmac-salt:");
-        hasher.update(config.admin_pubkey.as_bytes());
-        hasher.finalize().into()
+        let salt_path = std::path::Path::new(&config.paste_storage_path).join(".hmac_salt");
+        match std::fs::read(&salt_path) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut salt = [0u8; 32];
+                salt.copy_from_slice(&bytes);
+                tracing::info!("Loaded HMAC salt from {}", salt_path.display());
+                salt
+            }
+            Ok(bytes) => {
+                tracing::warn!(
+                    path = %salt_path.display(),
+                    actual_len = bytes.len(),
+                    "HMAC salt file has wrong size; regenerating (rate-limit keys will reset)"
+                );
+                generate_hmac_salt(&salt_path)
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                tracing::info!("No HMAC salt file found; generating new one");
+                generate_hmac_salt(&salt_path)
+            }
+            Err(e) => {
+                panic!(
+                    "Failed to read HMAC salt file at {}: {}",
+                    salt_path.display(),
+                    e
+                );
+            }
+        }
     };
 
     // Build shared state

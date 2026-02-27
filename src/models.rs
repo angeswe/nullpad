@@ -82,17 +82,6 @@ pub struct StoredPaste {
     pub encrypted_content: Vec<u8>,
 }
 
-/// Paste info for admin listing.
-#[derive(Debug, Serialize)]
-pub struct PasteInfo {
-    pub id: String,
-    pub paste_type: String,
-    pub created_at: u64,
-    pub ttl: u64,
-    pub burn_after_reading: bool,
-    pub owner_id: Option<String>,
-}
-
 // ============================================================================
 // Auth Models
 // ============================================================================

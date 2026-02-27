@@ -15,7 +15,7 @@ use reqwest::multipart;
 use std::sync::Arc;
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::testcontainers::ContainerAsync;
+use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
 use tokio::sync::OnceCell;
 use tower_http::services::ServeDir;
 
@@ -29,7 +29,7 @@ static TEST_REDIS: OnceCell<TestRedis> = OnceCell::const_new();
 async fn get_redis_url() -> &'static str {
     let test_redis = TEST_REDIS
         .get_or_init(|| async {
-            let container = Redis::default().start().await.unwrap();
+            let container = Redis::default().with_tag("7-alpine").start().await.unwrap();
             let host = container.get_host().await.unwrap();
             let port = container.get_host_port_ipv4(6379).await.unwrap();
             let url = format!("redis://{}:{}", host, port);
@@ -96,7 +96,6 @@ async fn spawn_test_server_with_auth_limit(
         user_active_ttl_secs: 86400,
         session_ttl_secs: 900,
         challenge_ttl_secs: 30,
-        public_allowed_extensions: vec!["md".to_string(), "txt".to_string()],
         rate_limit_paste_per_min: 10000,
         rate_limit_auth_per_min: limit,
         trusted_proxy_count: 0,

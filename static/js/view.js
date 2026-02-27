@@ -189,7 +189,7 @@
           if (fileMeta.filename) metadata.filename = fileMeta.filename;
           if (fileMeta.content_type) metadata.mimetype = fileMeta.content_type;
         } catch {
-          // Fall back to server-provided plaintext metadata (old pastes or AAD mismatch)
+          console.warn('Failed to decrypt encrypted_metadata; falling back to server-provided plaintext metadata');
         }
       }
 
@@ -199,6 +199,7 @@
       try {
         bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey, pasteId);
       } catch {
+        console.warn('AAD decryption failed; falling back to non-AAD decryption for backward compatibility');
         bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey);
       }
 

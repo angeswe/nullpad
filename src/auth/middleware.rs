@@ -62,7 +62,6 @@ impl FromRequestParts<AppState> for AuthSession {
             ));
         }
 
-        // Get Redis connection (ConnectionManager handles auto-reconnection)
         let mut con = state.redis.clone();
 
         // Look up session
@@ -185,15 +184,14 @@ where
     );
 
     let (count, ttl): (u32, i64) = script.key(key).arg(window_secs).invoke_async(con).await?;
-    let retry_after = if ttl > 0 {
-        Some(ttl as u64)
-    } else {
-        Some(window_secs)
-    };
 
     Ok(RateLimitResult {
         allowed: count <= max,
-        retry_after: if count > max { retry_after } else { None },
+        retry_after: if count > max {
+            Some(if ttl > 0 { ttl as u64 } else { window_secs })
+        } else {
+            None
+        },
     })
 }
 

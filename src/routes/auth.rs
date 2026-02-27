@@ -1,6 +1,6 @@
 //! Auth API endpoints.
 
-use crate::auth::middleware::{check_rate_limit, AppState, AuthSession};
+use crate::auth::middleware::{AppState, AuthSession};
 use crate::auth::session::{generate_challenge_nonce, generate_session_token};
 use crate::auth::verify::verify_signature;
 use crate::error::AppError;
@@ -26,61 +26,27 @@ pub async fn request_challenge(
     Json(req): Json<ChallengeRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     // Validate alias before rate limiting (cheap check first, avoids wasting rate limit slots)
-    if req.alias.len() < 2 || req.alias.len() > 64 {
-        return Err(AppError::BadRequest(
-            "Alias must be 2-64 characters".to_string(),
-        ));
-    }
-    if !req
-        .alias
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::BadRequest(
-            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
-        ));
-    }
+    super::validate_alias(&req.alias)?;
 
-    // Rate limit by IP
-    // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
+    // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:auth:challenge:{}", ip_hash);
-    let rate_result = check_rate_limit(
+    super::enforce_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_auth_per_min,
         60,
+        Some(("auth/challenge", &ip_hash)),
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    if !rate_result.allowed {
-        tracing::warn!(action = "rate_limited", endpoint = "auth/challenge", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited {
-            retry_after: rate_result.retry_after,
-        });
-    }
+    .await?;
 
     // Per-alias rate limit BEFORE storing challenge to prevent challenge overwrite DoS.
     // Check unconditionally (alias existence is checked atomically when storing).
     let alias_rate_key = format!("ratelimit:challenge_alias:{}", req.alias);
-    let alias_rate_result = check_rate_limit(
-        &mut con,
-        &alias_rate_key,
-        10, // max 10 challenges per alias per 30s window
-        30,
-    )
-    .await
-    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    if !alias_rate_result.allowed {
-        return Err(AppError::RateLimited {
-            retry_after: alias_rate_result.retry_after,
-        });
-    }
+    super::enforce_rate_limit(&mut con, &alias_rate_key, 10, 30, None).await?;
 
     // Generate nonce regardless of whether user exists to prevent alias enumeration
     let nonce = generate_challenge_nonce();
@@ -112,44 +78,23 @@ pub async fn verify_challenge(
     headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:auth:verify:{}", ip_hash);
-    let rate_result = check_rate_limit(
+    super::enforce_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_auth_per_min,
         60,
+        Some(("auth/verify", &ip_hash)),
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    if !rate_result.allowed {
-        tracing::warn!(action = "rate_limited", endpoint = "auth/verify", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited {
-            retry_after: rate_result.retry_after,
-        });
-    }
+    .await?;
 
     // Validate alias
-    if req.alias.len() < 2 || req.alias.len() > 64 {
-        return Err(AppError::BadRequest(
-            "Alias must be 2-64 characters".to_string(),
-        ));
-    }
-    if !req
-        .alias
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::BadRequest(
-            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
-        ));
-    }
+    super::validate_alias(&req.alias)?;
 
     // Get and delete challenge (single-use)
     let challenge = storage::session::get_and_delete_challenge(&mut con, &req.alias)
@@ -213,44 +158,23 @@ pub async fn register(
     headers: HeaderMap,
     Json(req): Json<RegisterRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
     // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:auth:register:{}", ip_hash);
-    let rate_result = check_rate_limit(
+    super::enforce_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_auth_per_min,
         60,
+        Some(("auth/register", &ip_hash)),
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    if !rate_result.allowed {
-        tracing::warn!(action = "rate_limited", endpoint = "auth/register", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited {
-            retry_after: rate_result.retry_after,
-        });
-    }
+    .await?;
 
     // Validate alias
-    if req.alias.len() < 2 || req.alias.len() > 64 {
-        return Err(AppError::BadRequest(
-            "Alias must be 2-64 characters".to_string(),
-        ));
-    }
-    if !req
-        .alias
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
-    {
-        return Err(AppError::BadRequest(
-            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
-        ));
-    }
+    super::validate_alias(&req.alias)?;
 
     // Validate invite token format
     super::validate_id(&req.token, "invite token", 16)?;
@@ -326,7 +250,6 @@ pub async fn logout(
     session: AuthSession,
     State(state): State<AppState>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
     storage::session::delete_session(&mut con, &session.token, &session.user_id).await?;
