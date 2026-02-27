@@ -81,11 +81,11 @@ where
             if file_path.extension().is_some_and(|ext| ext == "tmp") {
                 if let Ok(metadata) = fs::metadata(&file_path).await {
                     if let Ok(modified) = metadata.modified() {
-                        let age = modified
+                        let modified_secs = modified
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap_or_default()
                             .as_secs();
-                        if now.saturating_sub(age) > STALE_TMP_SECS {
+                        if now.saturating_sub(modified_secs) > STALE_TMP_SECS {
                             if let Err(e) = fs::remove_file(&file_path).await {
                                 tracing::warn!(
                                     path = %file_path.display(),

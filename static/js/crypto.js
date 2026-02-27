@@ -5,6 +5,12 @@
  * AES-256-GCM for content encryption, Argon2id for PIN-based key derivation.
  * All encryption/decryption happens in the browser — server never sees plaintext or keys.
  *
+ * LIMITATION: AES-GCM lacks key commitment — a ciphertext can theoretically decrypt
+ * under multiple keys to different plaintexts. This is a known limitation of GCM mode
+ * (see "Partitioning Oracle Attacks"). For nullpad's threat model (single-key per paste),
+ * this is acceptable. If key commitment is required, consider AES-GCM-SIV or HKDF-based
+ * key derivation with a commitment scheme.
+ *
  * SECURITY: JS strings are immutable and cannot be zeroed from memory. String representations
  * of key material (base64url keys, PINs) persist in memory until garbage collected.
  */
@@ -98,6 +104,26 @@
     }
 
     // ============================================================================
+    // ID Generation
+    // ============================================================================
+
+    const NANOID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
+
+    /**
+     * Generate a cryptographically random nanoid (12 chars, URL-safe alphabet)
+     * @returns {string}
+     */
+    function generateId() {
+        const bytes = new Uint8Array(12);
+        crypto.getRandomValues(bytes);
+        let id = '';
+        for (let i = 0; i < 12; i++) {
+            id += NANOID_ALPHABET[bytes[i] & 63]; // 64 chars in alphabet = 6 bits
+        }
+        return id;
+    }
+
+    // ============================================================================
     // Key Generation
     // ============================================================================
 
@@ -166,9 +192,10 @@
      * Encrypt plaintext with AES-256-GCM
      * @param {string|Uint8Array} plaintext - Data to encrypt
      * @param {string} keyBase64url - Encryption key as base64url string
+     * @param {string} [aad] - Optional Additional Authenticated Data (e.g. paste ID)
      * @returns {Promise<string>} Base64-encoded (IV + ciphertext)
      */
-    async function encrypt(plaintext, keyBase64url) {
+    async function encrypt(plaintext, keyBase64url, aad) {
         // Convert plaintext to bytes if it's a string
         const plaintextBytes = typeof plaintext === 'string'
             ? textEncode(plaintext)
@@ -191,12 +218,15 @@
             const iv = new Uint8Array(12);
             crypto.getRandomValues(iv);
 
+            // Build AES-GCM params with optional AAD
+            const params = { name: 'AES-GCM', iv: iv };
+            if (aad) {
+                params.additionalData = textEncode(aad);
+            }
+
             // Encrypt with AES-GCM
             const ciphertext = await crypto.subtle.encrypt(
-                {
-                    name: 'AES-GCM',
-                    iv: iv
-                },
+                params,
                 cryptoKey,
                 plaintextBytes
             );
@@ -222,9 +252,10 @@
      * Decrypt AES-256-GCM ciphertext
      * @param {string} encryptedBase64 - Base64-encoded (IV + ciphertext)
      * @param {string|Uint8Array} key - Decryption key as base64url string or raw bytes
+     * @param {string} [aad] - Optional Additional Authenticated Data (e.g. paste ID)
      * @returns {Promise<Uint8Array>} Decrypted data (caller decides text vs binary)
      */
-    async function decrypt(encryptedBase64, key) {
+    async function decrypt(encryptedBase64, key, aad) {
         // Decode the combined IV + ciphertext
         const combined = base64Decode(encryptedBase64);
 
@@ -245,12 +276,15 @@
                 ['decrypt']
             );
 
+            // Build AES-GCM params with optional AAD
+            const params = { name: 'AES-GCM', iv: iv };
+            if (aad) {
+                params.additionalData = textEncode(aad);
+            }
+
             // Decrypt with AES-GCM
             const plaintext = await crypto.subtle.decrypt(
-                {
-                    name: 'AES-GCM',
-                    iv: iv
-                },
+                params,
                 cryptoKey,
                 ciphertext
             );
@@ -266,7 +300,8 @@
     // ============================================================================
 
     const NullpadCrypto = Object.freeze({
-        // Key generation
+        // ID and key generation
+        generateId,
         generateKey,
         deriveKeyWithPin,
 

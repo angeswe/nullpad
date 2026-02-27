@@ -39,6 +39,9 @@ pub struct Config {
     // Session management
     pub max_sessions_per_user: usize,
 
+    // Per-user paste limit
+    pub max_pastes_per_user: usize,
+
     // Paste storage
     pub paste_storage_path: std::path::PathBuf,
 }
@@ -63,6 +66,7 @@ impl std::fmt::Debug for Config {
             .field("rate_limit_auth_per_min", &self.rate_limit_auth_per_min)
             .field("trusted_proxy_count", &self.trusted_proxy_count)
             .field("max_sessions_per_user", &self.max_sessions_per_user)
+            .field("max_pastes_per_user", &self.max_pastes_per_user)
             .field("paste_storage_path", &self.paste_storage_path)
             .finish()
     }
@@ -177,6 +181,23 @@ impl Config {
         // Session management
         let max_sessions_per_user = parse_env_or_default("MAX_SESSIONS_PER_USER", 5)?;
 
+        // Per-user paste limit (0 = unlimited)
+        let max_pastes_per_user = parse_env_or_default("MAX_PASTES_PER_USER", 50)?;
+
+        // Validate TTL ranges
+        if default_ttl_secs < 60 {
+            return Err(ConfigError::InvalidValue(
+                "DEFAULT_TTL_SECS".to_string(),
+                "must be at least 60 seconds".to_string(),
+            ));
+        }
+        if max_ttl_secs < default_ttl_secs {
+            return Err(ConfigError::InvalidValue(
+                "MAX_TTL_SECS".to_string(),
+                format!("must be >= DEFAULT_TTL_SECS ({})", default_ttl_secs),
+            ));
+        }
+
         // Paste storage
         let paste_storage_path = env::var("PASTE_STORAGE_PATH")
             .map(std::path::PathBuf::from)
@@ -200,6 +221,7 @@ impl Config {
             rate_limit_auth_per_min,
             trusted_proxy_count,
             max_sessions_per_user,
+            max_pastes_per_user,
             paste_storage_path,
         })
     }
@@ -250,6 +272,7 @@ mod tests {
         env::remove_var("RATE_LIMIT_AUTH_PER_MIN");
         env::remove_var("TRUSTED_PROXY_COUNT");
         env::remove_var("MAX_SESSIONS_PER_USER");
+        env::remove_var("MAX_PASTES_PER_USER");
         env::remove_var("PASTE_STORAGE_PATH");
     }
 
@@ -513,6 +536,7 @@ mod tests {
         assert_eq!(config.rate_limit_paste_per_min, 10);
         assert_eq!(config.rate_limit_auth_per_min, 5);
         assert_eq!(config.max_sessions_per_user, 5);
+        assert_eq!(config.max_pastes_per_user, 50);
         assert_eq!(
             config.paste_storage_path,
             std::path::PathBuf::from("/data/pastes")

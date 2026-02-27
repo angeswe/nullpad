@@ -134,8 +134,16 @@ async fn main() {
     // Clone redis for cleanup job before building state
     let cleanup_redis = redis_manager.clone();
 
-    // Generate random 32-byte salt for HMAC-SHA256 IP hashing.
-    let ip_hmac_salt: [u8; 32] = rand::random();
+    // Derive HMAC salt from ADMIN_PUBKEY so it's stable across restarts.
+    // This prevents orphaning rate limit keys when the server restarts.
+    // Uses SHA-256 of pubkey as a deterministic 32-byte salt.
+    let ip_hmac_salt: [u8; 32] = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"nullpad-ip-hmac-salt:");
+        hasher.update(config.admin_pubkey.as_bytes());
+        hasher.finalize().into()
+    };
 
     // Build shared state
     let state = AppState {

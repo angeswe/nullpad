@@ -26,8 +26,19 @@
   // ============================================================================
 
   function parseInviteToken() {
-    const params = new URLSearchParams(window.location.search);
-    inviteToken = params.get('token');
+    // Read token from URL fragment (not query string) to prevent it from
+    // appearing in server logs, Referer headers, and browser history.
+    // Supports both #token and #token=value format for backwards compat.
+    const fragment = window.location.hash.substring(1);
+    if (fragment.startsWith('token=')) {
+      inviteToken = fragment.substring(6);
+    } else if (fragment) {
+      inviteToken = fragment;
+    } else {
+      // Fallback: check query string for backwards compatibility
+      const params = new URLSearchParams(window.location.search);
+      inviteToken = params.get('token');
+    }
 
     if (!inviteToken) {
       // No invite token in URL

@@ -145,25 +145,39 @@ where
     }
 }
 
-/// Delete a user from Redis.
+/// Soft-delete a user atomically: delete alias key and user key in one Lua script.
 ///
-/// Also deletes the alias lookup key.
+/// This prevents new logins (alias gone) and new session lookups (user gone).
+/// Callers should delete sessions and pastes after this returns.
 pub async fn delete_user<C>(con: &mut C, id: &str) -> Result<(), redis::RedisError>
 where
     C: AsyncCommands,
 {
-    // Get user first to find alias
-    let user = get_user(con, id).await?;
-
-    // Delete user key
     let user_key = format!("user:{}", id);
-    con.del::<_, ()>(&user_key).await?;
 
-    // Delete alias key if user was found
-    if let Some(user) = user {
-        let alias_key = format!("alias:{}", user.alias);
-        con.del::<_, ()>(&alias_key).await?;
-    }
+    // Atomic: read user to get alias, delete both user and alias keys
+    // KEYS[1] = user:{id}
+    // ARGV[1] = alias key prefix ("alias:")
+    let script = redis::Script::new(
+        r#"
+        local user_json = redis.call('GET', KEYS[1])
+        if not user_json then
+            return 0
+        end
+        redis.call('DEL', KEYS[1])
+        local user = cjson.decode(user_json)
+        if type(user.alias) == 'string' then
+            redis.call('DEL', ARGV[1] .. user.alias)
+        end
+        return 1
+        "#,
+    );
+
+    script
+        .key(&user_key)
+        .arg("alias:")
+        .invoke_async::<i32>(con)
+        .await?;
 
     Ok(())
 }
@@ -296,14 +310,95 @@ where
         if let Some(data) = json {
             // Wrap user JSON in Zeroizing
             let zeroizing_data = Zeroizing::new(data);
-            if let Ok(user) = serde_json::from_str::<StoredUser>(&zeroizing_data) {
-                users.push(user);
+            match serde_json::from_str::<StoredUser>(&zeroizing_data) {
+                Ok(user) => users.push(user),
+                Err(e) => tracing::warn!(key = %key, error = %e, "Failed to deserialize user"),
             }
             // zeroizing_data is automatically zeroized when dropped here
         }
     }
 
     Ok(users)
+}
+
+/// Result of an atomic invite consumption + user creation.
+pub enum RegisterResult {
+    /// User created successfully, invite consumed.
+    Success,
+    /// Alias was already taken; invite NOT consumed.
+    AliasTaken,
+    /// Invite not found or expired; no changes made.
+    InviteNotFound,
+}
+
+/// Atomically consume an invite and create a user.
+///
+/// Uses a single Lua script to prevent race conditions where concurrent
+/// registrations both consume invites but only one user is created.
+/// If the alias is taken or the invite doesn't exist, no changes are made.
+pub async fn consume_invite_and_create_user<C>(
+    con: &mut C,
+    invite_token: &str,
+    user: &StoredUser,
+    user_ttl_secs: u64,
+) -> Result<RegisterResult, redis::RedisError>
+where
+    C: AsyncCommands,
+{
+    let invite_key = format!("invite:{}", invite_token);
+    let alias_key = format!("alias:{}", user.alias);
+    let user_key = format!("user:{}", user.id);
+
+    let user_json = serde_json::to_string(user).map_err(|e| {
+        redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "JSON serialize",
+            e.to_string(),
+        ))
+    })?;
+
+    // Lua script: atomically check alias, check invite, consume invite, create user.
+    // Returns:
+    //   1 = success
+    //   0 = alias taken
+    //  -1 = invite not found
+    //
+    // KEYS[1] = alias:{alias}
+    // KEYS[2] = invite:{token}
+    // KEYS[3] = user:{id}
+    // ARGV[1] = user JSON
+    // ARGV[2] = user ID (for alias lookup value)
+    // ARGV[3] = TTL in seconds
+    let script = redis::Script::new(
+        r#"
+        if redis.call('EXISTS', KEYS[1]) == 1 then
+            return 0
+        end
+        if redis.call('EXISTS', KEYS[2]) == 0 then
+            return -1
+        end
+        redis.call('DEL', KEYS[2])
+        redis.call('SETEX', KEYS[3], ARGV[3], ARGV[1])
+        redis.call('SETEX', KEYS[1], ARGV[3], ARGV[2])
+        return 1
+        "#,
+    );
+
+    let result: i32 = script
+        .key(&alias_key)
+        .key(&invite_key)
+        .key(&user_key)
+        .arg(&user_json)
+        .arg(&user.id)
+        .arg(user_ttl_secs as i64)
+        .invoke_async(con)
+        .await?;
+
+    match result {
+        1 => Ok(RegisterResult::Success),
+        0 => Ok(RegisterResult::AliasTaken),
+        _ => Ok(RegisterResult::InviteNotFound),
+    }
 }
 
 /// Store an invite in Redis with TTL.
@@ -401,8 +496,9 @@ where
         if let Some(data) = json {
             // Wrap invite JSON in Zeroizing
             let zeroizing_data = Zeroizing::new(data);
-            if let Ok(invite) = serde_json::from_str::<StoredInvite>(&zeroizing_data) {
-                invites.push(invite);
+            match serde_json::from_str::<StoredInvite>(&zeroizing_data) {
+                Ok(invite) => invites.push(invite),
+                Err(e) => tracing::warn!(key = %key, error = %e, "Failed to deserialize invite"),
             }
             // zeroizing_data is automatically zeroized when dropped here
         }

@@ -132,6 +132,20 @@
       let encryptionKey = rawKey;
       let salt = null;
       const pin = pinInput.value.trim();
+      if (pin && pin.length < 4) {
+        const errEl = document.createElement('div');
+        errEl.className = 'status-error';
+        errEl.setAttribute('role', 'alert');
+        errEl.textContent = 'PIN must be at least 4 characters.';
+        form.prepend(errEl);
+        setTimeout(() => errEl.remove(), 5000);
+        if (submitBtn) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = 'Create Encrypted Paste';
+        }
+        form.setAttribute('aria-busy', 'false');
+        return;
+      }
       if (pin) {
         const derived = await NullpadCrypto.deriveKeyWithPin(rawKey, pin);
         encryptionKey = derived.key;
@@ -153,22 +167,31 @@
         contentType = 'text/markdown';
       }
 
-      // 4. Encrypt content
-      const encrypted = await NullpadCrypto.encrypt(contentBytes, encryptionKey);
+      // 4. Generate paste ID client-side (used as AAD for AES-GCM binding)
+      const clientPasteId = NullpadCrypto.generateId();
+
+      // 5. Encrypt content with paste ID as AAD
+      const encrypted = await NullpadCrypto.encrypt(contentBytes, encryptionKey, clientPasteId);
       const encryptedBytes = NullpadCrypto.base64Decode(encrypted);
 
-      // 5. Prepare metadata
+      // 6. Encrypt filename and content_type to prevent metadata leakage
+      const fileMetadata = JSON.stringify({ filename: filename, content_type: contentType });
+      const encryptedMetadata = await NullpadCrypto.encrypt(
+        NullpadCrypto.textEncode(fileMetadata), encryptionKey, clientPasteId
+      );
+
+      // 7. Prepare metadata (plaintext fields for server, encrypted blob for client)
       const metadata = JSON.stringify({
-        filename: filename,
-        content_type: contentType,
+        paste_id: clientPasteId,
+        encrypted_metadata: encryptedMetadata,
         ttl_secs: parseInt(ttlSelect.value, 10),
         burn_after_reading: burnCheckbox.checked
       });
 
-      // 6. Build multipart request
+      // 8. Build multipart request
       const formData = new FormData();
       formData.append('metadata', new Blob([metadata], { type: 'application/json' }));
-      formData.append('file', new Blob([encryptedBytes], { type: 'application/octet-stream' }), filename);
+      formData.append('file', new Blob([encryptedBytes], { type: 'application/octet-stream' }), 'encrypted');
 
       // Include auth header if logged in
       const headers = {};
@@ -179,7 +202,7 @@
         }
       }
 
-      // 7. POST to API
+      // 9. POST to API
       const response = await fetch('/api/paste', {
         method: 'POST',
         headers: headers,
@@ -203,7 +226,7 @@
 
       const result = await response.json();
 
-      // 8. Build URL with key fragment
+      // 10. Build URL with key fragment
       const fragment = salt
         ? `${rawKey}.${NullpadCrypto.base64urlEncode(salt)}`
         : rawKey;

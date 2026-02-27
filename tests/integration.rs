@@ -101,6 +101,7 @@ async fn spawn_test_server_with_auth_limit(
         rate_limit_auth_per_min: limit,
         trusted_proxy_count: 0,
         max_sessions_per_user: 5,
+        max_pastes_per_user: 50,
         paste_storage_path,
     };
 

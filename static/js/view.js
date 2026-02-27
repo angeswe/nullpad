@@ -55,10 +55,9 @@
     const params = new URLSearchParams(window.location.search);
     pasteId = params.get('id');
 
-    // Try URL fragment first, fall back to sessionStorage (survives reload)
+    // Key material lives only in URL fragment and in-memory variables — never persisted
     const fragment = window.location.hash.substring(1);
-    const storageKey = pasteId ? 'np_' + pasteId : null;
-    const keySource = fragment || (storageKey && sessionStorage.getItem(storageKey)) || '';
+    const keySource = fragment || '';
 
     if (keySource && keySource.includes('.')) {
       const parts = keySource.split('.');
@@ -108,11 +107,6 @@
       return false;
     }
 
-    // Stash key material in sessionStorage so reloads work within same tab
-    if (storageKey && keySource) {
-      try { sessionStorage.setItem(storageKey, keySource); } catch (e) { /* quota or private mode */ }
-    }
-
     // Clear key material from URL bar and browser history
     if (fragment && window.history && window.history.replaceState) {
       window.history.replaceState(null, '', window.location.pathname + window.location.search);
@@ -155,7 +149,8 @@
       metadata = {
         burn: data.burn_after_reading || false,
         filename: data.filename || null,
-        mimetype: data.content_type || null
+        mimetype: data.content_type || null,
+        encrypted_metadata: data.encrypted_metadata || null
       };
 
       return data;
@@ -186,8 +181,26 @@
         decryptionKey = derived.key;
       }
 
-      // Decrypt content
-      const bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey);
+      // Decrypt encrypted_metadata if present (new format: filename/content_type are encrypted)
+      if (metadata.encrypted_metadata) {
+        try {
+          const metaBytes = await NullpadCrypto.decrypt(metadata.encrypted_metadata, decryptionKey, pasteId);
+          const fileMeta = JSON.parse(new TextDecoder().decode(metaBytes));
+          if (fileMeta.filename) metadata.filename = fileMeta.filename;
+          if (fileMeta.content_type) metadata.mimetype = fileMeta.content_type;
+        } catch {
+          // Fall back to server-provided plaintext metadata (old pastes or AAD mismatch)
+        }
+      }
+
+      // Try decryption with paste ID as AAD first (new format),
+      // fall back to without AAD (backward compat for old pastes)
+      let bytes;
+      try {
+        bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey, pasteId);
+      } catch {
+        bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey);
+      }
 
       // Store decrypted bytes for download
       decryptedBytes = bytes;
@@ -208,6 +221,9 @@
   // Rendering
   // ============================================================================
 
+  // DOMPurify is defense-in-depth; the primary mitigation for img/src injection
+  // is the CSP header: `default-src 'self'; img-src 'self' data:` which blocks
+  // loading external resources even if DOMPurify were bypassed.
   const purifyConfig = {
     ALLOWED_TAGS: [
       'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p', 'br', 'hr',
@@ -506,11 +522,6 @@
     encryptedData = null;
     pinSalt = null;
     metadata = null;
-    // Clear sessionStorage key material
-    if (pasteId) {
-      const storageKey = 'np_' + pasteId;
-      try { sessionStorage.removeItem(storageKey); } catch (e) { /* ignore */ }
-    }
     // Best-effort clipboard clear (may fail without user gesture)
     if (clipboardDirty && navigator.clipboard) {
       navigator.clipboard.writeText('').catch(() => {});

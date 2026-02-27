@@ -132,8 +132,8 @@
         headers: { 'Content-Type': 'application/json' }
       });
 
-      // Show success message with invite URL
-      const url = `${window.location.origin}/invite.html?token=${result.token}`;
+      // Show success message with invite URL (token in fragment to avoid server logs)
+      const url = `${window.location.origin}/invite.html#${result.token}`;
       inviteUrl.value = url;
       inviteSuccess.classList.remove('hidden');
 
@@ -283,7 +283,7 @@
 
         // Actions cell
         const actionsCell = document.createElement('td');
-        if (user.alias !== 'admin') {
+        if (user.id !== 'admin') {
           const revokeBtn = document.createElement('button');
           revokeBtn.className = 'btn btn-danger btn-small';
           revokeBtn.textContent = 'Revoke';

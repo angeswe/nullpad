@@ -1,6 +1,6 @@
 //! Admin API endpoints (all require AdminSession).
 
-use crate::auth::middleware::{AdminSession, AppState};
+use crate::auth::middleware::{check_rate_limit, AdminSession, AppState};
 use crate::error::AppError;
 use crate::models::{CreateInviteResponse, InviteInfo, StoredInvite, UserInfo};
 use crate::storage;
@@ -11,6 +11,28 @@ use axum::{
     Json,
 };
 
+/// Defense-in-depth rate limit for admin endpoints (per user_id).
+const ADMIN_RATE_LIMIT_PER_MIN: u32 = 30;
+
+/// Check admin rate limit by user_id.
+async fn check_admin_rate_limit(
+    con: &mut redis::aio::ConnectionManager,
+    user_id: &str,
+) -> Result<(), AppError> {
+    let key = format!("ratelimit:admin:{}", user_id);
+    let result = check_rate_limit(con, &key, ADMIN_RATE_LIMIT_PER_MIN, 60)
+        .await
+        .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    if !result.allowed {
+        tracing::warn!(action = "rate_limited", endpoint = "admin", user_id = %user_id, "Admin rate limit exceeded");
+        return Err(AppError::RateLimited {
+            retry_after: result.retry_after,
+        });
+    }
+    Ok(())
+}
+
 /// POST /api/invites — Create invite
 pub async fn create_invite(
     AdminSession(_session): AdminSession,
@@ -18,6 +40,7 @@ pub async fn create_invite(
 ) -> Result<impl IntoResponse, AppError> {
     // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
+    check_admin_rate_limit(&mut con, &_session.user_id).await?;
 
     // Generate invite token
     let token = nanoid::nanoid!(16);
@@ -31,7 +54,7 @@ pub async fn create_invite(
     storage::user::store_invite(&mut con, &invite, state.config.invite_ttl_secs).await?;
 
     // Build invite URL
-    let url = format!("/invite.html?token={}", token);
+    let url = format!("/invite.html#{}", token);
 
     tracing::info!(action = "invite_created", token_prefix = %&token[..6], "Admin created invite");
 
@@ -45,6 +68,7 @@ pub async fn list_invites(
 ) -> Result<impl IntoResponse, AppError> {
     // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
+    check_admin_rate_limit(&mut con, &_session.user_id).await?;
 
     let invites = storage::user::list_invites(&mut con).await?;
 
@@ -71,6 +95,7 @@ pub async fn revoke_invite(
 
     // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
+    check_admin_rate_limit(&mut con, &_session.user_id).await?;
 
     let deleted = storage::user::delete_invite(&mut con, &token).await?;
 
@@ -90,6 +115,7 @@ pub async fn list_users(
 ) -> Result<impl IntoResponse, AppError> {
     // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
+    check_admin_rate_limit(&mut con, &_session.user_id).await?;
 
     let users = storage::user::list_users(&mut con).await?;
 
@@ -126,6 +152,7 @@ pub async fn revoke_user(
 
     // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
+    check_admin_rate_limit(&mut con, &_session.user_id).await?;
 
     // Check if user exists
     let user = storage::user::get_user(&mut con, &id)
