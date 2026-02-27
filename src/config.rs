@@ -26,9 +26,6 @@ pub struct Config {
     pub session_ttl_secs: u64,
     pub challenge_ttl_secs: u64,
 
-    // Public mode restrictions
-    pub public_allowed_extensions: Vec<String>,
-
     // Rate limiting
     pub rate_limit_paste_per_min: u32,
     pub rate_limit_auth_per_min: u32,
@@ -61,7 +58,6 @@ impl std::fmt::Debug for Config {
             .field("user_active_ttl_secs", &self.user_active_ttl_secs)
             .field("session_ttl_secs", &self.session_ttl_secs)
             .field("challenge_ttl_secs", &self.challenge_ttl_secs)
-            .field("public_allowed_extensions", &self.public_allowed_extensions)
             .field("rate_limit_paste_per_min", &self.rate_limit_paste_per_min)
             .field("rate_limit_auth_per_min", &self.rate_limit_auth_per_min)
             .field("trusted_proxy_count", &self.trusted_proxy_count)
@@ -162,15 +158,6 @@ impl Config {
         let session_ttl_secs = parse_env_or_default("SESSION_TTL_SECS", 900)?;
         let challenge_ttl_secs = parse_env_or_default("CHALLENGE_TTL_SECS", 30)?;
 
-        // Public mode restrictions
-        let public_allowed_extensions_str =
-            env::var("PUBLIC_ALLOWED_EXTENSIONS").unwrap_or_else(|_| "md,txt".to_string());
-        let public_allowed_extensions: Vec<String> = public_allowed_extensions_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-
         // Rate limiting
         let rate_limit_paste_per_min = parse_env_or_default("RATE_LIMIT_PASTE_PER_MIN", 10)?;
         let rate_limit_auth_per_min = parse_env_or_default("RATE_LIMIT_AUTH_PER_MIN", 5)?;
@@ -216,7 +203,6 @@ impl Config {
             user_active_ttl_secs,
             session_ttl_secs,
             challenge_ttl_secs,
-            public_allowed_extensions,
             rate_limit_paste_per_min,
             rate_limit_auth_per_min,
             trusted_proxy_count,
@@ -267,7 +253,6 @@ mod tests {
         env::remove_var("USER_ACTIVE_TTL_SECS");
         env::remove_var("SESSION_TTL_SECS");
         env::remove_var("CHALLENGE_TTL_SECS");
-        env::remove_var("PUBLIC_ALLOWED_EXTENSIONS");
         env::remove_var("RATE_LIMIT_PASTE_PER_MIN");
         env::remove_var("RATE_LIMIT_AUTH_PER_MIN");
         env::remove_var("TRUSTED_PROXY_COUNT");
@@ -376,21 +361,6 @@ mod tests {
             result.unwrap_err(),
             ConfigError::InvalidValue(ref s, _) if s == "ADMIN_PUBKEY"
         ));
-
-        clear_test_env();
-    }
-
-    #[test]
-    fn test_public_allowed_extensions_parsing() {
-        let _guard = lock_test();
-        clear_test_env();
-
-        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
-        env::set_var("PUBLIC_ALLOWED_EXTENSIONS", "md, txt, json ");
-
-        let config = Config::from_env().unwrap();
-        assert_eq!(config.public_allowed_extensions, vec!["md", "txt", "json"]);
 
         clear_test_env();
     }
@@ -532,7 +502,6 @@ mod tests {
         assert_eq!(config.user_active_ttl_secs, 86_400);
         assert_eq!(config.session_ttl_secs, 900);
         assert_eq!(config.challenge_ttl_secs, 30);
-        assert_eq!(config.public_allowed_extensions, vec!["md", "txt"]);
         assert_eq!(config.rate_limit_paste_per_min, 10);
         assert_eq!(config.rate_limit_auth_per_min, 5);
         assert_eq!(config.max_sessions_per_user, 5);
