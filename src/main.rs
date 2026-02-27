@@ -18,7 +18,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 
 /// Generate Ed25519 keypair from alias + secret using Argon2id (same as JS client)
 fn keygen(alias: &str, secret: &str) -> Result<String, String> {
@@ -214,7 +214,9 @@ async fn main() {
     let cors = CorsLayer::new();
 
     let app = routes::api_router()
-        .fallback_service(ServeDir::new("static"))
+        .fallback_service(
+            ServeDir::new("static").not_found_service(ServeFile::new("static/404.html")),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(
             config.max_upload_bytes,
         ))
