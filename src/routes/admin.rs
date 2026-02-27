@@ -163,7 +163,10 @@ pub async fn revoke_user(
     storage::session::delete_user_sessions(&mut con, &id).await?;
 
     // Delete user record (prevents new logins)
-    storage::user::delete_user(&mut con, &id).await?;
+    let deleted = storage::user::delete_user(&mut con, &id).await?;
+    if !deleted {
+        tracing::warn!(user_id = %id, "User already gone during revocation (race or TTL expiry)");
+    }
 
     // Delete user's pastes last
     storage::paste::delete_user_pastes(&mut con, &state.config.paste_storage_path, &id).await?;
