@@ -17,7 +17,7 @@ fi
 display_name() {
   case "$1" in
     dompurify)    echo "DOMPurify" ;;
-    tweetnacl)    echo "TweetNaCl.js" ;;
+    hash-wasm)    echo "hash-wasm" ;;
     highlight.js) echo "highlight.js" ;;
     *)            echo "$1" ;;
   esac
