@@ -1,6 +1,6 @@
 //! Paste API endpoints.
 
-use crate::auth::middleware::{check_rate_limit, AdminSession, AppState, AuthSession};
+use crate::auth::middleware::{AdminSession, AppState, AuthSession};
 use crate::error::AppError;
 use crate::models::{
     CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPaste, StoredPasteMeta,
@@ -30,28 +30,20 @@ pub async fn create_paste(
     auth_session: Option<AuthSession>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, AppError> {
-    // Rate limit by IP (prefer X-Forwarded-For behind reverse proxy)
-    // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
+    // Rate limit by IP
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:paste:{}", ip_hash);
-    let rate_result = check_rate_limit(
+    super::enforce_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_paste_per_min,
         60,
+        Some(("paste", &ip_hash)),
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    if !rate_result.allowed {
-        tracing::warn!(action = "rate_limited", endpoint = "paste", ip_hash = %ip_hash, "Rate limit exceeded");
-        return Err(AppError::RateLimited {
-            retry_after: rate_result.retry_after,
-        });
-    }
+    .await?;
 
     let mut metadata: Option<PasteMetadata> = None;
     let mut encrypted_content: Option<Vec<u8>> = None;
@@ -252,27 +244,20 @@ pub async fn get_paste(
 ) -> Result<impl IntoResponse, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
 
-    // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
     // Rate limit paste reads to prevent burn-after-reading abuse
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:paste_read:{}", ip_hash);
-    let rate_result = check_rate_limit(
+    super::enforce_rate_limit(
         &mut con,
         &rate_limit_key,
         state.config.rate_limit_paste_per_min * 5, // 5x write limit for reads
         60,
+        None,
     )
-    .await
-    .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
-
-    if !rate_result.allowed {
-        return Err(AppError::RateLimited {
-            retry_after: rate_result.retry_after,
-        });
-    }
+    .await?;
 
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.
@@ -310,7 +295,6 @@ pub async fn delete_paste(
 ) -> Result<impl IntoResponse, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
 
-    // Get Redis connection (ConnectionManager handles auto-reconnection)
     let mut con = state.redis.clone();
 
     let deleted =
