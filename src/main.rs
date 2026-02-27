@@ -134,15 +134,31 @@ async fn main() {
     // Clone redis for cleanup job before building state
     let cleanup_redis = redis_manager.clone();
 
-    // Derive HMAC salt from ADMIN_PUBKEY so it's stable across restarts.
-    // This prevents orphaning rate limit keys when the server restarts.
-    // Uses SHA-256 of pubkey as a deterministic 32-byte salt.
+    // Load or generate a random HMAC salt for IP hashing in rate-limit keys.
+    // Persisted to data/hmac_salt so rate-limit keys survive restarts.
     let ip_hmac_salt: [u8; 32] = {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(b"nullpad-ip-hmac-salt:");
-        hasher.update(config.admin_pubkey.as_bytes());
-        hasher.finalize().into()
+        let salt_path = std::path::Path::new(&config.paste_storage_path)
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("hmac_salt");
+        match std::fs::read(&salt_path) {
+            Ok(bytes) if bytes.len() == 32 => {
+                let mut salt = [0u8; 32];
+                salt.copy_from_slice(&bytes);
+                tracing::info!("Loaded HMAC salt from {}", salt_path.display());
+                salt
+            }
+            _ => {
+                let mut salt = [0u8; 32];
+                rand::fill(&mut salt);
+                if let Some(parent) = salt_path.parent() {
+                    std::fs::create_dir_all(parent).ok();
+                }
+                std::fs::write(&salt_path, salt).expect("Failed to write HMAC salt file");
+                tracing::info!("Generated new HMAC salt at {}", salt_path.display());
+                salt
+            }
+        }
     };
 
     // Build shared state

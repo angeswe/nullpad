@@ -149,7 +149,9 @@ where
 ///
 /// This prevents new logins (alias gone) and new session lookups (user gone).
 /// Callers should delete sessions and pastes after this returns.
-pub async fn delete_user<C>(con: &mut C, id: &str) -> Result<(), redis::RedisError>
+///
+/// Returns `true` if the user was deleted, `false` if they didn't exist.
+pub async fn delete_user<C>(con: &mut C, id: &str) -> Result<bool, redis::RedisError>
 where
     C: AsyncCommands,
 {
@@ -173,13 +175,13 @@ where
         "#,
     );
 
-    script
+    let result: i32 = script
         .key(&user_key)
         .arg("alias:")
-        .invoke_async::<i32>(con)
+        .invoke_async(con)
         .await?;
 
-    Ok(())
+    Ok(result == 1)
 }
 
 /// Upsert the admin user (permanent, no TTL).
@@ -397,7 +399,14 @@ where
     match result {
         1 => Ok(RegisterResult::Success),
         0 => Ok(RegisterResult::AliasTaken),
-        _ => Ok(RegisterResult::InviteNotFound),
+        -1 => Ok(RegisterResult::InviteNotFound),
+        other => {
+            tracing::warn!(
+                lua_return = other,
+                "Unexpected return value from consume_invite_and_create_user Lua script"
+            );
+            Ok(RegisterResult::InviteNotFound)
+        }
     }
 }
 
