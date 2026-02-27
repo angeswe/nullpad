@@ -18,6 +18,53 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::net::{IpAddr, SocketAddr};
 
+/// Check a rate limit key and return a RateLimited error if exceeded.
+///
+/// Wraps `check_rate_limit` with standard error mapping. The optional `warn_context`
+/// tuple `(endpoint, identity)` controls whether a tracing::warn is emitted on limit.
+pub async fn enforce_rate_limit<C>(
+    con: &mut C,
+    key: &str,
+    max: u32,
+    window_secs: u64,
+    warn_context: Option<(&str, &str)>,
+) -> Result<(), AppError>
+where
+    C: redis::AsyncCommands,
+{
+    let result = crate::auth::middleware::check_rate_limit(con, key, max, window_secs)
+        .await
+        .map_err(|e| AppError::Internal(format!("Rate limit check failed: {}", e)))?;
+
+    if !result.allowed {
+        if let Some((endpoint, identity)) = warn_context {
+            tracing::warn!(action = "rate_limited", endpoint = %endpoint, identity = %identity, "Rate limit exceeded");
+        }
+        return Err(AppError::RateLimited {
+            retry_after: result.retry_after,
+        });
+    }
+    Ok(())
+}
+
+/// Validate that an alias is 2-64 characters, alphanumeric plus hyphens and underscores.
+pub fn validate_alias(alias: &str) -> Result<(), AppError> {
+    if alias.len() < 2 || alias.len() > 64 {
+        return Err(AppError::BadRequest(
+            "Alias must be 2-64 characters".to_string(),
+        ));
+    }
+    if !alias
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AppError::BadRequest(
+            "Alias may only contain alphanumeric characters, hyphens, and underscores".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate that a string is a valid nanoid (alphanumeric, hyphens, underscores).
 ///
 /// Requires expected_len >= 2 to prevent accepting empty strings.
