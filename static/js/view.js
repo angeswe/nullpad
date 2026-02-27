@@ -186,10 +186,10 @@
         try {
           const metaBytes = await NullpadCrypto.decrypt(metadata.encrypted_metadata, decryptionKey, pasteId);
           const fileMeta = JSON.parse(new TextDecoder().decode(metaBytes));
-          if (fileMeta.filename) metadata.filename = fileMeta.filename;
-          if (fileMeta.content_type) metadata.mimetype = fileMeta.content_type;
+          if (typeof fileMeta.filename === 'string') metadata.filename = fileMeta.filename;
+          if (typeof fileMeta.content_type === 'string') metadata.mimetype = fileMeta.content_type;
         } catch {
-          console.warn('Failed to decrypt encrypted_metadata; falling back to server-provided plaintext metadata');
+          // Fallback to server-provided plaintext metadata (legacy pastes)
         }
       }
 
@@ -199,7 +199,7 @@
       try {
         bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey, pasteId);
       } catch {
-        console.warn('AAD decryption failed; falling back to non-AAD decryption for backward compatibility');
+        // Fallback to non-AAD decryption (backward compat for old pastes)
         bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey);
       }
 

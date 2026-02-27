@@ -553,7 +553,7 @@ async fn test_register_invalid_invite() {
         .unwrap();
     assert_eq!(resp.status(), 400);
 
-    // Valid-format but non-existent token → 404
+    // Valid-format but non-existent token → 400 (uniform error prevents alias enumeration)
     let resp = client
         .post(format!("{}/api/register", base_url))
         .json(&serde_json::json!({
@@ -564,7 +564,12 @@ async fn test_register_invalid_invite() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 404);
+    assert_eq!(resp.status(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("Registration failed"));
 }
 
 #[tokio::test]
@@ -777,7 +782,10 @@ async fn test_register_invite_not_consumed_on_validation_failure() {
         .unwrap();
     assert_eq!(resp.status(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["error"].as_str().unwrap().contains("already taken"));
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("Registration failed"));
 
     // Verify invite still exists after alias conflict
     let exists: bool = con.exists(&invite_key).await.unwrap();
