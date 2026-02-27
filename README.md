@@ -80,11 +80,14 @@ See `.env.example` for all available options. Key environment variables:
 - `REDIS_URL` — Redis connection string (default: "redis://127.0.0.1:6379")
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")
 - `PASTE_STORAGE_PATH` — Directory for encrypted paste content (default: "/data/pastes")
+- `REDIS_PASSWORD` — Redis authentication password (required in Docker)
 - `MAX_UPLOAD_BYTES` — Max file size (default: 52428800 / 50MB)
 - `DEFAULT_TTL_SECS` — Default paste expiration (default: 86400 / 24h)
 - `MAX_TTL_SECS` — Maximum paste lifetime (default: 604800 / 7d)
+- `MAX_PASTES_PER_USER` — Per-user paste limit, 0 = unlimited (default: 50)
+- `MAX_SESSIONS_PER_USER` — Concurrent sessions per user (default: 5)
 
-Rate limiting, session lifetimes, and challenge timeouts are also configurable. Set `RUST_LOG=info` (or `debug`) for application logging.
+Rate limiting, session lifetimes, and challenge timeouts are also configurable. See `.env.example` for the full list. Set `RUST_LOG=info` (or `debug`) for application logging.
 
 ## Security Model
 
@@ -113,7 +116,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 **Rate Limiting**
 
 - IP-based rate limiting on paste creation, paste retrieval, and auth endpoints
-- Uses X-Forwarded-For / X-Real-IP behind reverse proxies, falls back to direct IP
+- Uses X-Forwarded-For behind reverse proxies (Nth-from-right with `TRUSTED_PROXY_COUNT`), falls back to direct IP
 
 **Data Expiration**
 
@@ -143,8 +146,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 - Vanilla HTML/JS (no build step)
 - Web Crypto API for AES-256-GCM and Ed25519
-- TweetNaCl.js for Ed25519 public key derivation (Firefox compatibility)
-- hash-wasm for Argon2id key derivation
+- Argon2id (WASM) for key derivation
 - marked.js + highlight.js for markdown rendering
 - DOMPurify for XSS-safe HTML sanitization
 
