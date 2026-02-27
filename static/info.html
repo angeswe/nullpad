@@ -28,6 +28,17 @@
 
     <div class="panel info-section">
       <div class="panel-header">
+        <h3>What "Zero Knowledge" Means</h3>
+      </div>
+      <div class="panel-body">
+        <p class="text-muted">
+          The server stores only encrypted ciphertext &mdash; it cannot access your plaintext content, encryption keys, or PINs. When pastes are deleted (by expiration, burn-after-reading, or manual action), the encrypted data is securely overwritten before removal from disk. For additional protection, self-hosters can use an encrypted filesystem (such as LUKS/dm-crypt) for the paste storage volume.
+        </p>
+      </div>
+    </div>
+
+    <div class="panel info-section">
+      <div class="panel-header">
         <h3>Key in URL Fragment</h3>
       </div>
       <div class="panel-body">
@@ -65,7 +76,7 @@
       </div>
       <div class="panel-body">
         <p class="text-muted">
-          All data is stored in Redis with time-to-live (TTL) values. Pastes automatically expire based on your chosen duration (1 minute to 1 week). Burn-after-reading pastes use an atomic read-and-delete operation to ensure they're destroyed after a single view. Trusted users can create "forever" pastes that don't expire.
+          Paste metadata, sessions, and user records are stored in Redis with time-to-live (TTL) values. Encrypted paste content is stored separately on disk. Pastes automatically expire based on your chosen duration (1 minute to 1 week). Burn-after-reading pastes use an atomic read-and-delete operation to ensure they're destroyed after a single view. Trusted users can create "forever" pastes that don't expire.
         </p>
       </div>
     </div>
@@ -109,7 +120,7 @@
             </tr>
             <tr>
               <td><a href="https://marked.js.org" target="_blank" rel="noopener">marked</a></td>
-              <td>15.0.12</td>
+              <td>17.0.1</td>
               <td>MIT</td>
             </tr>
             <tr>
