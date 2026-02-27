@@ -224,16 +224,11 @@ pub async fn register(
 
     match created {
         storage::user::RegisterResult::Success => {}
-        storage::user::RegisterResult::AliasTaken => {
-            return Err(AppError::BadRequest(format!(
-                "Alias '{}' is already taken",
-                req.alias
-            )));
-        }
-        storage::user::RegisterResult::InviteNotFound => {
-            return Err(AppError::NotFound(
-                "Invite not found or expired".to_string(),
-            ));
+        storage::user::RegisterResult::AliasTaken
+        | storage::user::RegisterResult::InviteNotFound => {
+            // Uniform error prevents alias enumeration (attacker can't distinguish
+            // "alias taken" from "bad invite" without a valid invite token).
+            return Err(AppError::BadRequest("Registration failed".to_string()));
         }
     }
 

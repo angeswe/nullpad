@@ -27,7 +27,7 @@ for html in $HTML_FILES; do
 
     # Replace: src="/js/..." with or without existing integrity
     # Match: <script src="/js/path"[optional integrity]></script>
-    sed -i "s|<script src=\"${src_path}\"[^>]*>|<script src=\"${src_path}\" integrity=\"${hash}\">|g" "$html"
+    sed -i "s|<script src=\"${src_path}\"[^>]*>|<script src=\"${src_path}\" integrity=\"${hash}\" crossorigin=\"anonymous\">|g" "$html"
   done || true
   echo "Updated: $html"
 done

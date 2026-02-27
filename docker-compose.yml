@@ -37,7 +37,8 @@ services:
       - /tmp
 
   redis:
-    image: redis:7-alpine
+    # To update: docker pull redis:7-alpine && docker inspect --format='{{index .RepoDigests 0}}' redis:7-alpine
+    image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
     user: redis
     volumes:
       - redis-data:/data

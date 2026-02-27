@@ -63,12 +63,14 @@ fn keygen(alias: &str, secret: &str) -> Result<String, String> {
 }
 
 fn print_keygen_usage() {
-    eprintln!("Usage: nullpad keygen <alias> <secret>");
+    eprintln!("Usage: nullpad keygen <alias>");
     eprintln!();
     eprintln!("Generate Ed25519 public key from alias + secret for ADMIN_PUBKEY.");
+    eprintln!("Secret is read from stdin (not CLI args, to avoid process list exposure).");
     eprintln!();
     eprintln!("Example:");
-    eprintln!("  nullpad keygen admin mysecretpassword");
+    eprintln!("  echo -n 'mysecretpassword' | nullpad keygen admin");
+    eprintln!("  nullpad keygen admin  # prompts interactively");
     eprintln!();
     eprintln!("Then set in .env:");
     eprintln!("  ADMIN_ALIAS=admin");
@@ -111,14 +113,33 @@ async fn main() {
     // Check for keygen subcommand
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 2 && args[1] == "keygen" {
-        if args.len() != 4 {
+        if args.len() != 3 {
             print_keygen_usage();
             std::process::exit(1);
         }
         let alias = &args[2];
-        let secret = &args[3];
 
-        match keygen(alias, secret) {
+        // Read secret from stdin to avoid process list exposure (/proc/pid/cmdline)
+        let secret = {
+            use std::io::{self, BufRead, IsTerminal, Write};
+            if io::stdin().is_terminal() {
+                eprint!("Enter secret: ");
+                io::stderr().flush().ok();
+            }
+            let mut line = String::new();
+            io::stdin()
+                .lock()
+                .read_line(&mut line)
+                .expect("Failed to read secret from stdin");
+            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+            if trimmed.is_empty() {
+                eprintln!("Error: secret cannot be empty");
+                std::process::exit(1);
+            }
+            trimmed.to_string()
+        };
+
+        match keygen(alias, &secret) {
             Ok(pubkey) => {
                 println!("{}", pubkey);
             }
