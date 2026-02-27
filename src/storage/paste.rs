@@ -12,7 +12,11 @@ use crate::storage::blob;
 use redis::AsyncCommands;
 use std::path::Path;
 
-/// Store a paste: content on disk, metadata in Redis.
+/// Store a paste: claim ID in Redis first (SETNX), then write content to disk.
+///
+/// Uses SET NX (set-if-not-exists) to atomically claim the paste ID, preventing
+/// overwrites of existing pastes. If the ID already exists, returns an error
+/// that maps to 409 Conflict.
 ///
 /// If the paste has an owner_id, also add the paste ID to the user's paste set.
 /// `max_ttl_secs` is used for the user_pastes SET expiry (from config.max_ttl_secs).
@@ -26,17 +30,6 @@ pub async fn store_paste<C>(
 where
     C: AsyncCommands,
 {
-    // Write content to disk first (so we don't have orphan metadata)
-    blob::write_blob(storage_path, &paste.meta.id, &paste.encrypted_content)
-        .await
-        .map_err(|e| {
-            redis::RedisError::from((
-                redis::ErrorKind::UnexpectedReturnType,
-                "Blob write failed",
-                e.to_string(),
-            ))
-        })?;
-
     let key = format!("paste:{}", paste.meta.id);
     let json = serde_json::to_string(&paste.meta).map_err(|e| {
         redis::RedisError::from((
@@ -46,14 +39,48 @@ where
         ))
     })?;
 
-    // Store metadata: ttl_secs=0 means forever (no expiration)
-    if ttl_secs == 0 {
-        con.set::<_, _, ()>(&key, json).await?;
-    } else {
-        con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
+    // Step 1: Atomically claim the paste ID with SET NX (set-if-not-exists).
+    // This prevents overwriting existing pastes when clients control the ID.
+    // Redis SET NX returns "OK" on success or nil when key exists.
+    let mut cmd = redis::cmd("SET");
+    cmd.arg(&key).arg(&json);
+    if ttl_secs > 0 {
+        cmd.arg("EX").arg(ttl_secs);
+    }
+    cmd.arg("NX");
+
+    // Redis SET NX returns "OK" (Some) on success, nil (None) when key exists.
+    // Using Option<String> correctly maps nil to None without type errors.
+    // Real Redis errors (connection, auth, OOM) propagate via `?`.
+    let result: Option<String> = cmd.query_async(con).await?;
+    let claimed = result.is_some();
+
+    if !claimed {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "Paste ID already exists",
+            "conflict".to_string(),
+        )));
     }
 
-    // If paste has an owner, add to user's paste set
+    // Step 2: Write content to disk (only after Redis confirms the ID is ours).
+    if let Err(e) = blob::write_blob(storage_path, &paste.meta.id, &paste.encrypted_content).await {
+        // Cleanup: delete Redis key if blob write fails
+        if let Err(cleanup_err) = con.del::<_, ()>(&key).await {
+            tracing::error!(
+                paste_id = %paste.meta.id,
+                error = %cleanup_err,
+                "Failed to clean up Redis key after blob write failure"
+            );
+        }
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "Blob write failed",
+            e.to_string(),
+        )));
+    }
+
+    // Step 3: If paste has an owner, add to user's paste set
     if let Some(ref owner_id) = paste.meta.owner_id {
         let user_pastes_key = format!("user_pastes:{}", owner_id);
         con.sadd::<_, _, ()>(&user_pastes_key, &paste.meta.id)

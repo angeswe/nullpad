@@ -15,41 +15,14 @@ use axum::{
 use base64::{engine::general_purpose, Engine as _};
 use std::net::SocketAddr;
 
-/// Basic MIME type validation: must match `type/subtype` pattern with optional parameters.
-/// Accepts formats like `text/plain`, `application/octet-stream`, `text/html; charset=utf-8`.
-fn is_valid_mime(s: &str) -> bool {
-    // Split off parameters (e.g., "; charset=utf-8")
-    let base = match s.split_once(';') {
-        Some((base, _)) => base.trim(),
-        None => s.trim(),
-    };
-
-    // Must contain exactly one slash separating type and subtype
-    let (typ, subtype) = match base.split_once('/') {
-        Some(parts) => parts,
-        None => return false,
-    };
-
-    // Both type and subtype must be non-empty and contain only valid token chars
-    // RFC 7231: token = 1*tchar, tchar = "!" / "#" / "$" / "%" / "&" / "'" / "*"
-    //           / "+" / "-" / "." / "^" / "_" / "`" / "|" / "~" / DIGIT / ALPHA
-    fn is_token(s: &str) -> bool {
-        !s.is_empty()
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
-    }
-
-    is_token(typ) && is_token(subtype)
-}
-
 /// POST /api/paste — Create paste
 ///
 /// Accepts multipart form with:
-/// - "metadata" field: JSON PasteMetadata
+/// - "metadata" field: JSON PasteMetadata (paste_id, encrypted_metadata, paste_type, ttl_secs, burn_after_reading)
 /// - "file" field: encrypted bytes
 ///
-/// Public users: only .md/.txt extensions allowed
-/// Authenticated users: any file type allowed
+/// Public users: text paste type only
+/// Authenticated users: text and file paste types
 pub async fn create_paste(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -130,38 +103,35 @@ pub async fn create_paste(
     let encrypted_content =
         encrypted_content.ok_or_else(|| AppError::BadRequest("Missing file".to_string()))?;
 
-    // Validate filename: max 255 chars, no null bytes, no path separators
-    if metadata.filename.len() > 255 {
+    // Validate client-generated paste ID
+    super::validate_id(&metadata.paste_id, "paste ID", 12)?;
+
+    // Validate encrypted_metadata: non-empty, valid base64, max 4096 bytes decoded
+    if metadata.encrypted_metadata.is_empty() {
         return Err(AppError::BadRequest(
-            "Filename too long (max 255 characters)".to_string(),
+            "Missing encrypted_metadata".to_string(),
         ));
     }
-    if metadata.filename.contains('\0')
-        || metadata.filename.contains('/')
-        || metadata.filename.contains('\\')
-    {
+    let decoded_meta = general_purpose::STANDARD
+        .decode(&metadata.encrypted_metadata)
+        .map_err(|_| AppError::BadRequest("Invalid encrypted_metadata encoding".to_string()))?;
+    if decoded_meta.len() > 4096 {
         return Err(AppError::BadRequest(
-            "Filename contains invalid characters".to_string(),
+            "encrypted_metadata too large (max 4096 bytes)".to_string(),
         ));
-    }
-    if metadata.filename.is_empty() {
-        return Err(AppError::BadRequest("Filename cannot be empty".to_string()));
     }
 
-    // Validate content_type: max 127 chars, ASCII only, no null bytes, valid MIME format
-    if metadata.content_type.len() > 127 {
+    // Validate paste_type: must be "text" or "file"
+    if metadata.paste_type != "text" && metadata.paste_type != "file" {
         return Err(AppError::BadRequest(
-            "Content type too long (max 127 characters)".to_string(),
+            "paste_type must be \"text\" or \"file\"".to_string(),
         ));
     }
-    if !metadata.content_type.is_ascii() || metadata.content_type.contains('\0') {
-        return Err(AppError::BadRequest(
-            "Content type contains invalid characters".to_string(),
-        ));
-    }
-    if !is_valid_mime(&metadata.content_type) {
-        return Err(AppError::BadRequest(
-            "Invalid content type format".to_string(),
+
+    // Public users can only create text pastes
+    if auth_session.is_none() && metadata.paste_type == "file" {
+        return Err(AppError::Forbidden(
+            "File uploads require authentication".to_string(),
         ));
     }
 
@@ -172,25 +142,6 @@ pub async fn create_paste(
             encrypted_content.len(),
             state.config.max_upload_bytes
         )));
-    }
-
-    // Extract extension from filename (use rsplit_once to get only the final extension)
-    let extension = metadata
-        .filename
-        .rsplit_once('.')
-        .map(|(_, ext)| ext.to_lowercase());
-
-    // If no auth session, enforce public extension restrictions
-    if auth_session.is_none() {
-        match &extension {
-            Some(ext) if state.config.public_allowed_extensions.contains(ext) => {}
-            _ => {
-                return Err(AppError::Forbidden(format!(
-                    "File type not allowed for public uploads. Allowed: {}",
-                    state.config.public_allowed_extensions.join(", ")
-                )));
-            }
-        }
     }
 
     // Use config default if client omitted ttl_secs.
@@ -227,15 +178,17 @@ pub async fn create_paste(
         }
     }
 
-    // Generate paste ID
-    let paste_id = nanoid::nanoid!(12);
+    // Use client-generated paste ID (validated above)
+    let paste_id = metadata.paste_id;
 
     // Create stored paste (metadata + content)
     let paste = StoredPaste {
         meta: StoredPasteMeta {
             id: paste_id.clone(),
-            filename: metadata.filename,
-            content_type: metadata.content_type,
+            encrypted_metadata: metadata.encrypted_metadata,
+            paste_type: metadata.paste_type,
+            filename: None,
+            content_type: None,
             burn_after_reading: metadata.burn_after_reading,
             created_at: crate::util::now_secs(),
             owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
@@ -243,7 +196,7 @@ pub async fn create_paste(
         encrypted_content,
     };
 
-    // Store paste (metadata to Redis, content to disk)
+    // Store paste (metadata to Redis via SETNX, then content to disk)
     storage::paste::store_paste(
         &mut con,
         &state.config.paste_storage_path,
@@ -251,7 +204,16 @@ pub async fn create_paste(
         ttl_secs,
         state.config.max_ttl_secs,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        // store_paste returns UnexpectedReturnType with detail "conflict"
+        // when the paste ID already exists (SETNX failed).
+        if e.kind() == redis::ErrorKind::UnexpectedReturnType && e.detail() == Some("conflict") {
+            AppError::Conflict("Paste ID already exists".to_string())
+        } else {
+            AppError::from(e)
+        }
+    })?;
 
     // On first upload, atomically update user TTL from idle to active.
     // Uses SCARD + TTL comparison to avoid race conditions between concurrent uploads.
@@ -323,8 +285,16 @@ pub async fn get_paste(
     .await?
     .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
+    // Return encrypted_metadata for new pastes, legacy fields for old pastes
+    let encrypted_metadata = if paste.meta.encrypted_metadata.is_empty() {
+        None
+    } else {
+        Some(paste.meta.encrypted_metadata)
+    };
+
     Ok(Json(GetPasteResponse {
         encrypted_content: general_purpose::STANDARD.encode(&paste.encrypted_content),
+        encrypted_metadata,
         filename: paste.meta.filename,
         content_type: paste.meta.content_type,
         burn_after_reading: paste.meta.burn_after_reading,
