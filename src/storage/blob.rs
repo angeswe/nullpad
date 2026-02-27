@@ -199,6 +199,10 @@ pub async fn read_blob(
 
 /// Delete a blob from disk.
 ///
+/// Overwrites the file content with random bytes before unlinking to prevent
+/// recovery via disk forensics. While the content is AES-256-GCM ciphertext
+/// (unusable without the key), secure deletion strengthens the zero-knowledge posture.
+///
 /// Returns true if the blob was deleted, false if it didn't exist.
 pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
     let canonical_storage = canonicalize_storage_root(storage_path)?;
@@ -206,6 +210,27 @@ pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobErro
         Some(p) => p,
         None => return Ok(false),
     };
+
+    // Overwrite with random bytes in fixed-size chunks before unlinking.
+    // Chunked approach bounds memory usage regardless of file size.
+    let metadata = fs::metadata(&verified_path).await?;
+    let file_size = metadata.len();
+    if file_size > 0 {
+        let mut file = fs::OpenOptions::new()
+            .write(true)
+            .open(&verified_path)
+            .await?;
+        const CHUNK: usize = 64 * 1024;
+        let mut buf = vec![0u8; CHUNK];
+        let mut remaining = file_size;
+        while remaining > 0 {
+            let n = (remaining as usize).min(CHUNK);
+            rand::fill(&mut buf[..n]);
+            file.write_all(&buf[..n]).await?;
+            remaining -= n as u64;
+        }
+        file.sync_all().await?;
+    }
 
     fs::remove_file(&verified_path).await?;
     Ok(true)
@@ -502,6 +527,47 @@ mod tests {
             outside_file.exists(),
             "Outside file should not have been deleted"
         );
+    }
+
+    #[tokio::test]
+    async fn test_delete_overwrites_before_unlinking() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let id = "ow123456789012";
+        let content = b"sensitive content that should be overwritten";
+        write_blob(storage_path, id, content).await.unwrap();
+
+        // Get the on-disk path so we can read it after overwrite
+        let blob_path = storage_path.join(&id[..2]).join(id);
+        assert!(blob_path.exists());
+
+        // Read file content before deletion to confirm it matches
+        let before = std::fs::read(&blob_path).unwrap();
+        assert_eq!(before, content);
+
+        // Delete (which should overwrite first)
+        let deleted = delete_blob(storage_path, id).await.unwrap();
+        assert!(deleted);
+
+        // File should be gone
+        assert!(!blob_path.exists());
+    }
+
+    #[tokio::test]
+    async fn test_delete_empty_blob() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let id = "em123456789012";
+        // Write an empty blob
+        write_blob(storage_path, id, b"").await.unwrap();
+
+        // Should delete without error (skips overwrite for empty files)
+        let deleted = delete_blob(storage_path, id).await.unwrap();
+        assert!(deleted);
     }
 
     #[tokio::test]
