@@ -29,7 +29,12 @@ static TEST_REDIS: OnceCell<TestRedis> = OnceCell::const_new();
 async fn get_redis_url() -> &'static str {
     let test_redis = TEST_REDIS
         .get_or_init(|| async {
-            let container = Redis::default().with_tag("7-alpine").start().await.unwrap();
+            let container = Redis::default()
+                .with_tag("7-alpine")
+                .with_label("nullpad-test", "integration")
+                .start()
+                .await
+                .unwrap();
             let host = container.get_host().await.unwrap();
             let port = container.get_host_port_ipv4(6379).await.unwrap();
             let url = format!("redis://{}:{}", host, port);
