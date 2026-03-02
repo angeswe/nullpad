@@ -34,6 +34,8 @@
   let pinBackoffUntil = 0;
   let clipboardDirty = false;
   let imageBlobUrl = null;
+  let useAttemptEndpoint = false;
+  let contentFetched = false;
 
   function sanitizeFilename(name) {
     return name
@@ -157,6 +159,38 @@
     } catch (err) {
       throw new Error(err.message || 'Failed to fetch paste');
     }
+  }
+
+  async function fetchAttempt() {
+    const response = await fetch(`/api/paste/${pasteId}`, { method: 'POST' });
+
+    if (!response.ok) {
+      if (response.status === 429) {
+        const retryAfter = response.headers.get('retry-after');
+        const waitMsg = retryAfter ? `Wait ${retryAfter}s` : 'Please wait';
+        throw new Error(`Too many attempts. ${waitMsg} before trying again.`);
+      }
+      let msg;
+      try {
+        const err = await response.json();
+        msg = err.error;
+      } catch { /* non-JSON */ }
+      throw new Error(msg || 'Failed to fetch paste');
+    }
+
+    const data = await response.json();
+    if (!data.encrypted_content) {
+      throw new Error('Server returned incomplete response');
+    }
+    encryptedData = data.encrypted_content;
+    metadata = {
+      burn: data.burn_after_reading || false,
+      filename: data.filename || null,
+      mimetype: data.content_type || null,
+      encrypted_metadata: data.encrypted_metadata || null
+    };
+    contentFetched = true;
+    return data;
   }
 
   // ============================================================================
@@ -356,10 +390,22 @@
     errorMessage.textContent = message;
   }
 
-  function showPinPrompt() {
+  function showPinPrompt(burnGated) {
     loading.classList.add('hidden');
     loading.setAttribute('aria-busy', 'false');
     pinPrompt.classList.remove('hidden');
+
+    if (burnGated) {
+      // Warn that content is destroyed after a single fetch attempt
+      let warnEl = pinPrompt.querySelector('.pin-burn-warning');
+      if (!warnEl) {
+        warnEl = document.createElement('div');
+        warnEl.className = 'pin-burn-warning status-warning';
+        warnEl.setAttribute('role', 'alert');
+        pinForm.parentNode.insertBefore(warnEl, pinForm);
+      }
+      warnEl.textContent = 'This paste will be destroyed after one attempt. Make sure your PIN is correct.';
+    }
   }
 
   function showContent(decrypted) {
@@ -401,6 +447,24 @@
     }
 
     try {
+      // Fetch content from server if PIN-gated and not yet fetched
+      if (useAttemptEndpoint && !contentFetched) {
+        try {
+          await fetchAttempt();
+        } catch (fetchErr) {
+          // Server-side error (429, 404, etc.) — show directly, don't count as PIN attempt
+          let errEl = pinPrompt.querySelector('.status-error');
+          if (!errEl) {
+            errEl = document.createElement('div');
+            errEl.className = 'status-error';
+            errEl.setAttribute('role', 'alert');
+            pinForm.parentNode.insertBefore(errEl, pinForm);
+          }
+          errEl.textContent = fetchErr.message;
+          return;
+        }
+      }
+
       const decrypted = await decryptPaste(pin);
       showContent(decrypted);
     } catch (err) {
@@ -470,7 +534,18 @@
 
     try {
       // Fetch encrypted paste
-      await fetchPaste();
+      const data = await fetchPaste();
+
+      // Server-side PIN gating: content withheld until POST attempt
+      if (data.needs_pin) {
+        useAttemptEndpoint = true;
+        metadata = { burn: data.burn_after_reading || false };
+        if (metadata.burn) {
+          burnWarning.classList.remove('hidden');
+        }
+        showPinPrompt(/* burnGated */ metadata.burn);
+        return;
+      }
 
       // Show burn warning if applicable
       if (metadata.burn) {
@@ -523,6 +598,10 @@
     encryptedData = null;
     pinSalt = null;
     metadata = null;
+    useAttemptEndpoint = false;
+    contentFetched = false;
+    pinAttempts = 0;
+    pinBackoffUntil = 0;
     // Best-effort clipboard clear (may fail without user gesture)
     if (clipboardDirty && navigator.clipboard) {
       navigator.clipboard.writeText('').catch(() => {});

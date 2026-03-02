@@ -184,6 +184,7 @@ pub async fn create_paste(
             burn_after_reading: metadata.burn_after_reading,
             created_at: crate::util::now_secs(),
             owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
+            has_pin: metadata.has_pin,
         },
         encrypted_content,
     };
@@ -259,6 +260,24 @@ pub async fn get_paste(
     )
     .await?;
 
+    // Check if paste is PIN-gated (metadata only, no blob read, no burn)
+    let meta = storage::paste::get_paste_meta(&mut con, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
+
+    if meta.has_pin {
+        // PIN-gated: return probe response without content
+        return Ok(Json(GetPasteResponse {
+            encrypted_content: None,
+            encrypted_metadata: None,
+            filename: None,
+            content_type: None,
+            burn_after_reading: meta.burn_after_reading,
+            created_at: None,
+            needs_pin: Some(true),
+        }));
+    }
+
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.
     let paste = storage::paste::get_paste_atomic(
@@ -278,12 +297,77 @@ pub async fn get_paste(
     };
 
     Ok(Json(GetPasteResponse {
-        encrypted_content: general_purpose::STANDARD.encode(&paste.encrypted_content),
+        encrypted_content: Some(general_purpose::STANDARD.encode(&paste.encrypted_content)),
         encrypted_metadata,
         filename: paste.meta.filename,
         content_type: paste.meta.content_type,
         burn_after_reading: paste.meta.burn_after_reading,
-        created_at: paste.meta.created_at,
+        created_at: Some(paste.meta.created_at),
+        needs_pin: None,
+    }))
+}
+
+/// POST /api/paste/:id — Attempt to retrieve a PIN-gated paste
+///
+/// Rate limited per IP per paste. Returns full content for PIN-gated pastes.
+/// Returns 404 if paste doesn't exist or isn't PIN-gated.
+/// Burns paste on first attempt if burn_after_reading is true.
+pub async fn attempt_paste(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    super::validate_id(&id, "paste ID", 12)?;
+
+    let mut con = state.redis.clone();
+
+    // Rate limit per IP per paste
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
+    let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
+    let rate_limit_key = format!("ratelimit:pin_attempt:{}:{}", ip_hash, id);
+    super::enforce_rate_limit(
+        &mut con,
+        &rate_limit_key,
+        state.config.rate_limit_pin_attempt,
+        60,
+        Some(("pin_attempt", &ip_hash)),
+    )
+    .await?;
+
+    // Verify paste exists and is PIN-gated
+    let meta = storage::paste::get_paste_meta(&mut con, &id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
+
+    if !meta.has_pin {
+        return Err(AppError::NotFound("Paste not found".to_string()));
+    }
+
+    // Fetch full paste (triggers burn if applicable)
+    let paste = storage::paste::get_paste_atomic(
+        &mut con,
+        &state.config.paste_storage_path,
+        &id,
+        state.config.max_upload_bytes as u64,
+    )
+    .await?
+    .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
+
+    let encrypted_metadata = if paste.meta.encrypted_metadata.is_empty() {
+        None
+    } else {
+        Some(paste.meta.encrypted_metadata)
+    };
+
+    Ok(Json(GetPasteResponse {
+        encrypted_content: Some(general_purpose::STANDARD.encode(&paste.encrypted_content)),
+        encrypted_metadata,
+        filename: paste.meta.filename,
+        content_type: paste.meta.content_type,
+        burn_after_reading: paste.meta.burn_after_reading,
+        created_at: Some(paste.meta.created_at),
+        needs_pin: None,
     }))
 }
 

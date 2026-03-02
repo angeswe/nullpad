@@ -98,6 +98,83 @@ async fn spawn_test_server_with_auth_limit(
         challenge_ttl_secs: 30,
         rate_limit_paste_per_min: 10000,
         rate_limit_auth_per_min: limit,
+        rate_limit_pin_attempt: 10000,
+        trusted_proxy_count: 0,
+        max_sessions_per_user: 5,
+        max_pastes_per_user: 50,
+        paste_storage_path,
+    };
+
+    let state = AppState {
+        redis: redis_manager,
+        config: Arc::new(config),
+        ip_hmac_salt: Arc::new(rand::random()),
+    };
+
+    let app = routes::api_router()
+        .fallback_service(ServeDir::new("static"))
+        .layer(axum::middleware::from_fn(security_headers))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let base_url = format!("http://{}", addr);
+    (base_url, con, admin_key, admin_alias)
+}
+
+/// Spin up a test server with a custom PIN attempt rate limit.
+async fn spawn_test_server_with_pin_limit(
+    limit: u32,
+) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
+    let (admin_key, admin_pubkey) = test_keypair();
+    let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
+
+    let test_redis_url = get_redis_url().await.to_string();
+    let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
+    let redis_manager = redis_client
+        .get_connection_manager()
+        .await
+        .expect("Failed to get connection manager");
+    let mut con = redis_manager.clone();
+
+    nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, &admin_alias)
+        .await
+        .expect("Failed to upsert admin");
+
+    let paste_storage_path =
+        std::env::temp_dir().join(format!("nullpad_test_{}", nanoid::nanoid!(8)));
+    nullpad::storage::blob::init_storage(&paste_storage_path)
+        .await
+        .expect("Failed to init paste storage");
+
+    let config = Config {
+        admin_pubkey,
+        admin_alias: admin_alias.clone(),
+        redis_url: test_redis_url.clone(),
+        bind_addr: "127.0.0.1:0".parse().unwrap(),
+        max_upload_bytes: 52_428_800,
+        default_ttl_secs: 86400,
+        max_ttl_secs: 604800,
+        invite_ttl_secs: 43200,
+        user_idle_ttl_secs: 172800,
+        user_active_ttl_secs: 86400,
+        session_ttl_secs: 900,
+        challenge_ttl_secs: 30,
+        rate_limit_paste_per_min: 10000,
+        rate_limit_auth_per_min: 10000,
+        rate_limit_pin_attempt: limit,
         trusted_proxy_count: 0,
         max_sessions_per_user: 5,
         max_pastes_per_user: 50,
@@ -179,6 +256,7 @@ async fn create_paste(
     burn: bool,
     ttl: u64,
     token: Option<&str>,
+    has_pin: bool,
 ) -> reqwest::Response {
     let paste_id = nanoid::nanoid!(12);
     // Use a dummy base64 blob as encrypted_metadata (server stores opaquely)
@@ -189,7 +267,8 @@ async fn create_paste(
         "encrypted_metadata": encrypted_metadata,
         "paste_type": paste_type,
         "ttl_secs": ttl,
-        "burn_after_reading": burn
+        "burn_after_reading": burn,
+        "has_pin": has_pin
     });
 
     let form = multipart::Form::new()
@@ -236,6 +315,7 @@ async fn test_create_and_get_paste() {
         false,
         3600,
         None,
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -269,7 +349,10 @@ async fn test_burn_after_reading() {
     let client = reqwest::Client::new();
 
     // Create a burn paste
-    let resp = create_paste(&client, &base_url, "text", b"burn me", true, 3600, None).await;
+    let resp = create_paste(
+        &client, &base_url, "text", b"burn me", true, 3600, None, false,
+    )
+    .await;
     assert_eq!(resp.status(), 200);
 
     let body: serde_json::Value = resp.json().await.unwrap();
@@ -323,11 +406,17 @@ async fn test_public_paste_type_restriction() {
     let client = reqwest::Client::new();
 
     // "file" type should be rejected for public uploads
-    let resp = create_paste(&client, &base_url, "file", b"data", false, 3600, None).await;
+    let resp = create_paste(
+        &client, &base_url, "file", b"data", false, 3600, None, false,
+    )
+    .await;
     assert_eq!(resp.status(), 403);
 
     // "text" type should be allowed for public uploads
-    let resp = create_paste(&client, &base_url, "text", b"data", false, 3600, None).await;
+    let resp = create_paste(
+        &client, &base_url, "text", b"data", false, 3600, None, false,
+    )
+    .await;
     assert_eq!(resp.status(), 200);
 }
 
@@ -1008,7 +1097,10 @@ async fn test_admin_delete_paste() {
     let client = reqwest::Client::new();
 
     // Create a paste
-    let resp = create_paste(&client, &base_url, "text", b"data", false, 3600, None).await;
+    let resp = create_paste(
+        &client, &base_url, "text", b"data", false, 3600, None, false,
+    )
+    .await;
     let body: serde_json::Value = resp.json().await.unwrap();
     let paste_id = body["id"].as_str().unwrap().to_string();
 
@@ -1077,6 +1169,7 @@ async fn test_admin_revoke_user() {
         false,
         3600,
         Some(&user_token),
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1275,6 +1368,7 @@ async fn test_activate_user_on_first_upload() {
         false,
         3600,
         Some(&user_token),
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1303,6 +1397,7 @@ async fn test_activate_user_on_first_upload() {
         false,
         3600,
         Some(&user_token),
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1392,6 +1487,7 @@ async fn test_concurrent_burn_after_reading_race() {
         true,
         3600,
         None,
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1513,7 +1609,7 @@ async fn test_forever_paste_requires_auth() {
     let client = reqwest::Client::new();
 
     // Public user trying to create forever paste (ttl=0) should be rejected
-    let resp = create_paste(&client, &base_url, "text", b"data", false, 0, None).await;
+    let resp = create_paste(&client, &base_url, "text", b"data", false, 0, None, false).await;
     assert_eq!(resp.status(), 403);
 
     // Login as admin (trusted user)
@@ -1528,6 +1624,7 @@ async fn test_forever_paste_requires_auth() {
         false,
         0,
         Some(&admin_token),
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1770,6 +1867,7 @@ async fn test_trusted_user_can_upload_files() {
         false,
         3600,
         Some(&user_token),
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
@@ -1783,7 +1881,239 @@ async fn test_trusted_user_can_upload_files() {
         false,
         3600,
         Some(&user_token),
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
+}
+
+// ============================================================================
+// PIN Gating Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_pin_gated_get_returns_needs_pin() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create a PIN-gated paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"secret data",
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap();
+
+    // GET should return needs_pin probe (no content)
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["needs_pin"], true);
+    assert!(body.get("encrypted_content").is_none());
+    assert!(body.get("created_at").is_none());
+    assert!(body.get("burn_after_reading").is_some());
+}
+
+#[tokio::test]
+async fn test_pin_gated_attempt_returns_content() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create a PIN-gated paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"secret data",
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap();
+
+    // POST attempt should return full content
+    let resp = client
+        .post(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["encrypted_content"].is_string());
+    assert!(body["created_at"].is_number());
+    assert!(body.get("needs_pin").is_none());
+}
+
+#[tokio::test]
+async fn test_pin_gated_attempt_rate_limited() {
+    // Use a server with very low PIN attempt limit
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server_with_pin_limit(2).await;
+    let client = reqwest::Client::new();
+
+    // Create a PIN-gated paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"secret data",
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap();
+
+    // First 2 attempts should succeed
+    for _ in 0..2 {
+        // Need to re-create since burn might consume it... wait, this one isn't burn.
+        // But the first attempt returns content and the paste still exists (not burn).
+        let resp = client
+            .post(format!("{}/api/paste/{}", base_url, id))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
+
+    // 3rd attempt should be rate limited
+    let resp = client
+        .post(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+}
+
+#[tokio::test]
+async fn test_pin_gated_burn_consumed_on_attempt() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create a burn + PIN-gated paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"burn secret",
+        true,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap();
+
+    // GET should show needs_pin with burn_after_reading=true
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["needs_pin"], true);
+    assert_eq!(body["burn_after_reading"], true);
+
+    // POST attempt should return content and burn it
+    let resp = client
+        .post(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["encrypted_content"].is_string());
+
+    // Second GET should return 404 (burned)
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_non_pin_attempt_returns_404() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create a non-PIN paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"public data",
+        false,
+        3600,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap();
+
+    // POST attempt should return 404 (not PIN-gated)
+    let resp = client
+        .post(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
+#[tokio::test]
+async fn test_non_pin_get_unchanged() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Create a non-PIN paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"normal data",
+        false,
+        3600,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap();
+
+    // GET should return full content directly (no needs_pin)
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["encrypted_content"].is_string());
+    assert!(body["created_at"].is_number());
+    assert!(body.get("needs_pin").is_none());
 }

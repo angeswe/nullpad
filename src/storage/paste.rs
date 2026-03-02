@@ -105,6 +105,34 @@ where
     Ok(())
 }
 
+/// Get paste metadata only (Redis GET, no blob read, no burn side effects).
+///
+/// Used by PIN gating probe to check `has_pin` without consuming burn pastes.
+pub async fn get_paste_meta<C>(
+    con: &mut C,
+    id: &str,
+) -> Result<Option<StoredPasteMeta>, redis::RedisError>
+where
+    C: AsyncCommands,
+{
+    let key = format!("paste:{}", id);
+    let json: Option<String> = con.get(&key).await?;
+
+    match json {
+        Some(data) => {
+            let meta: StoredPasteMeta = serde_json::from_str(&data).map_err(|e| {
+                redis::RedisError::from((
+                    redis::ErrorKind::UnexpectedReturnType,
+                    "JSON deserialize",
+                    e.to_string(),
+                ))
+            })?;
+            Ok(Some(meta))
+        }
+        None => Ok(None),
+    }
+}
+
 /// Get a paste atomically, deleting if burn-after-reading.
 ///
 /// Reads the blob from disk FIRST to ensure content is available before

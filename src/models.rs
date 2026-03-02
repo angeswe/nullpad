@@ -26,6 +26,8 @@ pub struct PasteMetadata {
     pub ttl_secs: Option<u64>,
     #[serde(default)]
     pub burn_after_reading: bool,
+    #[serde(default)]
+    pub has_pin: bool,
 }
 
 /// Response after creating a paste.
@@ -38,7 +40,8 @@ pub struct CreatePasteResponse {
 /// Response when fetching a paste.
 #[derive(Debug, Serialize)]
 pub struct GetPasteResponse {
-    pub encrypted_content: String, // base64
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>, // base64
     /// Encrypted metadata blob (new pastes). Empty for legacy pastes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_metadata: Option<String>,
@@ -49,7 +52,10 @@ pub struct GetPasteResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content_type: Option<String>,
     pub burn_after_reading: bool,
-    pub created_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub needs_pin: Option<bool>,
 }
 
 /// Paste metadata as stored in Redis.
@@ -72,6 +78,8 @@ pub struct StoredPasteMeta {
     pub burn_after_reading: bool,
     pub created_at: u64,
     pub owner_id: Option<String>,
+    #[serde(default)]
+    pub has_pin: bool,
 }
 
 /// Full paste data (metadata + content) for API operations.
