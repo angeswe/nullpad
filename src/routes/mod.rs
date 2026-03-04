@@ -156,7 +156,9 @@ pub fn api_router() -> Router<AppState> {
         .route("/api/paste", post(paste::create_paste))
         .route(
             "/api/paste/{id}",
-            get(paste::get_paste).delete(paste::delete_paste),
+            get(paste::get_paste)
+                .post(paste::attempt_paste)
+                .delete(paste::delete_paste),
         )
         // Auth endpoints
         .route("/api/auth/challenge", post(auth::request_challenge))
