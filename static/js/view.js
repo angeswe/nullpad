@@ -473,12 +473,12 @@
       const delaySecs = Math.min(Math.pow(2, pinAttempts - 1), 30);
       pinBackoffUntil = Date.now() + delaySecs * 1000;
 
-      // Update burn warning to reflect paste is already destroyed
+      // Update burn warning — paste is gone server-side but ciphertext is in memory
       if (metadata.burn && contentFetched) {
         const warnEl = pinPrompt.querySelector('.pin-burn-warning');
         if (warnEl) {
           warnEl.className = 'pin-burn-warning status-error';
-          warnEl.textContent = 'This paste has been destroyed. Do not close this page — you can still retry your PIN.';
+          warnEl.textContent = 'Wrong PIN. This paste is one-time — if you close this page, it will be gone forever.';
         }
       }
 
