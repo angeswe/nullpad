@@ -390,22 +390,10 @@
     errorMessage.textContent = message;
   }
 
-  function showPinPrompt(burnGated) {
+  function showPinPrompt() {
     loading.classList.add('hidden');
     loading.setAttribute('aria-busy', 'false');
     pinPrompt.classList.remove('hidden');
-
-    if (burnGated) {
-      // Warn that content is destroyed after a single fetch attempt
-      let warnEl = pinPrompt.querySelector('.pin-burn-warning');
-      if (!warnEl) {
-        warnEl = document.createElement('div');
-        warnEl.className = 'pin-burn-warning status-warning';
-        warnEl.setAttribute('role', 'alert');
-        pinForm.parentNode.insertBefore(warnEl, pinForm);
-      }
-      warnEl.textContent = 'This paste will be destroyed after one attempt. Make sure your PIN is correct.';
-    }
   }
 
   function showContent(decrypted) {
@@ -473,13 +461,16 @@
       const delaySecs = Math.min(Math.pow(2, pinAttempts - 1), 30);
       pinBackoffUntil = Date.now() + delaySecs * 1000;
 
-      // Update burn warning — paste is gone server-side but ciphertext is in memory
+      // Show burn warning — paste is gone server-side but ciphertext is in memory
       if (metadata.burn && contentFetched) {
-        const warnEl = pinPrompt.querySelector('.pin-burn-warning');
-        if (warnEl) {
+        let warnEl = pinPrompt.querySelector('.pin-burn-warning');
+        if (!warnEl) {
+          warnEl = document.createElement('div');
           warnEl.className = 'pin-burn-warning status-error';
-          warnEl.textContent = 'Wrong PIN. This paste is one-time — if you close this page, it will be gone forever.';
+          warnEl.setAttribute('role', 'alert');
+          pinForm.parentNode.insertBefore(warnEl, pinForm);
         }
+        warnEl.textContent = 'Wrong PIN. This paste is one-time — if you close this page, it will be gone forever.';
       }
 
       let errEl = pinPrompt.querySelector('.pin-error');
@@ -552,7 +543,7 @@
         if (metadata.burn) {
           burnWarning.classList.remove('hidden');
         }
-        showPinPrompt(/* burnGated */ metadata.burn);
+        showPinPrompt();
         return;
       }
 
