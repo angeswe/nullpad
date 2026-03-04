@@ -390,22 +390,10 @@
     errorMessage.textContent = message;
   }
 
-  function showPinPrompt(burnGated) {
+  function showPinPrompt() {
     loading.classList.add('hidden');
     loading.setAttribute('aria-busy', 'false');
     pinPrompt.classList.remove('hidden');
-
-    if (burnGated) {
-      // Warn that content is destroyed after a single fetch attempt
-      let warnEl = pinPrompt.querySelector('.pin-burn-warning');
-      if (!warnEl) {
-        warnEl = document.createElement('div');
-        warnEl.className = 'pin-burn-warning status-warning';
-        warnEl.setAttribute('role', 'alert');
-        pinForm.parentNode.insertBefore(warnEl, pinForm);
-      }
-      warnEl.textContent = 'This paste will be destroyed after one attempt. Make sure your PIN is correct.';
-    }
   }
 
   function showContent(decrypted) {
@@ -435,10 +423,10 @@
     const now = Date.now();
     if (now < pinBackoffUntil) {
       const waitSecs = Math.ceil((pinBackoffUntil - now) / 1000);
-      let errEl = pinPrompt.querySelector('.status-error');
+      let errEl = pinPrompt.querySelector('.pin-error');
       if (!errEl) {
         errEl = document.createElement('div');
-        errEl.className = 'status-error';
+        errEl.className = 'pin-error status-error';
         errEl.setAttribute('role', 'alert');
         pinForm.parentNode.insertBefore(errEl, pinForm);
       }
@@ -453,10 +441,10 @@
           await fetchAttempt();
         } catch (fetchErr) {
           // Server-side error (429, 404, etc.) — show directly, don't count as PIN attempt
-          let errEl = pinPrompt.querySelector('.status-error');
+          let errEl = pinPrompt.querySelector('.pin-error');
           if (!errEl) {
             errEl = document.createElement('div');
-            errEl.className = 'status-error';
+            errEl.className = 'pin-error status-error';
             errEl.setAttribute('role', 'alert');
             pinForm.parentNode.insertBefore(errEl, pinForm);
           }
@@ -473,10 +461,22 @@
       const delaySecs = Math.min(Math.pow(2, pinAttempts - 1), 30);
       pinBackoffUntil = Date.now() + delaySecs * 1000;
 
-      let errEl = pinPrompt.querySelector('.status-error');
+      // Show burn warning — paste is gone server-side but ciphertext is in memory
+      if (metadata.burn && contentFetched) {
+        let warnEl = pinPrompt.querySelector('.pin-burn-warning');
+        if (!warnEl) {
+          warnEl = document.createElement('div');
+          warnEl.className = 'pin-burn-warning status-error';
+          warnEl.setAttribute('role', 'alert');
+          pinForm.parentNode.insertBefore(warnEl, pinForm);
+        }
+        warnEl.textContent = 'Wrong PIN. This paste is one-time — if you close this page, it will be gone forever.';
+      }
+
+      let errEl = pinPrompt.querySelector('.pin-error');
       if (!errEl) {
         errEl = document.createElement('div');
-        errEl.className = 'status-error';
+        errEl.className = 'pin-error status-error';
         errEl.setAttribute('role', 'alert');
         pinForm.parentNode.insertBefore(errEl, pinForm);
       }
@@ -543,7 +543,7 @@
         if (metadata.burn) {
           burnWarning.classList.remove('hidden');
         }
-        showPinPrompt(/* burnGated */ metadata.burn);
+        showPinPrompt();
         return;
       }
 

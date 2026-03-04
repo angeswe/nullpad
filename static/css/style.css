@@ -394,7 +394,16 @@ tr:hover {
   color: #a0a0a0;
 }
 
-/* Inline status errors (JS-generated) */
+/* Inline status messages (JS-generated) */
+.status-warning {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  background-color: rgba(251, 191, 36, 0.1);
+  border: 1px solid #fbbf24;
+  color: #fbbf24;
+  font-size: 0.9em;
+}
+
 .status-error {
   padding: 0.75rem 1rem;
   margin-bottom: 1rem;
