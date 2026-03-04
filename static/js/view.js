@@ -435,10 +435,10 @@
     const now = Date.now();
     if (now < pinBackoffUntil) {
       const waitSecs = Math.ceil((pinBackoffUntil - now) / 1000);
-      let errEl = pinPrompt.querySelector('.status-error');
+      let errEl = pinPrompt.querySelector('.pin-error');
       if (!errEl) {
         errEl = document.createElement('div');
-        errEl.className = 'status-error';
+        errEl.className = 'pin-error status-error';
         errEl.setAttribute('role', 'alert');
         pinForm.parentNode.insertBefore(errEl, pinForm);
       }
@@ -453,10 +453,10 @@
           await fetchAttempt();
         } catch (fetchErr) {
           // Server-side error (429, 404, etc.) — show directly, don't count as PIN attempt
-          let errEl = pinPrompt.querySelector('.status-error');
+          let errEl = pinPrompt.querySelector('.pin-error');
           if (!errEl) {
             errEl = document.createElement('div');
-            errEl.className = 'status-error';
+            errEl.className = 'pin-error status-error';
             errEl.setAttribute('role', 'alert');
             pinForm.parentNode.insertBefore(errEl, pinForm);
           }
@@ -473,10 +473,19 @@
       const delaySecs = Math.min(Math.pow(2, pinAttempts - 1), 30);
       pinBackoffUntil = Date.now() + delaySecs * 1000;
 
-      let errEl = pinPrompt.querySelector('.status-error');
+      // Update burn warning to reflect paste is already destroyed
+      if (metadata.burn && contentFetched) {
+        const warnEl = pinPrompt.querySelector('.pin-burn-warning');
+        if (warnEl) {
+          warnEl.className = 'pin-burn-warning status-error';
+          warnEl.textContent = 'This paste has been destroyed. Do not close this page — you can still retry your PIN.';
+        }
+      }
+
+      let errEl = pinPrompt.querySelector('.pin-error');
       if (!errEl) {
         errEl = document.createElement('div');
-        errEl.className = 'status-error';
+        errEl.className = 'pin-error status-error';
         errEl.setAttribute('role', 'alert');
         pinForm.parentNode.insertBefore(errEl, pinForm);
       }
