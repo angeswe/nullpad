@@ -4,7 +4,7 @@ pub mod admin;
 pub mod auth;
 pub mod paste;
 
-use crate::auth::middleware::AppState;
+use crate::auth::middleware::{AdminSession, AppState, AuthSession};
 use crate::error::AppError;
 use axum::{
     extract::State,
@@ -147,11 +147,36 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Serve a protected static JS file with correct Content-Type.
+async fn serve_protected_js(path: &str) -> Result<impl IntoResponse, AppError> {
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|_| AppError::NotFound("Not found".to_string()))?;
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        content,
+    ))
+}
+
+/// GET /js/admin.js — Admin JS (requires admin auth)
+async fn protected_admin_js(AdminSession(_): AdminSession) -> Result<impl IntoResponse, AppError> {
+    serve_protected_js("static/js/admin.js").await
+}
+
+/// GET /js/trusted.js — Trusted JS (requires auth)
+async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
+    serve_protected_js("static/js/trusted.js").await
+}
+
 /// Build the API router with all endpoints.
 pub fn api_router() -> Router<AppState> {
     Router::new()
         // Health check
         .route("/healthz", get(healthz))
+        // Protected JS files (matched before ServeDir fallback)
+        .route("/js/admin.js", get(protected_admin_js))
+        .route("/js/trusted.js", get(protected_trusted_js))
         // Paste endpoints
         .route("/api/paste", post(paste::create_paste))
         .route(

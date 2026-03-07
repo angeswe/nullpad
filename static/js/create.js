@@ -180,17 +180,24 @@
         NullpadCrypto.textEncode(fileMetadata), encryptionKey, clientPasteId
       );
 
-      // 7. Prepare metadata (plaintext fields for server, encrypted blob for client)
+      // 7. Compute PIN verifier for server-side validation (if PIN set)
+      let pinVerifier = null;
+      if (pin) {
+        pinVerifier = await NullpadCrypto.computePinVerifier(encryptionKey, clientPasteId);
+      }
+
+      // 8. Prepare metadata (plaintext fields for server, encrypted blob for client)
       const metadata = JSON.stringify({
         paste_id: clientPasteId,
         encrypted_metadata: encryptedMetadata,
         paste_type: currentFile ? 'file' : 'text',
         ttl_secs: parseInt(ttlSelect.value, 10),
         burn_after_reading: burnCheckbox.checked,
-        has_pin: !!pin
+        has_pin: !!pin,
+        pin_verifier: pinVerifier
       });
 
-      // 8. Build multipart request
+      // 9. Build multipart request
       const formData = new FormData();
       formData.append('metadata', new Blob([metadata], { type: 'application/json' }));
       formData.append('file', new Blob([encryptedBytes], { type: 'application/octet-stream' }), 'encrypted');
@@ -204,7 +211,7 @@
         }
       }
 
-      // 9. POST to API
+      // 10. POST to API
       const response = await fetch('/api/paste', {
         method: 'POST',
         headers: headers,
@@ -228,7 +235,7 @@
 
       const result = await response.json();
 
-      // 10. Build URL with key fragment
+      // 11. Build URL with key fragment
       const fragment = salt
         ? `${rawKey}.${NullpadCrypto.base64urlEncode(salt)}`
         : rawKey;

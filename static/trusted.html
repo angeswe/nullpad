@@ -108,9 +108,24 @@
   </footer>
 
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W" crossorigin="anonymous"></script>
-  <script src="/js/crypto.js" integrity="sha384-L4s53PBPpJg1PnQa/gidQSD96ByUFqquNwXFrtbc1g55V/9Al/Dv7Yg6/O9c6VQd" crossorigin="anonymous"></script>
+  <script src="/js/crypto.js" integrity="sha384-KrO3GLqIF/x99jmNCDt38MZhHFQ5QNnwf+hlQTzKgUliveJwOqnIWYkbXlbnopez" crossorigin="anonymous"></script>
   <script src="/js/auth.js" integrity="sha384-OC5YYRrtpzvzXVbk9Jlns+kEWgxFrD6cYA6wPV5RkuYOB9DhN51beYOXISeTD/QZ" crossorigin="anonymous"></script>
-  <script src="/js/create.js" integrity="sha384-Q47OBs6tXFeUGZN5u02Pit+2M+0cHnsOw3/Gm8GWXYQXYDeB6VHnlqStuaNN/Ynk" crossorigin="anonymous"></script>
-  <script src="/js/trusted.js" integrity="sha384-wD4K/p/w1yS+yG9H9WP1Co0/TJmy2sUwC5iW6zEYPmGvptqUENoVprXBdHHz+3Mr" crossorigin="anonymous"></script>
+  <script src="/js/create.js" integrity="sha384-CA10Udprl6YV3kyp9Ds+oN/YTatEOlwInsJPya0TGMyJzgIaUatH5qmpgfndtHa7" crossorigin="anonymous"></script>
+  <script>
+    // Load trusted.js via authenticated fetch (server requires session)
+    (function() {
+      var token = sessionStorage.getItem('session_token');
+      if (!token) { window.location.href = '/login.html'; return; }
+      fetch('/js/trusted.js', { headers: { 'Authorization': 'Bearer ' + token } })
+        .then(function(r) {
+          if (!r.ok) { window.location.href = '/login.html'; return; }
+          return r.text();
+        })
+        .then(function(code) {
+          if (code) { var s = document.createElement('script'); s.textContent = code; document.body.appendChild(s); }
+        })
+        .catch(function() { window.location.href = '/login.html'; });
+    })();
+  </script>
 </body>
 </html>

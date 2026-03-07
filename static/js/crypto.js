@@ -296,6 +296,40 @@
     }
 
     // ============================================================================
+    // PIN Verifier
+    // ============================================================================
+
+    /**
+     * Compute a PIN verifier for server-side validation.
+     * verifier = HMAC-SHA256(derived_key, paste_id)
+     * Server stores this at creation; client recomputes it at retrieval.
+     * ZK-safe: server cannot recover PIN without the raw key (URL fragment).
+     * @param {string} derivedKeyBase64url - PIN-derived key as base64url string
+     * @param {string} pasteId - Paste ID used as HMAC message
+     * @returns {Promise<string>} Base64-encoded HMAC (32 bytes)
+     */
+    async function computePinVerifier(derivedKeyBase64url, pasteId) {
+        const keyBytes = base64urlDecode(derivedKeyBase64url);
+        try {
+            const hmacKey = await crypto.subtle.importKey(
+                'raw',
+                keyBytes,
+                { name: 'HMAC', hash: 'SHA-256' },
+                false,
+                ['sign']
+            );
+            const sig = await crypto.subtle.sign(
+                'HMAC',
+                hmacKey,
+                textEncode(pasteId)
+            );
+            return base64Encode(new Uint8Array(sig));
+        } finally {
+            keyBytes.fill(0);
+        }
+    }
+
+    // ============================================================================
     // Export Public API
     // ============================================================================
 
@@ -304,6 +338,9 @@
         generateId,
         generateKey,
         deriveKeyWithPin,
+
+        // PIN verification
+        computePinVerifier,
 
         // Encryption/Decryption
         encrypt,

@@ -54,7 +54,7 @@
       </div>
       <div class="panel-body">
         <p class="text-muted">
-          Adding a PIN provides a second layer of protection. The encryption key is derived using <code>Argon2id</code> from both the random key and your PIN. Even if someone intercepts the URL, they cannot decrypt the content without the PIN.
+          Adding a PIN provides a second layer of protection. The encryption key is derived using <code>Argon2id</code> from both the random key and your PIN. Even if someone intercepts the URL, they cannot decrypt the content without the PIN. The server validates PIN attempts using a zero-knowledge <code>HMAC-SHA256</code> verifier &mdash; it can confirm you know the correct PIN without ever learning the PIN or the encryption key.
         </p>
       </div>
     </div>

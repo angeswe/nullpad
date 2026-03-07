@@ -161,14 +161,21 @@
     }
   }
 
-  async function fetchAttempt() {
-    const response = await fetch(`/api/paste/${pasteId}`, { method: 'POST' });
+  async function fetchAttempt(pinVerifier) {
+    const response = await fetch(`/api/paste/${pasteId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pin_verifier: pinVerifier })
+    });
 
     if (!response.ok) {
       if (response.status === 429) {
         const retryAfter = response.headers.get('retry-after');
         const waitMsg = retryAfter ? `Wait ${retryAfter}s` : 'Please wait';
         throw new Error(`Too many attempts. ${waitMsg} before trying again.`);
+      }
+      if (response.status === 403) {
+        throw new Error('Invalid PIN');
       }
       let msg;
       try {
@@ -435,11 +442,21 @@
     }
 
     try {
+      // Derive key with PIN first (needed for both verifier and decryption)
+      const derived = await NullpadCrypto.deriveKeyWithPin(encryptionKey, pin, pinSalt);
+      const derivedKey = derived.key;
+
       // Fetch content from server if PIN-gated and not yet fetched
       if (useAttemptEndpoint && !contentFetched) {
+        // Compute PIN verifier for server-side validation
+        const pinVerifier = await NullpadCrypto.computePinVerifier(derivedKey, pasteId);
         try {
-          await fetchAttempt();
+          await fetchAttempt(pinVerifier);
         } catch (fetchErr) {
+          // 403 = wrong PIN, count as attempt
+          if (fetchErr.message === 'Invalid PIN') {
+            throw fetchErr;
+          }
           // Server-side error (429, 404, etc.) — show directly, don't count as PIN attempt
           let errEl = pinPrompt.querySelector('.pin-error');
           if (!errEl) {

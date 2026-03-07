@@ -15,7 +15,7 @@ A privacy-first pastebin where all encryption happens in your browser. The serve
 
 - **Client-side encryption**: Browser encrypts content with AES-256-GCM before upload
 - **Key in URL fragment**: Decryption key lives in the URL hash (`#key`), never sent to server
-- **Optional PIN protection**: Add a second factor via Argon2id key derivation
+- **Optional PIN protection**: Add a second factor via Argon2id key derivation, with server-side verification (HMAC-SHA256 verifier)
 - **Passwordless auth**: Ed25519 challenge-response authentication — no passwords stored
 - **Auto-expiration**: Everything has a TTL — pastes, sessions, invites all expire automatically
 - **Burn after reading**: Atomic read-and-delete for one-time secrets
@@ -44,6 +44,10 @@ docker compose up -d
 
 # 5. Visit http://localhost:3015
 # Log in at /login.html with your alias + secret
+
+# IMPORTANT: For production, put nullpad behind a TLS reverse proxy
+# (nginx, Caddy, etc). Without TLS, session tokens are sent in
+# cleartext and crypto.subtle is unavailable in browsers.
 ```
 
 ## Development Setup
@@ -107,6 +111,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 **Transport & Headers**
 
+- **TLS required for production** — nullpad serves HTTP only; deploy behind a TLS-terminating reverse proxy (nginx, Caddy, Traefik). Without TLS: session tokens are transmitted in cleartext, HSTS headers have no effect, and `crypto.subtle` is unavailable in browsers (non-secure context).
 - Strict CSP: `default-src 'self'`
 - SRI hashes on all script tags
 - HSTS, no-referrer policy
