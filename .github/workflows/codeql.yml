@@ -57,11 +57,9 @@ jobs:
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
         with:
           script: |
-            // Known false positive: rust/path-injection in blob.rs
-            // Our code uses sanitize_blob_id (allows only [A-Za-z0-9_-]) plus
-            // strip_prefix verification, making path traversal impossible.
             const knownFalsePositives = [
-              { ruleId: 'rust/path-injection', pathPattern: /^src\/storage\/blob\.rs$/ }
+              { ruleId: 'rust/path-injection', pathPattern: /^src\/storage\/blob\.rs$/, comment: 'sanitize_blob_id validates [A-Za-z0-9_-] only, canonicalize_storage_root + strip_prefix verification' },
+              { ruleId: 'rust/hard-coded-cryptographic-value', pathPattern: /^tests\//, comment: 'Test-only dummy keys with no security impact' }
             ];
 
             // Fetch all non-dismissed alerts (includes state: null for pending PR alerts)
@@ -85,7 +83,7 @@ jobs:
                     alert_number: alert.number,
                     state: 'dismissed',
                     dismissed_reason: 'false positive',
-                    dismissed_comment: 'Auto-dismissed: sanitize_blob_id validates [A-Za-z0-9_-] only, canonicalize_storage_root + strip_prefix verification'
+                    dismissed_comment: `Auto-dismissed: ${fp.comment}`
                   });
                 }
               }
