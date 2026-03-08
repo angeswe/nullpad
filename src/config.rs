@@ -488,10 +488,17 @@ mod tests {
         let _guard = lock_test();
         clear_test_env();
 
-        // Set required var + override any .env defaults to ensure predictable values
+        // Set required vars + override any .env values to ensure predictable defaults.
+        // dotenvy::dotenv() won't override existing env vars, so pre-setting them
+        // prevents .env from leaking non-default values into the test.
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
         env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
         env::set_var("BIND_ADDR", "0.0.0.0:3000");
+        env::set_var("RATE_LIMIT_PASTE_PER_MIN", "10");
+        env::set_var("RATE_LIMIT_AUTH_PER_MIN", "5");
+        env::set_var("RATE_LIMIT_PIN_ATTEMPT", "5");
+        env::set_var("MAX_SESSIONS_PER_USER", "5");
+        env::set_var("MAX_PASTES_PER_USER", "50");
 
         let config = Config::from_env().unwrap();
 

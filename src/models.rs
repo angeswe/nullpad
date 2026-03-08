@@ -28,6 +28,9 @@ pub struct PasteMetadata {
     pub burn_after_reading: bool,
     #[serde(default)]
     pub has_pin: bool,
+    /// HMAC-SHA256(derived_key, paste_id) — server-side PIN verifier (base64).
+    /// Required when has_pin is true.
+    pub pin_verifier: Option<String>,
 }
 
 /// Response after creating a paste.
@@ -80,6 +83,9 @@ pub struct StoredPasteMeta {
     pub owner_id: Option<String>,
     #[serde(default)]
     pub has_pin: bool,
+    /// HMAC-SHA256(derived_key, paste_id) — server-side PIN verifier (base64).
+    #[serde(default)]
+    pub pin_verifier: Option<String>,
 }
 
 /// Full paste data (metadata + content) for API operations.

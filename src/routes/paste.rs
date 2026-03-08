@@ -14,6 +14,14 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use std::net::SocketAddr;
+use subtle::ConstantTimeEq;
+
+/// Request body for PIN-gated paste retrieval.
+#[derive(Debug, serde::Deserialize)]
+pub struct PinAttemptRequest {
+    /// HMAC-SHA256(derived_key, paste_id) — proves knowledge of PIN + key.
+    pub pin_verifier: Option<String>,
+}
 
 /// POST /api/paste — Create paste
 ///
@@ -97,6 +105,25 @@ pub async fn create_paste(
 
     // Validate client-generated paste ID
     super::validate_id(&metadata.paste_id, "paste ID", 12)?;
+
+    // Require pin_verifier when has_pin is true
+    if metadata.has_pin {
+        let verifier = metadata.pin_verifier.as_deref().unwrap_or("");
+        if verifier.is_empty() {
+            return Err(AppError::BadRequest(
+                "pin_verifier required when has_pin is true".to_string(),
+            ));
+        }
+        // Validate it's valid base64 and 32 bytes (HMAC-SHA256 output)
+        let decoded = general_purpose::STANDARD
+            .decode(verifier)
+            .map_err(|_| AppError::BadRequest("Invalid pin_verifier encoding".to_string()))?;
+        if decoded.len() != 32 {
+            return Err(AppError::BadRequest(
+                "pin_verifier must be 32 bytes (HMAC-SHA256)".to_string(),
+            ));
+        }
+    }
 
     // Validate encrypted_metadata: non-empty, valid base64, max 4096 bytes decoded
     if metadata.encrypted_metadata.is_empty() {
@@ -185,6 +212,7 @@ pub async fn create_paste(
             created_at: crate::util::now_secs(),
             owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
             has_pin: metadata.has_pin,
+            pin_verifier: metadata.pin_verifier,
         },
         encrypted_content,
     };
@@ -317,6 +345,7 @@ pub async fn attempt_paste(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    Json(body): Json<PinAttemptRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
 
@@ -344,7 +373,43 @@ pub async fn attempt_paste(
         return Err(AppError::NotFound("Paste not found".to_string()));
     }
 
-    // Fetch full paste (triggers burn if applicable)
+    // Verify PIN: constant-time compare submitted verifier against stored verifier
+    let stored_verifier = meta.pin_verifier.as_deref().unwrap_or("");
+    let submitted_verifier = body.pin_verifier.as_deref().unwrap_or("");
+
+    if stored_verifier.is_empty() {
+        tracing::warn!(
+            action = "pin_verifier_missing",
+            paste_id = %id,
+            "PIN-gated paste has no stored verifier (data integrity issue)"
+        );
+        return Err(AppError::Forbidden("Invalid PIN".to_string()));
+    }
+    if submitted_verifier.is_empty() {
+        return Err(AppError::Forbidden("Invalid PIN".to_string()));
+    }
+
+    let stored_bytes = general_purpose::STANDARD
+        .decode(stored_verifier)
+        .map_err(|_| {
+            tracing::error!(
+                action = "pin_verifier_corrupt",
+                paste_id = %id,
+                "Stored PIN verifier has invalid base64 encoding"
+            );
+            AppError::Internal("PIN verification error".to_string())
+        })?;
+    let submitted_bytes = general_purpose::STANDARD
+        .decode(submitted_verifier)
+        .map_err(|_| AppError::Forbidden("Invalid PIN".to_string()))?;
+
+    if stored_bytes.len() != submitted_bytes.len()
+        || stored_bytes.ct_eq(&submitted_bytes).unwrap_u8() != 1
+    {
+        return Err(AppError::Forbidden("Invalid PIN".to_string()));
+    }
+
+    // PIN verified — fetch full paste (triggers burn if applicable)
     let paste = storage::paste::get_paste_atomic(
         &mut con,
         &state.config.paste_storage_path,
