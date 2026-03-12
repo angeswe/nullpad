@@ -19,7 +19,7 @@
   const rawContent = document.getElementById('raw-content');
   const downloadBtn = document.getElementById('download-btn');
   const copyContentBtn = document.getElementById('copy-content-btn');
-  const toggleMarkdownBtn = document.getElementById('toggle-markdown-btn');
+  const toggleRawBtn = document.getElementById('toggle-raw-btn');
   const burnNotice = document.getElementById('burn-notice');
 
   // State
@@ -326,7 +326,7 @@
     }
 
     showingMarkdown = true;
-    toggleMarkdownBtn.textContent = 'Raw';
+    toggleRawBtn.textContent = 'Raw';
   }
 
   function renderRawView(text) {
@@ -336,7 +336,7 @@
     contentDisplay.classList.remove('markdown-body');
 
     showingMarkdown = false;
-    toggleMarkdownBtn.textContent = 'Markdown';
+    toggleRawBtn.textContent = 'Rendered';
   }
 
   function toggleMarkdown() {
@@ -352,9 +352,8 @@
     if (decrypted.type === 'text') {
       decryptedText = decrypted.content;
 
-      const isFileUpload = metadata.filename && metadata.filename !== 'paste.md';
       if (canRenderMarkdown()) {
-        if (isFileUpload) toggleMarkdownBtn.classList.remove('hidden');
+        toggleRawBtn.classList.remove('hidden');
         renderMarkdownView(decrypted.content);
       } else {
         renderRawView(decrypted.content);
@@ -631,7 +630,7 @@
     pinForm.addEventListener('submit', handlePinSubmit);
     downloadBtn.addEventListener('click', handleDownload);
     copyContentBtn.addEventListener('click', handleCopyContent);
-    toggleMarkdownBtn.addEventListener('click', toggleMarkdown);
+    toggleRawBtn.addEventListener('click', toggleMarkdown);
 
     // Zero sensitive data on page unload
     window.addEventListener('pagehide', clearSensitiveData);
