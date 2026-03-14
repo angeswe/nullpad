@@ -519,10 +519,7 @@
   }
 
   function handleCopyContent() {
-    // Copy visible content to clipboard
-    const textToCopy = rawContent.classList.contains('hidden')
-      ? contentDisplay.textContent
-      : rawContent.textContent;
+    const textToCopy = decryptedText;
 
     navigator.clipboard.writeText(textToCopy).then(() => {
       clipboardDirty = true;
