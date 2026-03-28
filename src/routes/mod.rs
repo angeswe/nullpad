@@ -179,13 +179,15 @@ async fn serve_protected_js(path: &str) -> Result<impl IntoResponse, AppError> {
 
 /// Read a static file, mapping I/O errors to appropriate HTTP errors.
 async fn read_static_file(path: &str) -> Result<String, AppError> {
-    tokio::fs::read_to_string(path).await.map_err(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => AppError::NotFound("Not found".to_string()),
-        _ => {
-            tracing::error!(path = %path, error = %e, "Failed to read protected static file");
-            AppError::Internal("Failed to read page".to_string())
-        }
-    })
+    tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AppError::NotFound("Not found".to_string()),
+            _ => {
+                tracing::error!(path = %path, error = %e, "Failed to read protected static file");
+                AppError::Internal("Failed to read page".to_string())
+            }
+        })
 }
 
 /// Serve a protected static HTML file with correct Content-Type.
