@@ -53,8 +53,9 @@ WORKDIR /app
 # Copy binary from builder (cross-compiled)
 COPY --from=builder /build/target/aarch64-unknown-linux-gnu/release/nullpad /app/nullpad
 
-# Copy static files and SRI update script
+# Copy static files, protected pages, and SRI update script
 COPY static /app/static
+COPY protected /app/protected
 COPY tools/update-sri.sh /app/tools/update-sri.sh
 
 # Regenerate SRI hashes at build time, then remove openssl
@@ -68,13 +69,13 @@ RUN apt-get update && \
 
 # Inject build version into HTML footers
 ARG BUILD_VERSION=dev
-RUN sed -i "s/__BUILD_VERSION__/${BUILD_VERSION}/g" /app/static/*.html
+RUN find /app/static /app/protected -name '*.html' -exec sed -i "s/__BUILD_VERSION__/${BUILD_VERSION}/g" {} +
 
 # Create paste storage directory
 RUN mkdir -p /data/pastes
 
-# Ensure static files are world-readable and change ownership
-RUN chmod -R a+rX /app/static && chown -R nullpad:nullpad /app /data
+# Ensure static and protected files are world-readable and change ownership
+RUN chmod -R a+rX /app/static /app/protected && chown -R nullpad:nullpad /app /data
 
 # Switch to non-root user
 USER nullpad

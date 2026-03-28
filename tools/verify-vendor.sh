@@ -97,7 +97,11 @@ done
 echo ""
 echo "=== SRI integrity attributes ==="
 
-for html in "$STATIC_DIR"/*.html; do
+HTML_CHECK_FILES="$STATIC_DIR"/*.html
+if [ -d "protected" ]; then
+  HTML_CHECK_FILES="$HTML_CHECK_FILES protected/*.html"
+fi
+for html in $HTML_CHECK_FILES; do
   html_name=$(basename "$html")
 
   # Extract script tags with src="/js/..."

@@ -18,6 +18,37 @@ use axum::{
 use base64::{engine::general_purpose, Engine as _};
 use std::net::SocketAddr;
 
+/// Check if the incoming request arrived over HTTPS.
+///
+/// Only trusts `X-Forwarded-Proto` / `Forwarded` headers when `trusted_proxy_count > 0`
+/// (i.e. we know a reverse proxy is setting them). Without a trusted proxy, these headers
+/// are client-spoofable and must be ignored.
+///
+/// Returns `false` for direct HTTP connections (no trusted proxy).
+fn is_https(headers: &HeaderMap, trusted_proxy_count: usize) -> bool {
+    if trusted_proxy_count == 0 {
+        return false;
+    }
+    if let Some(proto) = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+    {
+        return proto.eq_ignore_ascii_case("https");
+    }
+    if let Some(fwd) = headers.get("forwarded").and_then(|v| v.to_str().ok()) {
+        // RFC 7239: comma separates proxy entries, semicolon separates params within an entry.
+        // Only check the first (client-facing) entry.
+        if let Some(first_entry) = fwd.split(',').next() {
+            return first_entry.split(';').any(|param| {
+                let trimmed = param.trim();
+                trimmed.eq_ignore_ascii_case("proto=https")
+                    || trimmed.eq_ignore_ascii_case("proto=\"https\"")
+            });
+        }
+    }
+    false
+}
+
 /// POST /api/auth/challenge — Request challenge nonce
 pub async fn request_challenge(
     State(state): State<AppState>,
@@ -139,13 +170,17 @@ pub async fn verify_challenge(
 
     tracing::info!(action = "auth_success", user_id = %user.id, role = %user.role, "User authenticated");
 
-    // Set an HttpOnly role cookie for server-side page gating (/admin.html, /trusted.html).
-    // This is not a security token — real auth is still the Bearer token on all API calls.
-    // The cookie only prevents unauthenticated scraping of protected HTML pages.
+    // Set HttpOnly session cookie for browser navigation to protected pages.
+    // The same token is returned in JSON for JS to store in sessionStorage (API calls).
     let role_str = user.role.to_string();
+    let secure = if is_https(&headers, state.config.trusted_proxy_count) {
+        "; Secure"
+    } else {
+        ""
+    };
     let cookie = format!(
-        "np_role={}; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age={}",
-        role_str, state.config.session_ttl_secs
+        "np_session={}; HttpOnly; SameSite=Strict{}; Path=/; Max-Age={}",
+        token, secure, state.config.session_ttl_secs
     );
 
     Ok((
@@ -250,6 +285,7 @@ pub async fn register(
 pub async fn logout(
     session: AuthSession,
     State(state): State<AppState>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let mut con = state.redis.clone();
 
@@ -257,9 +293,16 @@ pub async fn logout(
 
     tracing::info!(action = "logout", user_id = %session.user_id, "User logged out");
 
-    // Clear the role cookie on logout.
-    let clear_cookie =
-        "np_role=; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+    // Clear the session cookie on logout.
+    let secure = if is_https(&headers, state.config.trusted_proxy_count) {
+        "; Secure"
+    } else {
+        ""
+    };
+    let clear_cookie = format!(
+        "np_session=; HttpOnly; SameSite=Strict{}; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
+        secure
+    );
 
     Ok((
         StatusCode::NO_CONTENT,

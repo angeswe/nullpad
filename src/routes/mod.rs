@@ -20,19 +20,6 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::net::{IpAddr, SocketAddr};
 
-/// Extract a named cookie value from the `Cookie` request header.
-fn get_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    let cookie_header = headers.get("cookie")?.to_str().ok()?;
-    for pair in cookie_header.split(';') {
-        if let Some((key, value)) = pair.trim().split_once('=') {
-            if key == name {
-                return Some(value);
-            }
-        }
-    }
-    None
-}
-
 /// Check a rate limit key and return a RateLimited error if exceeded.
 ///
 /// Wraps `check_rate_limit` with standard error mapping. The optional `warn_context`
@@ -202,39 +189,29 @@ async fn serve_protected_html(path: &str) -> Result<impl IntoResponse, AppError>
 
 /// GET /js/admin.js — Admin JS (requires admin auth)
 async fn protected_admin_js(AdminSession(_): AdminSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_js("static/js/admin.js").await
+    serve_protected_js("protected/js/admin.js").await
 }
 
 /// GET /js/trusted.js — Trusted JS (requires auth)
 async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_js("static/js/trusted.js").await
+    serve_protected_js("protected/js/trusted.js").await
 }
 
-/// GET /admin.html — Admin dashboard (requires np_role=admin cookie)
+/// GET /admin.html — Admin dashboard (requires valid admin session)
 ///
-/// Browsers can't send Authorization headers on direct navigation, so page access
-/// is gated by the `np_role` HttpOnly cookie set at login. This prevents unauthenticated
-/// callers from scraping admin UI structure and API endpoint names.
-/// The cookie is non-sensitive: real auth for all API calls still requires a valid Bearer token.
-async fn protected_admin_html(headers: HeaderMap) -> Result<impl IntoResponse, AppError> {
-    match get_cookie(&headers, "np_role") {
-        Some("admin") => serve_protected_html("static/admin.html").await,
-        _ => Err(AppError::Unauthorized(
-            "Authentication required".to_string(),
-        )),
-    }
+/// Validates the `np_session` HttpOnly cookie against Redis — same session
+/// check as Bearer-authenticated API calls.
+async fn protected_admin_html(
+    AdminSession(_): AdminSession,
+) -> Result<impl IntoResponse, AppError> {
+    serve_protected_html("protected/admin.html").await
 }
 
-/// GET /trusted.html — Trusted user dashboard (requires np_role cookie)
+/// GET /trusted.html — Trusted user dashboard (requires valid session)
 ///
 /// Any authenticated user (admin or trusted) may access this page.
-async fn protected_trusted_html(headers: HeaderMap) -> Result<impl IntoResponse, AppError> {
-    match get_cookie(&headers, "np_role") {
-        Some("admin") | Some("trusted") => serve_protected_html("static/trusted.html").await,
-        _ => Err(AppError::Unauthorized(
-            "Authentication required".to_string(),
-        )),
-    }
+async fn protected_trusted_html(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
+    serve_protected_html("protected/trusted.html").await
 }
 
 /// Build the API router with all endpoints.

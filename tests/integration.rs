@@ -123,6 +123,11 @@ async fn main() {
         test_pin_gated_burn_consumed_on_attempt,
         test_non_pin_attempt_returns_404,
         test_non_pin_get_unchanged,
+        test_trusted_user_cannot_create_forever_paste,
+        test_protected_html_unauthenticated_returns_401,
+        test_protected_html_with_session_cookie,
+        test_protected_html_not_served_by_static_fallback,
+        test_verify_sets_np_session_cookie,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -1754,6 +1759,45 @@ async fn test_forever_paste_requires_auth() {
     assert_eq!(resp.status(), 200);
 }
 
+/// Trusted users cannot create forever pastes (TTL=0) — admin only.
+/// Prevents Redis memory exhaustion from unlimited non-expiring keys.
+async fn test_trusted_user_cannot_create_forever_paste() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let (_user_key, _user_alias, user_token) =
+        create_trusted_user(&client, &base_url, &admin_token).await;
+
+    // Trusted user trying to create forever paste should be rejected
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"forever data",
+        false,
+        0,
+        Some(&user_token),
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 403);
+
+    // Trusted user can still create normal TTL pastes
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"normal data",
+        false,
+        3600,
+        Some(&user_token),
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+}
+
 // ============================================================================
 // Trusted User Access Control Tests
 // ============================================================================
@@ -2291,4 +2335,153 @@ async fn test_non_pin_get_unchanged() {
     assert!(body["encrypted_content"].is_string());
     assert!(body["created_at"].is_number());
     assert!(body.get("needs_pin").is_none());
+}
+
+/// Unauthenticated requests to /admin.html and /trusted.html must return 401.
+async fn test_protected_html_unauthenticated_returns_401() {
+    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = client
+        .get(format!("{}/trusted.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+/// Admin with np_role=admin cookie can access /admin.html.
+/// Trusted user with np_role=trusted cookie can access /trusted.html.
+async fn test_protected_html_with_session_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Login to get a real session token
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Admin can access /admin.html via np_session cookie
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .header("cookie", format!("np_session={}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Admin Dashboard"));
+    // Verify no inline scripts (CSP compliance)
+    assert!(
+        !body.contains("sessionStorage.getItem('session_token')"),
+        "admin.html should not contain inline script with old sessionStorage key"
+    );
+
+    // Admin can also access /trusted.html
+    let resp = client
+        .get(format!("{}/trusted.html", base_url))
+        .header("cookie", format!("np_session={}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Trusted Upload"));
+
+    // Forged np_role cookie (old attack vector) must NOT grant access
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .header("cookie", "np_role=admin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+/// Static fallback (ServeDir) must NOT serve admin.html or trusted.html.
+/// These files were moved out of static/ to prevent bypassing auth gates.
+async fn test_protected_html_not_served_by_static_fallback() {
+    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Without a valid session cookie, these should return 401 (not 200 from ServeDir)
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Also verify the files aren't accessible via any other path through ServeDir
+    let resp = client
+        .get(format!("{}/protected/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    // Should be 404 (protected/ is not in static/)
+    assert_eq!(resp.status(), 404);
+}
+
+/// Login verify endpoint sets np_session cookie with correct attributes.
+async fn test_verify_sets_np_session_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Request challenge
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": admin_alias}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let nonce_b64 = body["nonce"].as_str().unwrap();
+
+    // Sign nonce
+    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
+    let signature = admin_key.sign(&nonce_bytes);
+    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+    // Verify
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": admin_alias, "signature": sig_b64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Check Set-Cookie header contains session token, not role
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("verify response must set np_session cookie")
+        .to_str()
+        .unwrap();
+    assert!(
+        cookie.starts_with("np_session="),
+        "cookie should set np_session"
+    );
+    // Token is 44 chars of base64
+    let token_value = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("np_session=")
+        .unwrap();
+    assert_eq!(token_value.len(), 44, "session token should be 44 chars");
+    assert!(cookie.contains("HttpOnly"), "cookie should be HttpOnly");
+    assert!(
+        cookie.contains("SameSite=Strict"),
+        "cookie should be SameSite=Strict"
+    );
 }

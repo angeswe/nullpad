@@ -157,19 +157,14 @@ pub async fn create_paste(
     }
 
     // Use config default if client omitted ttl_secs.
-    // ttl_secs=0 means "forever" (no expiration) — trusted/admin users only.
+    // ttl_secs=0 means "forever" (no expiration) — admin only to prevent Redis memory exhaustion.
     let requested_ttl = metadata.ttl_secs.unwrap_or(state.config.default_ttl_secs);
     let ttl_secs = if requested_ttl == 0 {
         match &auth_session {
-            Some(s)
-                if s.role == crate::models::Role::Trusted
-                    || s.role == crate::models::Role::Admin =>
-            {
-                0
-            }
+            Some(s) if s.role == crate::models::Role::Admin => 0,
             _ => {
                 return Err(AppError::Forbidden(
-                    "Forever pastes require a trusted account".to_string(),
+                    "Forever pastes require an admin account".to_string(),
                 ))
             }
         }
