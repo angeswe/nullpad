@@ -3,50 +3,144 @@
 //! Tests use testcontainers to spin up a throwaway Redis instance automatically.
 //! Only a running Docker daemon is required — no external Redis needed.
 //!
-//! Tests run sequentially (--test-threads=1) because they share a Redis instance.
-//! Each test flushes its database before starting.
+//! Uses a custom harness (`harness = false`) so that the Redis container is owned
+//! by `main()` and explicitly removed after all tests complete. This prevents
+//! container leaks — `static` containers never drop, so previous versions leaked
+//! one Docker container per test process.
 
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
+#[allow(unused_imports)]
+use futures::FutureExt;
 use hmac::{Hmac, Mac};
 use nullpad::{
     auth::middleware::AppState, config::Config, middleware::security_headers, routes, storage,
 };
 use reqwest::multipart;
 use sha2::Sha256;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
-use testcontainers_modules::testcontainers::{ContainerAsync, ImageExt};
-use tokio::sync::OnceCell;
+use testcontainers_modules::testcontainers::ImageExt;
 use tower_http::services::ServeDir;
 
-struct TestRedis {
-    _container: ContainerAsync<Redis>,
-    url: String,
+/// Redis URL set once in `main()`, read by all test helpers.
+static REDIS_URL: OnceLock<String> = OnceLock::new();
+
+fn get_redis_url() -> &'static str {
+    REDIS_URL
+        .get()
+        .expect("REDIS_URL not initialized — tests must run via main()")
 }
 
-static TEST_REDIS: OnceCell<TestRedis> = OnceCell::const_new();
+/// Run a named async test function, printing pass/fail like the default harness.
+async fn run_test<F, Fut>(name: &str, f: F) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
+    use std::panic::AssertUnwindSafe;
+    let result = futures::FutureExt::catch_unwind(AssertUnwindSafe(f())).await;
+    match result {
+        Ok(()) => {
+            println!("test {} ... ok", name);
+            true
+        }
+        Err(_) => {
+            println!("test {} ... FAILED", name);
+            false
+        }
+    }
+}
 
-async fn get_redis_url() -> &'static str {
-    let test_redis = TEST_REDIS
-        .get_or_init(|| async {
-            let container = Redis::default()
-                .with_tag("7-alpine")
-                .with_label("nullpad-test", "integration")
-                .start()
-                .await
-                .unwrap();
-            let host = container.get_host().await.unwrap();
-            let port = container.get_host_port_ipv4(6379).await.unwrap();
-            let url = format!("redis://{}:{}", host, port);
-            TestRedis {
-                _container: container,
-                url,
+/// Invoke `run_test` for each listed test function.
+macro_rules! run_tests {
+    ($($test_fn:ident),* $(,)?) => {{
+        let mut passed = 0u32;
+        let mut failed = 0u32;
+        $(
+            if run_test(stringify!($test_fn), || $test_fn()).await {
+                passed += 1;
+            } else {
+                failed += 1;
             }
-        })
-        .await;
-    &test_redis.url
+        )*
+        (passed, failed)
+    }};
+}
+
+#[tokio::main]
+async fn main() {
+    // Start Redis container — owned by main(), removed at end.
+    let container = Redis::default()
+        .with_tag("7-alpine")
+        .start()
+        .await
+        .expect("Failed to start Redis container");
+    let host = container.get_host().await.unwrap();
+    let port = container.get_host_port_ipv4(6379).await.unwrap();
+    REDIS_URL
+        .set(format!("redis://{}:{}", host, port))
+        .expect("REDIS_URL already set");
+
+    let (passed, failed) = run_tests![
+        test_create_and_get_paste,
+        test_burn_after_reading,
+        test_paste_not_found,
+        test_public_paste_type_restriction,
+        test_duplicate_paste_id_returns_409,
+        test_auth_challenge_response_flow,
+        test_auth_challenge_unknown_user,
+        test_auth_verify_invalid_signature,
+        test_auth_full_login_flow,
+        test_register_with_invite,
+        test_register_invalid_invite,
+        test_verify_alias_validation,
+        test_challenge_alias_validation,
+        test_register_alias_validation,
+        test_register_invite_not_consumed_on_validation_failure,
+        test_verify_normalized_error_messages,
+        test_rate_limiting_returns_429,
+        test_admin_endpoints_require_auth,
+        test_admin_create_and_list_invites,
+        test_admin_revoke_invite,
+        test_admin_delete_paste,
+        test_admin_revoke_user,
+        test_admin_cannot_delete_self,
+        test_security_headers_on_api,
+        test_activate_user_on_first_upload,
+        test_challenge_nonce_single_use,
+        test_concurrent_burn_after_reading_race,
+        test_max_sessions_per_user,
+        test_forever_paste_requires_auth,
+        test_trusted_user_gets_403_on_admin_endpoints,
+        test_session_invalid_after_logout_on_all_endpoints,
+        test_trusted_user_can_upload_files,
+        test_pin_gated_get_returns_needs_pin,
+        test_pin_gated_attempt_returns_content,
+        test_pin_gated_attempt_wrong_verifier_returns_403,
+        test_pin_gated_attempt_rate_limited,
+        test_pin_gated_burn_consumed_on_attempt,
+        test_non_pin_attempt_returns_404,
+        test_non_pin_get_unchanged,
+    ];
+
+    // Explicitly remove the container (ContainerAsync has no Drop cleanup).
+    container
+        .rm()
+        .await
+        .expect("Failed to remove Redis container");
+
+    println!(
+        "\ntest result: {}. {} passed; {} failed\n",
+        if failed == 0 { "ok" } else { "FAILED" },
+        passed,
+        failed
+    );
+
+    if failed > 0 {
+        std::process::exit(1);
+    }
 }
 
 /// Generate an Ed25519 keypair for testing.
@@ -70,7 +164,7 @@ async fn spawn_test_server_with_auth_limit(
     let (admin_key, admin_pubkey) = test_keypair();
     let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
 
-    let test_redis_url = get_redis_url().await.to_string();
+    let test_redis_url = get_redis_url().to_string();
     let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
     let redis_manager = redis_client
         .get_connection_manager()
@@ -148,7 +242,7 @@ async fn spawn_test_server_with_pin_limit(
     let (admin_key, admin_pubkey) = test_keypair();
     let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
 
-    let test_redis_url = get_redis_url().await.to_string();
+    let test_redis_url = get_redis_url().to_string();
     let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
     let redis_manager = redis_client
         .get_connection_manager()
@@ -270,6 +364,7 @@ fn test_pin_verifier(key: &[u8], paste_id: &str) -> String {
 }
 
 /// `paste_type` should be "text" or "file".
+#[allow(clippy::too_many_arguments)]
 async fn create_paste(
     client: &reqwest::Client,
     base_url: &str,
@@ -332,7 +427,6 @@ async fn create_paste(
 // Paste Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_create_and_get_paste() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -374,7 +468,6 @@ async fn test_create_and_get_paste() {
     assert_eq!(content, b"encrypted data");
 }
 
-#[tokio::test]
 async fn test_burn_after_reading() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -409,7 +502,6 @@ async fn test_burn_after_reading() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
 async fn test_paste_not_found() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -431,7 +523,6 @@ async fn test_paste_not_found() {
     assert_eq!(resp.status(), 400);
 }
 
-#[tokio::test]
 async fn test_public_paste_type_restriction() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -451,7 +542,6 @@ async fn test_public_paste_type_restriction() {
     assert_eq!(resp.status(), 200);
 }
 
-#[tokio::test]
 async fn test_duplicate_paste_id_returns_409() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -521,7 +611,6 @@ async fn test_duplicate_paste_id_returns_409() {
 // Auth Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_auth_challenge_response_flow() {
     let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -539,7 +628,6 @@ async fn test_auth_challenge_response_flow() {
     assert!(body["nonce"].as_str().is_some());
 }
 
-#[tokio::test]
 async fn test_auth_challenge_unknown_user() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -556,7 +644,6 @@ async fn test_auth_challenge_unknown_user() {
     assert!(body["nonce"].is_string());
 }
 
-#[tokio::test]
 async fn test_auth_verify_invalid_signature() {
     let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -581,7 +668,6 @@ async fn test_auth_verify_invalid_signature() {
     assert_eq!(resp.status(), 401);
 }
 
-#[tokio::test]
 async fn test_auth_full_login_flow() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -618,7 +704,6 @@ async fn test_auth_full_login_flow() {
     assert_eq!(resp.status(), 401);
 }
 
-#[tokio::test]
 async fn test_register_with_invite() {
     let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -653,7 +738,6 @@ async fn test_register_with_invite() {
     assert_eq!(resp.status(), 200);
 }
 
-#[tokio::test]
 async fn test_register_invalid_invite() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -692,7 +776,6 @@ async fn test_register_invalid_invite() {
         .contains("Registration failed"));
 }
 
-#[tokio::test]
 async fn test_verify_alias_validation() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -727,7 +810,6 @@ async fn test_verify_alias_validation() {
     assert_eq!(resp.status(), 400);
 }
 
-#[tokio::test]
 async fn test_challenge_alias_validation() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -779,7 +861,6 @@ async fn test_challenge_alias_validation() {
     assert_eq!(resp.status(), 200);
 }
 
-#[tokio::test]
 async fn test_register_alias_validation() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -810,7 +891,6 @@ async fn test_register_alias_validation() {
     assert_eq!(resp.status(), 400);
 }
 
-#[tokio::test]
 async fn test_register_invite_not_consumed_on_validation_failure() {
     use redis::AsyncCommands;
     let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
@@ -950,7 +1030,6 @@ async fn test_register_invite_not_consumed_on_validation_failure() {
     );
 }
 
-#[tokio::test]
 async fn test_verify_normalized_error_messages() {
     let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -987,7 +1066,6 @@ async fn test_verify_normalized_error_messages() {
     assert_eq!(body["error"], "Authentication failed");
 }
 
-#[tokio::test]
 async fn test_rate_limiting_returns_429() {
     use redis::AsyncCommands;
     let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server_with_auth_limit(2).await;
@@ -1032,7 +1110,6 @@ async fn test_rate_limiting_returns_429() {
 // Admin Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_admin_endpoints_require_auth() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1067,7 +1144,6 @@ async fn test_admin_endpoints_require_auth() {
     assert_eq!(resp.status(), 401);
 }
 
-#[tokio::test]
 async fn test_admin_create_and_list_invites() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1101,7 +1177,6 @@ async fn test_admin_create_and_list_invites() {
     assert!(!body.as_array().unwrap().is_empty());
 }
 
-#[tokio::test]
 async fn test_admin_revoke_invite() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1138,7 +1213,6 @@ async fn test_admin_revoke_invite() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
 async fn test_admin_delete_paste() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1172,7 +1246,6 @@ async fn test_admin_delete_paste() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
 async fn test_admin_revoke_user() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1294,7 +1367,6 @@ async fn test_admin_revoke_user() {
     assert!(!has_user, "User should not appear after revocation");
 }
 
-#[tokio::test]
 async fn test_admin_cannot_delete_self() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1317,7 +1389,6 @@ async fn test_admin_cannot_delete_self() {
 // Security Header Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_security_headers_on_api() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1340,7 +1411,6 @@ async fn test_security_headers_on_api() {
 // User Activation Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_activate_user_on_first_upload() {
     let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1473,7 +1543,6 @@ async fn test_activate_user_on_first_upload() {
 // Nonce Replay Prevention Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_challenge_nonce_single_use() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1517,7 +1586,6 @@ async fn test_challenge_nonce_single_use() {
 // Concurrent Burn-After-Reading Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_concurrent_burn_after_reading_race() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::builder()
@@ -1580,7 +1648,6 @@ async fn test_concurrent_burn_after_reading_race() {
 // Max Sessions Per User Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_max_sessions_per_user() {
     use redis::AsyncCommands;
     let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
@@ -1650,7 +1717,6 @@ async fn test_max_sessions_per_user() {
 // Forever Paste Auth Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_forever_paste_requires_auth() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1732,7 +1798,6 @@ async fn create_trusted_user(
     (user_key, user_alias, user_token)
 }
 
-#[tokio::test]
 async fn test_trusted_user_gets_403_on_admin_endpoints() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1801,7 +1866,6 @@ async fn test_trusted_user_gets_403_on_admin_endpoints() {
     assert_eq!(resp.status(), 403);
 }
 
-#[tokio::test]
 async fn test_session_invalid_after_logout_on_all_endpoints() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1893,7 +1957,6 @@ async fn test_session_invalid_after_logout_on_all_endpoints() {
     assert_eq!(resp.status(), 401);
 }
 
-#[tokio::test]
 async fn test_trusted_user_can_upload_files() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1938,7 +2001,6 @@ async fn test_trusted_user_can_upload_files() {
 // PIN Gating Tests
 // ============================================================================
 
-#[tokio::test]
 async fn test_pin_gated_get_returns_needs_pin() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -1973,7 +2035,6 @@ async fn test_pin_gated_get_returns_needs_pin() {
     assert!(body.get("burn_after_reading").is_some());
 }
 
-#[tokio::test]
 async fn test_pin_gated_attempt_returns_content() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -2011,7 +2072,6 @@ async fn test_pin_gated_attempt_returns_content() {
     assert!(body.get("needs_pin").is_none());
 }
 
-#[tokio::test]
 async fn test_pin_gated_attempt_wrong_verifier_returns_403() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -2066,7 +2126,6 @@ async fn test_pin_gated_attempt_wrong_verifier_returns_403() {
     );
 }
 
-#[tokio::test]
 async fn test_pin_gated_attempt_rate_limited() {
     // Use a server with very low PIN attempt limit
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server_with_pin_limit(2).await;
@@ -2113,7 +2172,6 @@ async fn test_pin_gated_attempt_rate_limited() {
     assert_eq!(resp.status(), 429);
 }
 
-#[tokio::test]
 async fn test_pin_gated_burn_consumed_on_attempt() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -2168,7 +2226,6 @@ async fn test_pin_gated_burn_consumed_on_attempt() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
 async fn test_non_pin_attempt_returns_404() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -2203,7 +2260,6 @@ async fn test_non_pin_attempt_returns_404() {
     assert_eq!(resp.status(), 404);
 }
 
-#[tokio::test]
 async fn test_non_pin_get_unchanged() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
