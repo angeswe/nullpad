@@ -173,7 +173,7 @@ pub struct StoredUser {
     pub id: String,
     pub alias: String,
     pub pubkey: String, // base64
-    pub role: String,
+    pub role: Role,
     pub created_at: u64,
 }
 
@@ -195,7 +195,7 @@ pub struct StoredChallenge {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
     pub user_id: String,
-    pub role: String,
+    pub role: Role,
     pub created_at: u64,
 }
 

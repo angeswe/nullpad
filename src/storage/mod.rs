@@ -11,7 +11,25 @@ pub mod paste;
 pub mod session;
 pub mod user;
 
-use redis::AsyncCommands;
+use redis::{AsyncCommands, ErrorKind, RedisError};
+
+/// Convert a serde_json serialization error into a RedisError.
+pub(crate) fn json_serialize_err(e: serde_json::Error) -> RedisError {
+    RedisError::from((
+        ErrorKind::UnexpectedReturnType,
+        "JSON serialize error",
+        e.to_string(),
+    ))
+}
+
+/// Convert a serde_json deserialization error into a RedisError.
+pub(crate) fn json_deserialize_err(e: serde_json::Error) -> RedisError {
+    RedisError::from((
+        ErrorKind::UnexpectedReturnType,
+        "JSON deserialize error",
+        e.to_string(),
+    ))
+}
 
 /// Maximum number of keys returned by scan_keys to prevent unbounded memory allocation.
 const SCAN_MAX_KEYS: usize = 10_000;

@@ -872,21 +872,37 @@ async fn test_register_invite_not_consumed_on_validation_failure() {
     );
 
     // Attempt 3: Valid pubkey but alias taken -> 400
-    // First create a user with the alias we want to use
+    // First create a user with the alias we want to use via the atomic invite flow
     let (_key1, pubkey1) = test_keypair();
-    let user = nullpad::models::StoredUser {
-        id: nanoid::nanoid!(12),
-        alias: "taken_alias".to_string(),
-        pubkey: pubkey1,
-        role: "trusted".to_string(),
+    let blocking_token = nanoid::nanoid!(16);
+    let blocking_invite = nullpad::models::StoredInvite {
+        token: blocking_token.clone(),
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
     };
-    nullpad::storage::user::store_user(&mut con, &user, 86400)
+    nullpad::storage::user::store_invite(&mut con, &blocking_invite, 3600)
         .await
         .unwrap();
+    let blocking_user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: "taken_alias".to_string(),
+        pubkey: pubkey1,
+        role: nullpad::models::Role::Trusted,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    nullpad::storage::user::consume_invite_and_create_user(
+        &mut con,
+        &blocking_token,
+        &blocking_user,
+        86400,
+    )
+    .await
+    .unwrap();
 
     // Now try to register with the taken alias
     let (_key2, pubkey2) = test_keypair();

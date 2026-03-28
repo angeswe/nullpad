@@ -10,93 +10,9 @@
 //! This module uses the `zeroize` crate to securely clear sensitive data from memory
 //! after use, specifically for invite tokens and user data containing public keys.
 
-use crate::models::{StoredInvite, StoredUser};
+use crate::models::{Role, StoredInvite, StoredUser};
 use redis::AsyncCommands;
 use zeroize::Zeroizing;
-
-/// Store a user in Redis with TTL.
-///
-/// Also creates an alias lookup key with the same TTL.
-pub async fn store_user<C>(
-    con: &mut C,
-    user: &StoredUser,
-    ttl_secs: u64,
-) -> Result<(), redis::RedisError>
-where
-    C: AsyncCommands,
-{
-    let user_key = format!("user:{}", user.id);
-    let alias_key = format!("alias:{}", user.alias);
-
-    let json = serde_json::to_string(user).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
-
-    // Store user with TTL
-    con.set_ex::<_, _, ()>(&user_key, json, ttl_secs).await?;
-
-    // Store alias lookup with same TTL
-    con.set_ex::<_, _, ()>(&alias_key, &user.id, ttl_secs)
-        .await?;
-
-    Ok(())
-}
-
-/// Atomically store a user if the alias is available.
-///
-/// Returns Ok(true) if the user was created, Ok(false) if the alias was taken.
-/// Uses a Lua script to prevent TOCTOU race conditions during registration.
-pub async fn store_user_if_alias_available<C>(
-    con: &mut C,
-    user: &StoredUser,
-    ttl_secs: u64,
-) -> Result<bool, redis::RedisError>
-where
-    C: AsyncCommands,
-{
-    let user_key = format!("user:{}", user.id);
-    let alias_key = format!("alias:{}", user.alias);
-
-    let json = serde_json::to_string(user).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
-
-    // Atomic check-and-create: check if alias exists, then create user + alias
-    // KEYS[1] = alias:{alias}
-    // KEYS[2] = user:{id}
-    // ARGV[1] = user JSON
-    // ARGV[2] = user ID (for alias lookup value)
-    // ARGV[3] = TTL in seconds
-    let script = redis::Script::new(
-        r#"
-        if redis.call('EXISTS', KEYS[1]) == 1 then
-            return 0
-        end
-        redis.call('SETEX', KEYS[2], ARGV[3], ARGV[1])
-        redis.call('SETEX', KEYS[1], ARGV[3], ARGV[2])
-        return 1
-        "#,
-    );
-
-    let result: i32 = script
-        .key(&alias_key)
-        .key(&user_key)
-        .arg(&json)
-        .arg(&user.id)
-        .arg(ttl_secs as i64)
-        .invoke_async(con)
-        .await?;
-
-    Ok(result == 1)
-}
 
 /// Get a user by ID.
 ///
@@ -112,13 +28,8 @@ where
         Some(data) => {
             // Wrap the JSON string in Zeroizing to clear it after use
             let zeroizing_data = Zeroizing::new(data);
-            let user = serde_json::from_str(&zeroizing_data).map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::UnexpectedReturnType,
-                    "JSON deserialize",
-                    e.to_string(),
-                ))
-            })?;
+            let user =
+                serde_json::from_str(&zeroizing_data).map_err(super::json_deserialize_err)?;
             // zeroizing_data is automatically zeroized when dropped here
             Ok(Some(user))
         }
@@ -201,20 +112,14 @@ where
         id: "admin".to_string(),
         alias: alias.to_string(),
         pubkey: pubkey.to_string(),
-        role: "admin".to_string(),
+        role: Role::Admin,
         created_at: crate::util::now_secs(),
     };
 
     let user_key = "user:admin";
     let new_alias_key = format!("alias:{}", alias);
 
-    let json = serde_json::to_string(&user).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
+    let json = serde_json::to_string(&user).map_err(super::json_serialize_err)?;
 
     // Atomic upsert: read old admin, delete stale alias, write new admin + alias
     // Alias key prefix passed as ARGV[3] to avoid hardcoding in Lua
@@ -241,49 +146,6 @@ where
         .key(&new_alias_key)
         .arg(&json)
         .arg(alias)
-        .arg("alias:")
-        .invoke_async::<i32>(con)
-        .await?;
-
-    Ok(())
-}
-
-/// Update a user's TTL (both user key and alias key) atomically.
-///
-/// Uses a Lua script to prevent the user key and alias key from having
-/// different TTLs due to a non-atomic two-step update.
-pub async fn update_user_ttl<C>(
-    con: &mut C,
-    id: &str,
-    ttl_secs: u64,
-) -> Result<(), redis::RedisError>
-where
-    C: AsyncCommands,
-{
-    let user_key = format!("user:{}", id);
-
-    // Lua script: read user JSON to get alias, then EXPIRE both keys atomically.
-    // KEYS[1] = user:{id}
-    // ARGV[1] = TTL in seconds
-    // ARGV[2] = alias key prefix ("alias:")
-    let script = redis::Script::new(
-        r#"
-        local user_json = redis.call('GET', KEYS[1])
-        if not user_json then
-            return 0
-        end
-        redis.call('EXPIRE', KEYS[1], ARGV[1])
-        local user = cjson.decode(user_json)
-        if type(user.alias) == 'string' then
-            redis.call('EXPIRE', ARGV[2] .. user.alias, ARGV[1])
-        end
-        return 1
-        "#,
-    );
-
-    script
-        .key(&user_key)
-        .arg(ttl_secs as i64)
         .arg("alias:")
         .invoke_async::<i32>(con)
         .await?;
@@ -351,13 +213,7 @@ where
     let alias_key = format!("alias:{}", user.alias);
     let user_key = format!("user:{}", user.id);
 
-    let user_json = serde_json::to_string(user).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
+    let user_json = serde_json::to_string(user).map_err(super::json_serialize_err)?;
 
     // Lua script: atomically check alias, check invite, consume invite, create user.
     // Returns:
@@ -420,61 +276,10 @@ where
     C: AsyncCommands,
 {
     let key = format!("invite:{}", invite.token);
-    let json = serde_json::to_string(invite).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
+    let json = serde_json::to_string(invite).map_err(super::json_serialize_err)?;
 
     con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
     Ok(())
-}
-
-/// Get and delete an invite atomically (single-use token).
-///
-/// Uses a Lua script to prevent race conditions where two concurrent
-/// registration requests could both consume the same invite token.
-/// The invite JSON is zeroized after deserialization.
-pub async fn get_and_delete_invite<C>(
-    con: &mut C,
-    token: &str,
-) -> Result<Option<StoredInvite>, redis::RedisError>
-where
-    C: AsyncCommands,
-{
-    let key = format!("invite:{}", token);
-
-    // Lua script for atomic GET + DEL
-    let script = redis::Script::new(
-        r"
-        local val = redis.call('GET', KEYS[1])
-        if val then
-            redis.call('DEL', KEYS[1])
-        end
-        return val
-        ",
-    );
-
-    let json: Option<String> = script.key(&key).invoke_async(con).await?;
-
-    match json {
-        Some(data) => {
-            // Wrap the JSON string in Zeroizing to clear it after use
-            let zeroizing_data = Zeroizing::new(data);
-            let invite = serde_json::from_str(&zeroizing_data).map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::UnexpectedReturnType,
-                    "JSON deserialize",
-                    e.to_string(),
-                ))
-            })?;
-            // zeroizing_data is automatically zeroized when dropped here
-            Ok(Some(invite))
-        }
-        None => Ok(None),
-    }
 }
 
 /// Delete an invite from Redis.

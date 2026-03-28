@@ -11,36 +11,9 @@
   const SESSION_TOKEN_KEY = 'nullpad_session_token';
   const SESSION_ROLE_KEY = 'nullpad_session_role';
 
-  // Base64 helpers
-  function b64Encode(bytes) {
-    let binary = '';
-    for (let i = 0; i < bytes.length; i++) {
-      binary += String.fromCharCode(bytes[i]);
-    }
-    return btoa(binary);
-  }
-
-  function b64Decode(str) {
-    const binary = atob(str);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-      bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-  }
-
-  function b64urlEncode(bytes) {
-    return b64Encode(bytes)
-      .replace(/\+/g, '-')
-      .replace(/\//g, '_')
-      .replace(/=/g, '');
-  }
-
-  function b64urlDecode(str) {
-    let b64 = str.replace(/-/g, '+').replace(/_/g, '/');
-    while (b64.length % 4) b64 += '=';
-    return b64Decode(b64);
-  }
+  // Base64 helpers (shared module)
+  const { base64Encode: b64Encode, base64Decode: b64Decode,
+          base64urlEncode: b64urlEncode, base64urlDecode: b64urlDecode } = NullpadBase64;
 
   /**
    * Import an Ed25519 private key from a 32-byte seed via JWK

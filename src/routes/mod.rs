@@ -132,6 +132,15 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// GET /api/config — Public server configuration values for the client.
+///
+/// Returns non-sensitive limits so the client can validate without hardcoding.
+async fn server_config(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "max_upload_bytes": state.config.max_upload_bytes,
+    }))
+}
+
 /// GET /healthz — Health check endpoint for liveness/readiness probes.
 ///
 /// Pings Redis and returns 200 if healthy, 503 if Redis is unreachable.
@@ -174,6 +183,8 @@ pub fn api_router() -> Router<AppState> {
     Router::new()
         // Health check
         .route("/healthz", get(healthz))
+        // Public config
+        .route("/api/config", get(server_config))
         // Protected JS files (matched before ServeDir fallback)
         .route("/js/admin.js", get(protected_admin_js))
         .route("/js/trusted.js", get(protected_trusted_js))

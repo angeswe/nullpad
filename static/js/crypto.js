@@ -19,71 +19,10 @@
     'use strict';
 
     // ============================================================================
-    // Base64 Encoding/Decoding Helpers
+    // Base64 Encoding/Decoding Helpers (shared module)
     // ============================================================================
 
-    /**
-     * Encode Uint8Array to URL-safe base64 string (no padding, use - and _ instead of + and /)
-     * @param {Uint8Array} bytes
-     * @returns {string}
-     */
-    function base64urlEncode(bytes) {
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary)
-            .replace(/\+/g, '-')
-            .replace(/\//g, '_')
-            .replace(/=/g, '');
-    }
-
-    /**
-     * Decode URL-safe base64 string to Uint8Array
-     * @param {string} str
-     * @returns {Uint8Array}
-     */
-    function base64urlDecode(str) {
-        // Convert URL-safe base64 back to standard base64
-        let base64 = str.replace(/-/g, '+').replace(/_/g, '/');
-        // Add padding if needed
-        while (base64.length % 4) {
-            base64 += '=';
-        }
-        const binary = atob(base64);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
-    }
-
-    /**
-     * Encode Uint8Array to standard base64 string
-     * @param {Uint8Array} bytes
-     * @returns {string}
-     */
-    function base64Encode(bytes) {
-        let binary = '';
-        for (let i = 0; i < bytes.length; i++) {
-            binary += String.fromCharCode(bytes[i]);
-        }
-        return btoa(binary);
-    }
-
-    /**
-     * Decode standard base64 string to Uint8Array
-     * @param {string} str
-     * @returns {Uint8Array}
-     */
-    function base64Decode(str) {
-        const binary = atob(str);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) {
-            bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
-    }
+    const { base64Encode, base64Decode, base64urlEncode, base64urlDecode } = NullpadBase64;
 
     /**
      * Encode string to UTF-8 Uint8Array

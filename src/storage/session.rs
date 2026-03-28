@@ -20,31 +20,6 @@ use crate::models::{StoredChallenge, StoredSession};
 use redis::AsyncCommands;
 use zeroize::Zeroizing;
 
-/// Store a challenge in Redis with TTL (default 30s).
-///
-/// Challenges are single-use nonces for authentication.
-pub async fn store_challenge<C>(
-    con: &mut C,
-    alias: &str,
-    challenge: &StoredChallenge,
-    ttl_secs: u64,
-) -> Result<(), redis::RedisError>
-where
-    C: AsyncCommands,
-{
-    let key = format!("challenge:{}", alias);
-    let json = serde_json::to_string(challenge).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
-
-    con.set_ex::<_, _, ()>(&key, json, ttl_secs).await?;
-    Ok(())
-}
-
 /// Store a challenge only if user exists, atomically.
 ///
 /// Uses a Lua script to prevent race conditions between checking user
@@ -61,13 +36,7 @@ where
 {
     let alias_key = format!("alias:{}", alias);
     let challenge_key = format!("challenge:{}", alias);
-    let json = serde_json::to_string(challenge).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
+    let json = serde_json::to_string(challenge).map_err(super::json_serialize_err)?;
 
     // Lua script: check if user exists, store challenge atomically
     let script = redis::Script::new(
@@ -121,13 +90,8 @@ where
         Some(data) => {
             // Wrap the JSON string in Zeroizing to clear it after use
             let zeroizing_data = Zeroizing::new(data);
-            let challenge = serde_json::from_str(&zeroizing_data).map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::UnexpectedReturnType,
-                    "JSON deserialize",
-                    e.to_string(),
-                ))
-            })?;
+            let challenge =
+                serde_json::from_str(&zeroizing_data).map_err(super::json_deserialize_err)?;
             // zeroizing_data is automatically zeroized when dropped here
             Ok(Some(challenge))
         }
@@ -156,13 +120,7 @@ where
     let session_key = format!("session:{}", token);
     let user_sessions_key = format!("user_sessions:{}", session.user_id);
 
-    let json = serde_json::to_string(session).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
+    let json = serde_json::to_string(session).map_err(super::json_serialize_err)?;
 
     // Lua script to atomically:
     // 1. Check session count
@@ -284,13 +242,8 @@ where
         Some(data) => {
             // Wrap the JSON string in Zeroizing to clear it after use
             let zeroizing_data = Zeroizing::new(data);
-            let session = serde_json::from_str(&zeroizing_data).map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::UnexpectedReturnType,
-                    "JSON deserialize",
-                    e.to_string(),
-                ))
-            })?;
+            let session =
+                serde_json::from_str(&zeroizing_data).map_err(super::json_deserialize_err)?;
             // zeroizing_data is automatically zeroized when dropped here
             Ok(Some(session))
         }

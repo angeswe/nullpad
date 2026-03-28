@@ -118,19 +118,13 @@ pub async fn verify_challenge(
         return Err(AppError::Unauthorized("Authentication failed".to_string()));
     }
 
-    // Parse role
-    let role = user
-        .role
-        .parse::<Role>()
-        .map_err(|e| AppError::Internal(format!("Invalid role: {}", e)))?;
-
     // Generate session token
     let token = generate_session_token();
 
     // Create session
     let session = StoredSession {
         user_id: user.id.clone(),
-        role: role.as_str().to_string(),
+        role: user.role,
         created_at: crate::util::now_secs(),
     };
 
@@ -143,11 +137,11 @@ pub async fn verify_challenge(
     )
     .await?;
 
-    tracing::info!(action = "auth_success", user_id = %user.id, role = %role.as_str(), "User authenticated");
+    tracing::info!(action = "auth_success", user_id = %user.id, role = %user.role, "User authenticated");
 
     Ok(Json(VerifyResponse {
         token,
-        role: role.as_str().to_string(),
+        role: user.role.to_string(),
     }))
 }
 
@@ -207,7 +201,7 @@ pub async fn register(
         id: user_id,
         alias: req.alias.clone(),
         pubkey: req.pubkey,
-        role: Role::Trusted.as_str().to_string(),
+        role: Role::Trusted,
         created_at: crate::util::now_secs(),
     };
 

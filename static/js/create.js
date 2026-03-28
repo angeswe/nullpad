@@ -30,6 +30,7 @@
   // State
   let currentFile = null;
   let clipboardDirty = false;
+  let maxUploadBytes = null; // loaded from /api/config on init
 
   function sanitizeFilename(name) {
     return name
@@ -102,11 +103,10 @@
       return;
     }
 
-    // Check file size before encrypting (50MB default server limit)
-    const MAX_UPLOAD_BYTES = 52_428_800;
-    if (currentFile && currentFile.size > MAX_UPLOAD_BYTES) {
+    // Check file size before encrypting (limit sourced from server at init)
+    if (currentFile && maxUploadBytes !== null && currentFile.size > maxUploadBytes) {
       const sizeMB = (currentFile.size / (1024 * 1024)).toFixed(1);
-      const limitMB = (MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0);
+      const limitMB = (maxUploadBytes / (1024 * 1024)).toFixed(0);
       const errEl = document.createElement('div');
       errEl.className = 'status-error';
       errEl.setAttribute('role', 'alert');
@@ -324,7 +324,18 @@
   // Initialization
   // ============================================================================
 
-  function init() {
+  async function init() {
+    // Fetch server config so client-side size check stays in sync
+    try {
+      const res = await fetch('/api/config');
+      if (res.ok) {
+        const cfg = await res.json();
+        if (typeof cfg.max_upload_bytes === 'number') {
+          maxUploadBytes = cfg.max_upload_bytes;
+        }
+      }
+    } catch { /* non-critical: server enforces limit regardless */ }
+
     setupFileUpload();
     form.addEventListener('submit', handleSubmit);
     copyBtn.addEventListener('click', () => {
