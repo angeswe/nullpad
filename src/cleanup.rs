@@ -4,7 +4,7 @@
 //! on disk becomes orphaned. This job periodically scans the storage
 //! directory and deletes files whose metadata no longer exists in Redis.
 
-use crate::util::now_secs;
+use crate::util::{is_valid_nanoid, now_secs};
 use redis::AsyncCommands;
 use std::path::Path;
 use std::time::Duration;
@@ -36,12 +36,9 @@ where
     }
 }
 
-/// Validate that a filename is a valid paste ID (alphanumeric, hyphens, underscores, min 2 chars).
+/// Validate that a filename is a valid paste ID (nanoid charset, min 2 chars).
 fn is_valid_paste_id(id: &str) -> bool {
-    id.len() >= 2
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    is_valid_nanoid(id, 2)
 }
 
 /// Scan storage directory and delete orphaned files.

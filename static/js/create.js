@@ -32,14 +32,6 @@
   let clipboardDirty = false;
   let maxUploadBytes = null; // loaded from /api/config on init
 
-  function sanitizeFilename(name) {
-    return name
-      .replace(/[/\\]/g, '_')         // strip path separators
-      .replace(/[\x00-\x1f\x7f]/g, '') // strip null bytes and control chars
-      .slice(0, 255)                    // truncate to 255 chars
-      || 'file';                        // fallback if empty after sanitization
-  }
-
   // ============================================================================
   // File Upload Handling (trusted users only - public page has no file upload)
   // ============================================================================
@@ -159,7 +151,7 @@
 
       if (currentFile) {
         contentBytes = new Uint8Array(await currentFile.arrayBuffer());
-        filename = sanitizeFilename(currentFile.name);
+        filename = NullpadUtils.sanitizeFilename(currentFile.name);
         contentType = currentFile.type || 'application/octet-stream';
       } else {
         contentBytes = NullpadCrypto.textEncode(text);

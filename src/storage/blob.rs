@@ -9,6 +9,7 @@
 //!
 //! Uses directory sharding (first 2 chars of ID) to avoid too many files in one directory.
 
+use crate::util::is_valid_nanoid;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -31,24 +32,13 @@ pub enum BlobError {
 /// Allowed characters: `[A-Za-z0-9_-]` (nanoid charset)
 /// Minimum length: 2 characters (for sharding)
 fn sanitize_blob_id(id: &str) -> Result<&str, BlobError> {
-    // Reject IDs that are too short for sharding
-    if id.len() < 2 {
+    // min_len=2: sharding requires at least 2 characters
+    // charset [A-Za-z0-9_-] prevents path traversal ('.' '/' '\' are all rejected)
+    if !is_valid_nanoid(id, 2) {
         return Err(BlobError::InvalidId(
-            "ID must be at least 2 characters".to_string(),
+            "ID must be at least 2 characters and contain only [A-Za-z0-9_-]".to_string(),
         ));
     }
-
-    // Validate every character is in the safe set [A-Za-z0-9_-]
-    // This prevents path traversal since '.' , '/' , '\' are not allowed
-    for c in id.chars() {
-        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' {
-            return Err(BlobError::InvalidId(
-                "ID contains invalid characters".to_string(),
-            ));
-        }
-    }
-
-    // Return the validated ID - it's now safe to use in paths
     Ok(id)
 }
 

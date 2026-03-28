@@ -6,6 +6,7 @@ pub mod paste;
 
 use crate::auth::middleware::{AdminSession, AppState, AuthSession};
 use crate::error::AppError;
+use crate::util::is_valid_nanoid;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -72,11 +73,7 @@ pub fn validate_id(id: &str, label: &str, expected_len: usize) -> Result<(), App
     if expected_len < 2 {
         return Err(AppError::BadRequest(format!("Invalid {} format", label)));
     }
-    if id.len() != expected_len
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if id.len() != expected_len || !is_valid_nanoid(id, expected_len) {
         return Err(AppError::BadRequest(format!("Invalid {} format", label)));
     }
     Ok(())

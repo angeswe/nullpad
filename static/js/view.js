@@ -37,14 +37,6 @@
   let useAttemptEndpoint = false;
   let contentFetched = false;
 
-  function sanitizeFilename(name) {
-    return name
-      .replace(/[/\\]/g, '_')         // strip path separators
-      .replace(/[\x00-\x1f\x7f]/g, '') // strip null bytes and control chars
-      .slice(0, 255)                    // truncate to 255 chars
-      || 'file';                        // fallback if empty after sanitization
-  }
-
   // ============================================================================
   // URL Parsing
   // ============================================================================
@@ -513,7 +505,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = sanitizeFilename(metadata.filename);
+    a.download = NullpadUtils.sanitizeFilename(metadata.filename);
     a.click();
     URL.revokeObjectURL(url);
   }

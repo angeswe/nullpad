@@ -5,8 +5,17 @@
 
 use serde::{Deserialize, Serialize};
 
-fn default_paste_type() -> String {
-    "text".to_string()
+// ============================================================================
+// Paste Type
+// ============================================================================
+
+/// Paste content type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PasteType {
+    #[default]
+    Text,
+    File,
 }
 
 // ============================================================================
@@ -20,8 +29,8 @@ pub struct PasteMetadata {
     pub paste_id: String,
     /// Encrypted filename + content_type blob (base64). Server stores opaquely.
     pub encrypted_metadata: String,
-    /// Paste type: "text" or "file". Public users restricted to "text".
-    pub paste_type: String,
+    /// Paste type: text or file. Public users restricted to text.
+    pub paste_type: PasteType,
     /// TTL in seconds. If omitted, uses server config DEFAULT_TTL_SECS.
     pub ttl_secs: Option<u64>,
     #[serde(default)]
@@ -69,9 +78,9 @@ pub struct StoredPasteMeta {
     /// Encrypted metadata blob (new pastes).
     #[serde(default)]
     pub encrypted_metadata: String,
-    /// Paste type: "text" or "file". Defaults to "text" for legacy pastes.
-    #[serde(default = "default_paste_type")]
-    pub paste_type: String,
+    /// Paste type: text or file. Defaults to text for legacy pastes.
+    #[serde(default)]
+    pub paste_type: PasteType,
     /// Legacy plaintext filename (old pastes only).
     #[serde(default)]
     pub filename: Option<String>,
