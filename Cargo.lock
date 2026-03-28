@@ -1531,6 +1531,7 @@ dependencies = [
  "base64 0.22.1",
  "dotenvy",
  "ed25519-dalek",
+ "futures",
  "hmac",
  "nanoid",
  "rand 0.10.0",
