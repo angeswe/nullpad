@@ -24,10 +24,9 @@ use std::net::{IpAddr, SocketAddr};
 fn get_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     let cookie_header = headers.get("cookie")?.to_str().ok()?;
     for pair in cookie_header.split(';') {
-        let pair = pair.trim();
-        if let Some(value) = pair.strip_prefix(name) {
-            if value.starts_with('=') {
-                return Some(value.trim_start_matches('='));
+        if let Some((key, value)) = pair.trim().split_once('=') {
+            if key == name {
+                return Some(value);
             }
         }
     }
@@ -170,9 +169,7 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Serve a protected static JS file with correct Content-Type.
 async fn serve_protected_js(path: &str) -> Result<impl IntoResponse, AppError> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|_| AppError::NotFound("Not found".to_string()))?;
+    let content = read_static_file(path).await?;
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
@@ -180,11 +177,20 @@ async fn serve_protected_js(path: &str) -> Result<impl IntoResponse, AppError> {
     ))
 }
 
+/// Read a static file, mapping I/O errors to appropriate HTTP errors.
+async fn read_static_file(path: &str) -> Result<String, AppError> {
+    tokio::fs::read_to_string(path).await.map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => AppError::NotFound("Not found".to_string()),
+        _ => {
+            tracing::error!(path = %path, error = %e, "Failed to read protected static file");
+            AppError::Internal("Failed to read page".to_string())
+        }
+    })
+}
+
 /// Serve a protected static HTML file with correct Content-Type.
 async fn serve_protected_html(path: &str) -> Result<impl IntoResponse, AppError> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|_| AppError::NotFound("Not found".to_string()))?;
+    let content = read_static_file(path).await?;
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],

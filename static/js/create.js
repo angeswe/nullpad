@@ -326,7 +326,7 @@
           maxUploadBytes = cfg.max_upload_bytes;
         }
       }
-    } catch { /* non-critical: server enforces limit regardless */ }
+    } catch (e) { console.warn('Failed to fetch server config:', e.message); }
 
     setupFileUpload();
     form.addEventListener('submit', handleSubmit);
