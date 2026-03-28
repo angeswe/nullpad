@@ -6,6 +6,7 @@ pub mod paste;
 
 use crate::auth::middleware::{AdminSession, AppState, AuthSession};
 use crate::error::AppError;
+use crate::util::is_valid_nanoid;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -14,9 +15,23 @@ use axum::{
     routing::post,
     Json, Router,
 };
+
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::net::{IpAddr, SocketAddr};
+
+/// Extract a named cookie value from the `Cookie` request header.
+fn get_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let cookie_header = headers.get("cookie")?.to_str().ok()?;
+    for pair in cookie_header.split(';') {
+        if let Some((key, value)) = pair.trim().split_once('=') {
+            if key == name {
+                return Some(value);
+            }
+        }
+    }
+    None
+}
 
 /// Check a rate limit key and return a RateLimited error if exceeded.
 ///
@@ -72,11 +87,7 @@ pub fn validate_id(id: &str, label: &str, expected_len: usize) -> Result<(), App
     if expected_len < 2 {
         return Err(AppError::BadRequest(format!("Invalid {} format", label)));
     }
-    if id.len() != expected_len
-        || !id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+    if id.len() != expected_len || !is_valid_nanoid(id, expected_len) {
         return Err(AppError::BadRequest(format!("Invalid {} format", label)));
     }
     Ok(())
@@ -132,6 +143,15 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
     }
 }
 
+/// GET /api/config — Public server configuration values for the client.
+///
+/// Returns non-sensitive limits so the client can validate without hardcoding.
+async fn server_config(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "max_upload_bytes": state.config.max_upload_bytes,
+    }))
+}
+
 /// GET /healthz — Health check endpoint for liveness/readiness probes.
 ///
 /// Pings Redis and returns 200 if healthy, 503 if Redis is unreachable.
@@ -149,12 +169,33 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
 
 /// Serve a protected static JS file with correct Content-Type.
 async fn serve_protected_js(path: &str) -> Result<impl IntoResponse, AppError> {
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|_| AppError::NotFound("Not found".to_string()))?;
+    let content = read_static_file(path).await?;
     Ok((
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        content,
+    ))
+}
+
+/// Read a static file, mapping I/O errors to appropriate HTTP errors.
+async fn read_static_file(path: &str) -> Result<String, AppError> {
+    tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::NotFound => AppError::NotFound("Not found".to_string()),
+            _ => {
+                tracing::error!(path = %path, error = %e, "Failed to read protected static file");
+                AppError::Internal("Failed to read page".to_string())
+            }
+        })
+}
+
+/// Serve a protected static HTML file with correct Content-Type.
+async fn serve_protected_html(path: &str) -> Result<impl IntoResponse, AppError> {
+    let content = read_static_file(path).await?;
+    Ok((
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
         content,
     ))
 }
@@ -169,14 +210,46 @@ async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse
     serve_protected_js("static/js/trusted.js").await
 }
 
+/// GET /admin.html — Admin dashboard (requires np_role=admin cookie)
+///
+/// Browsers can't send Authorization headers on direct navigation, so page access
+/// is gated by the `np_role` HttpOnly cookie set at login. This prevents unauthenticated
+/// callers from scraping admin UI structure and API endpoint names.
+/// The cookie is non-sensitive: real auth for all API calls still requires a valid Bearer token.
+async fn protected_admin_html(headers: HeaderMap) -> Result<impl IntoResponse, AppError> {
+    match get_cookie(&headers, "np_role") {
+        Some("admin") => serve_protected_html("static/admin.html").await,
+        _ => Err(AppError::Unauthorized(
+            "Authentication required".to_string(),
+        )),
+    }
+}
+
+/// GET /trusted.html — Trusted user dashboard (requires np_role cookie)
+///
+/// Any authenticated user (admin or trusted) may access this page.
+async fn protected_trusted_html(headers: HeaderMap) -> Result<impl IntoResponse, AppError> {
+    match get_cookie(&headers, "np_role") {
+        Some("admin") | Some("trusted") => serve_protected_html("static/trusted.html").await,
+        _ => Err(AppError::Unauthorized(
+            "Authentication required".to_string(),
+        )),
+    }
+}
+
 /// Build the API router with all endpoints.
 pub fn api_router() -> Router<AppState> {
     Router::new()
         // Health check
         .route("/healthz", get(healthz))
+        // Public config
+        .route("/api/config", get(server_config))
         // Protected JS files (matched before ServeDir fallback)
         .route("/js/admin.js", get(protected_admin_js))
         .route("/js/trusted.js", get(protected_trusted_js))
+        // Protected HTML pages (matched before ServeDir fallback)
+        .route("/admin.html", get(protected_admin_html))
+        .route("/trusted.html", get(protected_trusted_html))
         // Paste endpoints
         .route("/api/paste", post(paste::create_paste))
         .route(

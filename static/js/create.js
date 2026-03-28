@@ -30,14 +30,7 @@
   // State
   let currentFile = null;
   let clipboardDirty = false;
-
-  function sanitizeFilename(name) {
-    return name
-      .replace(/[/\\]/g, '_')         // strip path separators
-      .replace(/[\x00-\x1f\x7f]/g, '') // strip null bytes and control chars
-      .slice(0, 255)                    // truncate to 255 chars
-      || 'file';                        // fallback if empty after sanitization
-  }
+  let maxUploadBytes = null; // loaded from /api/config on init
 
   // ============================================================================
   // File Upload Handling (trusted users only - public page has no file upload)
@@ -102,11 +95,10 @@
       return;
     }
 
-    // Check file size before encrypting (50MB default server limit)
-    const MAX_UPLOAD_BYTES = 52_428_800;
-    if (currentFile && currentFile.size > MAX_UPLOAD_BYTES) {
+    // Check file size before encrypting (limit sourced from server at init)
+    if (currentFile && maxUploadBytes !== null && currentFile.size > maxUploadBytes) {
       const sizeMB = (currentFile.size / (1024 * 1024)).toFixed(1);
-      const limitMB = (MAX_UPLOAD_BYTES / (1024 * 1024)).toFixed(0);
+      const limitMB = (maxUploadBytes / (1024 * 1024)).toFixed(0);
       const errEl = document.createElement('div');
       errEl.className = 'status-error';
       errEl.setAttribute('role', 'alert');
@@ -159,7 +151,7 @@
 
       if (currentFile) {
         contentBytes = new Uint8Array(await currentFile.arrayBuffer());
-        filename = sanitizeFilename(currentFile.name);
+        filename = NullpadUtils.sanitizeFilename(currentFile.name);
         contentType = currentFile.type || 'application/octet-stream';
       } else {
         contentBytes = NullpadCrypto.textEncode(text);
@@ -324,7 +316,18 @@
   // Initialization
   // ============================================================================
 
-  function init() {
+  async function init() {
+    // Fetch server config so client-side size check stays in sync
+    try {
+      const res = await fetch('/api/config');
+      if (res.ok) {
+        const cfg = await res.json();
+        if (typeof cfg.max_upload_bytes === 'number') {
+          maxUploadBytes = cfg.max_upload_bytes;
+        }
+      }
+    } catch (e) { console.warn('Failed to fetch server config:', e.message); }
+
     setupFileUpload();
     form.addEventListener('submit', handleSubmit);
     copyBtn.addEventListener('click', () => {

@@ -140,15 +140,8 @@ pub async fn create_paste(
         ));
     }
 
-    // Validate paste_type: must be "text" or "file"
-    if metadata.paste_type != "text" && metadata.paste_type != "file" {
-        return Err(AppError::BadRequest(
-            "paste_type must be \"text\" or \"file\"".to_string(),
-        ));
-    }
-
     // Public users can only create text pastes
-    if auth_session.is_none() && metadata.paste_type == "file" {
+    if auth_session.is_none() && metadata.paste_type == crate::models::PasteType::File {
         return Err(AppError::Forbidden(
             "File uploads require authentication".to_string(),
         ));

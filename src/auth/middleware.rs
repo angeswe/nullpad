@@ -69,15 +69,9 @@ impl FromRequestParts<AppState> for AuthSession {
             .await?
             .ok_or_else(|| AppError::Unauthorized("Invalid or expired session".to_string()))?;
 
-        // Parse role
-        let role = session
-            .role
-            .parse::<Role>()
-            .map_err(|e| AppError::Internal(format!("Invalid role in session: {}", e)))?;
-
         Ok(AuthSession {
             user_id: session.user_id,
-            role,
+            role: session.role,
             token,
         })
     }

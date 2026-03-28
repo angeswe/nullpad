@@ -31,13 +31,7 @@ where
     C: AsyncCommands,
 {
     let key = format!("paste:{}", paste.meta.id);
-    let json = serde_json::to_string(&paste.meta).map_err(|e| {
-        redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "JSON serialize",
-            e.to_string(),
-        ))
-    })?;
+    let json = serde_json::to_string(&paste.meta).map_err(super::json_serialize_err)?;
 
     // Step 1: Atomically claim the paste ID with SET NX (set-if-not-exists).
     // This prevents overwriting existing pastes when clients control the ID.
@@ -120,13 +114,8 @@ where
 
     match json {
         Some(data) => {
-            let meta: StoredPasteMeta = serde_json::from_str(&data).map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::UnexpectedReturnType,
-                    "JSON deserialize",
-                    e.to_string(),
-                ))
-            })?;
+            let meta: StoredPasteMeta =
+                serde_json::from_str(&data).map_err(super::json_deserialize_err)?;
             Ok(Some(meta))
         }
         None => Ok(None),
@@ -199,13 +188,8 @@ where
 
     match json {
         Some(data) => {
-            let meta: StoredPasteMeta = serde_json::from_str(&data).map_err(|e| {
-                redis::RedisError::from((
-                    redis::ErrorKind::UnexpectedReturnType,
-                    "JSON deserialize",
-                    e.to_string(),
-                ))
-            })?;
+            let meta: StoredPasteMeta =
+                serde_json::from_str(&data).map_err(super::json_deserialize_err)?;
 
             // Step 3: For burn-after-reading, delete the blob now
             if meta.burn_after_reading {

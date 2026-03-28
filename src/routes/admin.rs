@@ -119,7 +119,7 @@ pub async fn list_users(
             id: user.id,
             alias: user.alias,
             pubkey: user.pubkey,
-            role: user.role,
+            role: user.role.to_string(),
             created_at: user.created_at,
         })
         .collect();
