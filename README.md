@@ -125,7 +125,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 **Data Expiration**
 
-- All Redis keys have TTLs by default — trusted users may create "forever" pastes with no expiration
+- All Redis keys have TTLs — pastes expire based on chosen duration (1 minute to 1 week)
 - Burn-after-reading uses atomic Lua script (no race conditions)
 - Burn and admin delete clean up user_pastes references atomically
 
@@ -179,7 +179,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 ## File Types
 
 - **Public pastes**: Text/markdown paste only (no file upload), TTL up to 7 days
-- **Trusted users**: Any file type via drag & drop after registration, plus a "forever" (no expiration) option
+- **Trusted users**: Any file type via drag & drop after registration, TTL up to 7 days
 
 ## Deployment
 
