@@ -23,9 +23,9 @@ WORKDIR /build
 
 # Copy manifests and cache dependencies
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && \
+RUN mkdir -p src tests && \
     echo "fn main() {}" > src/main.rs && \
-    touch src/lib.rs && \
+    touch src/lib.rs tests/integration.rs && \
     cargo build --release --target aarch64-unknown-linux-gnu && \
     rm -rf src target/aarch64-unknown-linux-gnu/release/nullpad target/aarch64-unknown-linux-gnu/release/deps/nullpad-* target/aarch64-unknown-linux-gnu/release/.fingerprint/nullpad-*
 

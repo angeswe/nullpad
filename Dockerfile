@@ -9,9 +9,9 @@ WORKDIR /build
 
 # Copy manifests and cache dependencies
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && \
+RUN mkdir -p src tests && \
     echo "fn main() {}" > src/main.rs && \
-    touch src/lib.rs && \
+    touch src/lib.rs tests/integration.rs && \
     cargo build --release && \
     rm -rf src target/release/nullpad target/release/deps/nullpad-* target/release/deps/libnullpad-* target/release/.fingerprint/nullpad-*
 
