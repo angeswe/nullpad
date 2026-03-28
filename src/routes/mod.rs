@@ -202,12 +202,12 @@ async fn serve_protected_html(path: &str) -> Result<impl IntoResponse, AppError>
 
 /// GET /js/admin.js — Admin JS (requires admin auth)
 async fn protected_admin_js(AdminSession(_): AdminSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_js("static/js/admin.js").await
+    serve_protected_js("protected/js/admin.js").await
 }
 
 /// GET /js/trusted.js — Trusted JS (requires auth)
 async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_js("static/js/trusted.js").await
+    serve_protected_js("protected/js/trusted.js").await
 }
 
 /// GET /admin.html — Admin dashboard (requires np_role=admin cookie)
@@ -218,7 +218,7 @@ async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse
 /// The cookie is non-sensitive: real auth for all API calls still requires a valid Bearer token.
 async fn protected_admin_html(headers: HeaderMap) -> Result<impl IntoResponse, AppError> {
     match get_cookie(&headers, "np_role") {
-        Some("admin") => serve_protected_html("static/admin.html").await,
+        Some("admin") => serve_protected_html("protected/admin.html").await,
         _ => Err(AppError::Unauthorized(
             "Authentication required".to_string(),
         )),
@@ -230,7 +230,7 @@ async fn protected_admin_html(headers: HeaderMap) -> Result<impl IntoResponse, A
 /// Any authenticated user (admin or trusted) may access this page.
 async fn protected_trusted_html(headers: HeaderMap) -> Result<impl IntoResponse, AppError> {
     match get_cookie(&headers, "np_role") {
-        Some("admin") | Some("trusted") => serve_protected_html("static/trusted.html").await,
+        Some("admin") | Some("trusted") => serve_protected_html("protected/trusted.html").await,
         _ => Err(AppError::Unauthorized(
             "Authentication required".to_string(),
         )),

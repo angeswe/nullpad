@@ -7,6 +7,10 @@ cd "$(dirname "$0")/.."
 
 STATIC_DIR="static"
 HTML_FILES=$(find "$STATIC_DIR" -name "*.html" -maxdepth 1)
+# Also include protected HTML files (served via auth-gated route handlers)
+if [ -d "protected" ]; then
+  HTML_FILES="$HTML_FILES $(find "protected" -name "*.html" -maxdepth 1)"
+fi
 
 # Generate SRI hash for a file
 sri_hash() {

@@ -40,8 +40,9 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/target/release/nullpad /app/nullpad
 
-# Copy static files and SRI update script
+# Copy static files, protected pages, and SRI update script
 COPY static /app/static
+COPY protected /app/protected
 COPY tools/update-sri.sh /app/tools/update-sri.sh
 
 # Build version (set via --build-arg or defaults to git short hash)
@@ -55,13 +56,13 @@ RUN apt-get update && \
     apt-get purge -y openssl && \
     apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* && \
-    find /app/static -name '*.html' -exec sed -i "s/__BUILD_VERSION__/${BUILD_VERSION}/g" {} +
+    find /app/static /app/protected -name '*.html' -exec sed -i "s/__BUILD_VERSION__/${BUILD_VERSION}/g" {} +
 
 # Create paste storage directory
 RUN mkdir -p /data/pastes
 
-# Ensure static files are world-readable and change ownership
-RUN chmod -R a+rX /app/static && chown -R nullpad:nullpad /app /data
+# Ensure static and protected files are world-readable and change ownership
+RUN chmod -R a+rX /app/static /app/protected && chown -R nullpad:nullpad /app /data
 
 # Switch to non-root user
 USER nullpad

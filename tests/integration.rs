@@ -123,6 +123,10 @@ async fn main() {
         test_pin_gated_burn_consumed_on_attempt,
         test_non_pin_attempt_returns_404,
         test_non_pin_get_unchanged,
+        test_protected_html_unauthenticated_returns_401,
+        test_protected_html_with_admin_cookie,
+        test_protected_html_not_served_by_static_fallback,
+        test_verify_sets_np_role_cookie,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -2291,4 +2295,142 @@ async fn test_non_pin_get_unchanged() {
     assert!(body["encrypted_content"].is_string());
     assert!(body["created_at"].is_number());
     assert!(body.get("needs_pin").is_none());
+}
+
+/// Unauthenticated requests to /admin.html and /trusted.html must return 401.
+async fn test_protected_html_unauthenticated_returns_401() {
+    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    let resp = client
+        .get(format!("{}/trusted.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+/// Admin with np_role=admin cookie can access /admin.html.
+/// Trusted user with np_role=trusted cookie can access /trusted.html.
+async fn test_protected_html_with_admin_cookie() {
+    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Admin can access /admin.html
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .header("cookie", "np_role=admin")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Admin Dashboard"));
+    // Verify no inline scripts (CSP compliance)
+    assert!(
+        !body.contains("sessionStorage.getItem('session_token')"),
+        "admin.html should not contain inline script with old sessionStorage key"
+    );
+
+    // Trusted can access /trusted.html
+    let resp = client
+        .get(format!("{}/trusted.html", base_url))
+        .header("cookie", "np_role=trusted")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("Trusted Upload"));
+
+    // Trusted cannot access /admin.html
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .header("cookie", "np_role=trusted")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+/// Static fallback (ServeDir) must NOT serve admin.html or trusted.html.
+/// These files were moved out of static/ to prevent bypassing auth gates.
+async fn test_protected_html_not_served_by_static_fallback() {
+    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    // Without the np_role cookie, these should return 401 (not 200 from ServeDir)
+    let resp = client
+        .get(format!("{}/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+
+    // Also verify the files aren't accessible via any other path through ServeDir
+    let resp = client
+        .get(format!("{}/protected/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    // Should be 404 (protected/ is not in static/)
+    assert_eq!(resp.status(), 404);
+}
+
+/// Login verify endpoint sets np_role cookie with correct attributes.
+async fn test_verify_sets_np_role_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Request challenge
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": admin_alias}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let nonce_b64 = body["nonce"].as_str().unwrap();
+
+    // Sign nonce
+    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
+    let signature = admin_key.sign(&nonce_bytes);
+    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+    // Verify
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": admin_alias, "signature": sig_b64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    // Check Set-Cookie header
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("verify response must set np_role cookie")
+        .to_str()
+        .unwrap();
+    assert!(
+        cookie.starts_with("np_role=admin"),
+        "cookie should set np_role=admin"
+    );
+    assert!(cookie.contains("HttpOnly"), "cookie should be HttpOnly");
+    assert!(
+        cookie.contains("SameSite=Strict"),
+        "cookie should be SameSite=Strict"
+    );
 }

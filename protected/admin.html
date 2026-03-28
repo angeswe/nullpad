@@ -129,21 +129,6 @@
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W" crossorigin="anonymous"></script>
   <script src="/js/base64.js" integrity="sha384-dPTAiUm9yBw/r5Adl39R/YFMjDuMdHLZzDlXUciVyVhDdowN5rilt9FSG8+ca8Z5" crossorigin="anonymous"></script>
   <script src="/js/auth.js" integrity="sha384-G4jys2w6lHgTzKpuvZuJqaLxG/rujPJ1mkFfumZrDhmn4z/L6bkY/U9teLCnKdFl" crossorigin="anonymous"></script>
-  <script>
-    // Load admin.js via authenticated fetch (server requires admin session)
-    (function() {
-      var token = sessionStorage.getItem('session_token');
-      if (!token) { window.location.href = '/login.html'; return; }
-      fetch('/js/admin.js', { headers: { 'Authorization': 'Bearer ' + token } })
-        .then(function(r) {
-          if (!r.ok) { window.location.href = '/login.html'; return; }
-          return r.text();
-        })
-        .then(function(code) {
-          if (code) { var s = document.createElement('script'); s.textContent = code; document.body.appendChild(s); }
-        })
-        .catch(function() { window.location.href = '/login.html'; });
-    })();
-  </script>
+  <script src="/js/admin-loader.js" integrity="sha384-RGm+SKTRaCiNBemXjK+3+i+2XFwjTh+d/Z/xyGKJMQ28FKsOKCAFeM8aKSs/95uc" crossorigin="anonymous"></script>
 </body>
 </html>
