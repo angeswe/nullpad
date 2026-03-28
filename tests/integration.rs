@@ -123,6 +123,7 @@ async fn main() {
         test_pin_gated_burn_consumed_on_attempt,
         test_non_pin_attempt_returns_404,
         test_non_pin_get_unchanged,
+        test_trusted_user_cannot_create_forever_paste,
         test_protected_html_unauthenticated_returns_401,
         test_protected_html_with_admin_cookie,
         test_protected_html_not_served_by_static_fallback,
@@ -1755,6 +1756,45 @@ async fn test_forever_paste_requires_auth() {
         .send()
         .await
         .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+/// Trusted users cannot create forever pastes (TTL=0) — admin only.
+/// Prevents Redis memory exhaustion from unlimited non-expiring keys.
+async fn test_trusted_user_cannot_create_forever_paste() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let (_user_key, _user_alias, user_token) =
+        create_trusted_user(&client, &base_url, &admin_token).await;
+
+    // Trusted user trying to create forever paste should be rejected
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"forever data",
+        false,
+        0,
+        Some(&user_token),
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 403);
+
+    // Trusted user can still create normal TTL pastes
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"normal data",
+        false,
+        3600,
+        Some(&user_token),
+        false,
+    )
+    .await;
     assert_eq!(resp.status(), 200);
 }
 
