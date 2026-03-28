@@ -523,7 +523,6 @@ mod tests {
             config.paste_storage_path,
             std::path::PathBuf::from("/data/pastes")
         );
-
         clear_test_env();
     }
 }

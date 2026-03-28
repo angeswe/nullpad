@@ -125,9 +125,9 @@ async fn main() {
         test_non_pin_get_unchanged,
         test_trusted_user_cannot_create_forever_paste,
         test_protected_html_unauthenticated_returns_401,
-        test_protected_html_with_admin_cookie,
+        test_protected_html_with_session_cookie,
         test_protected_html_not_served_by_static_fallback,
-        test_verify_sets_np_role_cookie,
+        test_verify_sets_np_session_cookie,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -2359,14 +2359,17 @@ async fn test_protected_html_unauthenticated_returns_401() {
 
 /// Admin with np_role=admin cookie can access /admin.html.
 /// Trusted user with np_role=trusted cookie can access /trusted.html.
-async fn test_protected_html_with_admin_cookie() {
-    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+async fn test_protected_html_with_session_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // Admin can access /admin.html
+    // Login to get a real session token
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Admin can access /admin.html via np_session cookie
     let resp = client
         .get(format!("{}/admin.html", base_url))
-        .header("cookie", "np_role=admin")
+        .header("cookie", format!("np_session={}", admin_token))
         .send()
         .await
         .unwrap();
@@ -2379,10 +2382,10 @@ async fn test_protected_html_with_admin_cookie() {
         "admin.html should not contain inline script with old sessionStorage key"
     );
 
-    // Trusted can access /trusted.html
+    // Admin can also access /trusted.html
     let resp = client
         .get(format!("{}/trusted.html", base_url))
-        .header("cookie", "np_role=trusted")
+        .header("cookie", format!("np_session={}", admin_token))
         .send()
         .await
         .unwrap();
@@ -2390,10 +2393,10 @@ async fn test_protected_html_with_admin_cookie() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("Trusted Upload"));
 
-    // Trusted cannot access /admin.html
+    // Forged np_role cookie (old attack vector) must NOT grant access
     let resp = client
         .get(format!("{}/admin.html", base_url))
-        .header("cookie", "np_role=trusted")
+        .header("cookie", "np_role=admin")
         .send()
         .await
         .unwrap();
@@ -2406,7 +2409,7 @@ async fn test_protected_html_not_served_by_static_fallback() {
     let (base_url, _con, _key, _alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // Without the np_role cookie, these should return 401 (not 200 from ServeDir)
+    // Without a valid session cookie, these should return 401 (not 200 from ServeDir)
     let resp = client
         .get(format!("{}/admin.html", base_url))
         .send()
@@ -2424,8 +2427,8 @@ async fn test_protected_html_not_served_by_static_fallback() {
     assert_eq!(resp.status(), 404);
 }
 
-/// Login verify endpoint sets np_role cookie with correct attributes.
-async fn test_verify_sets_np_role_cookie() {
+/// Login verify endpoint sets np_session cookie with correct attributes.
+async fn test_verify_sets_np_session_cookie() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -2457,17 +2460,25 @@ async fn test_verify_sets_np_role_cookie() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Check Set-Cookie header
+    // Check Set-Cookie header contains session token, not role
     let cookie = resp
         .headers()
         .get("set-cookie")
-        .expect("verify response must set np_role cookie")
+        .expect("verify response must set np_session cookie")
         .to_str()
         .unwrap();
     assert!(
-        cookie.starts_with("np_role=admin"),
-        "cookie should set np_role=admin"
+        cookie.starts_with("np_session="),
+        "cookie should set np_session"
     );
+    // Token is 44 chars of base64
+    let token_value = cookie
+        .split(';')
+        .next()
+        .unwrap()
+        .strip_prefix("np_session=")
+        .unwrap();
+    assert_eq!(token_value.len(), 44, "session token should be 44 chars");
     assert!(cookie.contains("HttpOnly"), "cookie should be HttpOnly");
     assert!(
         cookie.contains("SameSite=Strict"),

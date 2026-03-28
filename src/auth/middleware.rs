@@ -22,12 +22,35 @@ pub struct AppState {
 
 /// Authenticated session extractor.
 ///
-/// Extracts session from `Authorization: Bearer {token}` header.
-/// Returns 401 Unauthorized if missing or invalid.
+/// Extracts session from `Authorization: Bearer {token}` header first,
+/// then falls back to `np_session` HttpOnly cookie (for browser navigations
+/// where JS can't set headers).
+/// Returns 401 Unauthorized if neither source provides a valid token.
 pub struct AuthSession {
     pub user_id: String,
     pub role: Role,
     pub token: String,
+}
+
+/// Validate token format: exactly 44 chars of base64 (32 random bytes).
+fn is_valid_token_format(token: &str) -> bool {
+    token.len() == 44
+        && token
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
+}
+
+/// Extract a named cookie value from the `Cookie` request header.
+fn get_cookie<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    let cookie_header = headers.get("cookie")?.to_str().ok()?;
+    for pair in cookie_header.split(';') {
+        if let Some((key, value)) = pair.trim().split_once('=') {
+            if key == name {
+                return Some(value);
+            }
+        }
+    }
+    None
 }
 
 impl FromRequestParts<AppState> for AuthSession {
@@ -37,26 +60,12 @@ impl FromRequestParts<AppState> for AuthSession {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Extract Authorization header
-        let auth_header = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .ok_or_else(|| AppError::Unauthorized("Missing authorization header".to_string()))?;
+        // Try Bearer token first, then np_session cookie
+        let token = extract_bearer_token(&parts.headers)
+            .or_else(|| get_cookie(&parts.headers, "np_session").map(|s| s.to_string()))
+            .ok_or_else(|| AppError::Unauthorized("Missing authorization".to_string()))?;
 
-        // Parse Bearer token
-        let token = auth_header
-            .strip_prefix("Bearer ")
-            .ok_or_else(|| AppError::Unauthorized("Invalid authorization format".to_string()))?
-            .to_string();
-
-        // Validate token format: must be exactly 44 chars of base64
-        // (32 bytes of randomness = 44 base64 chars with padding)
-        if token.len() != 44
-            || !token
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=')
-        {
+        if !is_valid_token_format(&token) {
             return Err(AppError::Unauthorized(
                 "Invalid or expired session".to_string(),
             ));
@@ -77,9 +86,19 @@ impl FromRequestParts<AppState> for AuthSession {
     }
 }
 
+/// Extract Bearer token from Authorization header.
+fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(|t| t.to_string())
+}
+
 /// Optional authenticated session extractor.
 ///
-/// Returns Some(AuthSession) if valid auth header present, None if no auth header.
+/// Returns Some(AuthSession) if valid Bearer header or `np_session` cookie present,
+/// None if neither source provides credentials.
 /// Propagates system errors (Redis failures) instead of silently degrading.
 impl FromRequestParts<AppState> for Option<AuthSession> {
     type Rejection = AppError;
@@ -88,19 +107,16 @@ impl FromRequestParts<AppState> for Option<AuthSession> {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // If no Authorization header present, return None (public access)
-        let has_auth = parts
-            .headers
-            .get("authorization")
-            .and_then(|v| v.to_str().ok())
-            .is_some();
+        // If neither Bearer header nor session cookie present, return None (public access)
+        let has_bearer = extract_bearer_token(&parts.headers).is_some();
+        let has_cookie = get_cookie(&parts.headers, "np_session").is_some();
 
-        if !has_auth {
+        if !has_bearer && !has_cookie {
             return Ok(None);
         }
 
-        // Auth header present — attempt extraction.
-        // If the header IS present but the token is invalid/expired, return 401
+        // Credentials present — attempt extraction.
+        // If credentials ARE present but invalid/expired, return 401
         // instead of silently downgrading to anonymous access. This prevents
         // trusted users from unknowingly creating public pastes with expired sessions.
         AuthSession::from_request_parts(parts, state)
