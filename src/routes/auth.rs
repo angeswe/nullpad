@@ -139,10 +139,22 @@ pub async fn verify_challenge(
 
     tracing::info!(action = "auth_success", user_id = %user.id, role = %user.role, "User authenticated");
 
-    Ok(Json(VerifyResponse {
-        token,
-        role: user.role.to_string(),
-    }))
+    // Set an HttpOnly role cookie for server-side page gating (/admin.html, /trusted.html).
+    // This is not a security token — real auth is still the Bearer token on all API calls.
+    // The cookie only prevents unauthenticated scraping of protected HTML pages.
+    let role_str = user.role.to_string();
+    let cookie = format!(
+        "np_role={}; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age={}",
+        role_str, state.config.session_ttl_secs
+    );
+
+    Ok((
+        [(axum::http::header::SET_COOKIE, cookie)],
+        Json(VerifyResponse {
+            token,
+            role: role_str,
+        }),
+    ))
 }
 
 /// POST /api/register — Register with invite token
@@ -245,5 +257,12 @@ pub async fn logout(
 
     tracing::info!(action = "logout", user_id = %session.user_id, "User logged out");
 
-    Ok(StatusCode::NO_CONTENT)
+    // Clear the role cookie on logout.
+    let clear_cookie =
+        "np_role=; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT";
+
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(axum::http::header::SET_COOKIE, clear_cookie)],
+    ))
 }
