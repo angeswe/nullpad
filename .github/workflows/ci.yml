@@ -32,6 +32,8 @@ jobs:
             fi
             sleep 1
           done
+      - name: Verify vendor JS hashes and SRI attributes
+        run: bash tools/verify-vendor.sh
       - name: Unit tests
         run: cargo test --lib
         env:
@@ -41,8 +43,8 @@ jobs:
         env:
           REDIS_URL: redis://:ci-test-pass@127.0.0.1:6379
 
-  clippy:
-    name: Clippy
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -50,31 +52,10 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dtolnay/rust-toolchain@stable # branch ref by design
         with:
-          components: clippy
+          components: clippy, rustfmt
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
-      - run: cargo clippy -- -D warnings
-
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dtolnay/rust-toolchain@stable # branch ref by design
-        with:
-          components: rustfmt
       - run: cargo fmt --check
-
-  vendor-integrity:
-    name: Vendor JS Integrity
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - name: Verify vendor JS hashes and SRI attributes
-        run: bash tools/verify-vendor.sh
+      - run: cargo clippy -- -D warnings
 
   audit:
     name: Security Audit
@@ -90,7 +71,6 @@ jobs:
 
   container-scan:
     name: Container Scan
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -98,11 +78,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Build image
         run: docker build -t nullpad:scan .
-      - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          image-ref: 'nullpad:scan'
-          format: 'table'
-          exit-code: '1'
-          severity: 'CRITICAL,HIGH'
-          ignore-unfixed: true
+      - name: Trivy vulnerability scan # no trivy-action — supply chain compromised twice (2025, 2026)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            ghcr.io/aquasecurity/trivy:0.69.3@sha256:7228e304ae0f610a1fad937baa463598cadac0c2ac4027cc68f3a8b997115689 \
+            image --exit-code 1 --severity CRITICAL,HIGH \
+            --ignore-unfixed --format table \
+            nullpad:scan
