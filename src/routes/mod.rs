@@ -154,19 +154,12 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
-/// Serve a protected static JS file with correct Content-Type.
-async fn serve_protected_js(path: &str) -> Result<impl IntoResponse, AppError> {
-    let content = read_static_file(path).await?;
-    Ok((
-        StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
-        content,
-    ))
-}
-
-/// Read a static file, mapping I/O errors to appropriate HTTP errors.
-async fn read_static_file(path: &str) -> Result<String, AppError> {
-    tokio::fs::read_to_string(path)
+/// Serve a protected file with the given Content-Type header.
+async fn serve_protected_file(
+    path: &str,
+    content_type: &'static str,
+) -> Result<impl IntoResponse, AppError> {
+    let content = tokio::fs::read_to_string(path)
         .await
         .map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => AppError::NotFound("Not found".to_string()),
@@ -174,27 +167,22 @@ async fn read_static_file(path: &str) -> Result<String, AppError> {
                 tracing::error!(path = %path, error = %e, "Failed to read protected static file");
                 AppError::Internal("Failed to read page".to_string())
             }
-        })
-}
-
-/// Serve a protected static HTML file with correct Content-Type.
-async fn serve_protected_html(path: &str) -> Result<impl IntoResponse, AppError> {
-    let content = read_static_file(path).await?;
+        })?;
     Ok((
         StatusCode::OK,
-        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [(axum::http::header::CONTENT_TYPE, content_type)],
         content,
     ))
 }
 
 /// GET /js/admin.js — Admin JS (requires admin auth)
 async fn protected_admin_js(AdminSession(_): AdminSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_js("protected/js/admin.js").await
+    serve_protected_file("protected/js/admin.js", "application/javascript").await
 }
 
 /// GET /js/trusted.js — Trusted JS (requires auth)
 async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_js("protected/js/trusted.js").await
+    serve_protected_file("protected/js/trusted.js", "application/javascript").await
 }
 
 /// GET /admin.html — Admin dashboard (requires valid admin session)
@@ -204,14 +192,14 @@ async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse
 async fn protected_admin_html(
     AdminSession(_): AdminSession,
 ) -> Result<impl IntoResponse, AppError> {
-    serve_protected_html("protected/admin.html").await
+    serve_protected_file("protected/admin.html", "text/html; charset=utf-8").await
 }
 
 /// GET /trusted.html — Trusted user dashboard (requires valid session)
 ///
 /// Any authenticated user (admin or trusted) may access this page.
 async fn protected_trusted_html(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_html("protected/trusted.html").await
+    serve_protected_file("protected/trusted.html", "text/html; charset=utf-8").await
 }
 
 /// Build the API router with all endpoints.
