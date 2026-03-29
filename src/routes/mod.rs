@@ -20,6 +20,13 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::net::{IpAddr, SocketAddr};
 
+/// Paths to protected files served via auth-gated route handlers.
+/// These files must NOT be placed under `static/` where ServeDir could serve them directly.
+const PROTECTED_ADMIN_HTML: &str = "protected/admin.html";
+const PROTECTED_TRUSTED_HTML: &str = "protected/trusted.html";
+const PROTECTED_ADMIN_JS: &str = "protected/js/admin.js";
+const PROTECTED_TRUSTED_JS: &str = "protected/js/trusted.js";
+
 /// Check a rate limit key and return a RateLimited error if exceeded.
 ///
 /// Wraps `check_rate_limit` with standard error mapping. The optional `warn_context`
@@ -177,12 +184,12 @@ async fn serve_protected_file(
 
 /// GET /js/admin.js — Admin JS (requires admin auth)
 async fn protected_admin_js(AdminSession(_): AdminSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_file("protected/js/admin.js", "application/javascript").await
+    serve_protected_file(PROTECTED_ADMIN_JS, "application/javascript").await
 }
 
 /// GET /js/trusted.js — Trusted JS (requires auth)
 async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_file("protected/js/trusted.js", "application/javascript").await
+    serve_protected_file(PROTECTED_TRUSTED_JS, "application/javascript").await
 }
 
 /// GET /admin.html — Admin dashboard (requires valid admin session)
@@ -192,14 +199,14 @@ async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse
 async fn protected_admin_html(
     AdminSession(_): AdminSession,
 ) -> Result<impl IntoResponse, AppError> {
-    serve_protected_file("protected/admin.html", "text/html; charset=utf-8").await
+    serve_protected_file(PROTECTED_ADMIN_HTML, "text/html; charset=utf-8").await
 }
 
 /// GET /trusted.html — Trusted user dashboard (requires valid session)
 ///
 /// Any authenticated user (admin or trusted) may access this page.
 async fn protected_trusted_html(_session: AuthSession) -> Result<impl IntoResponse, AppError> {
-    serve_protected_file("protected/trusted.html", "text/html; charset=utf-8").await
+    serve_protected_file(PROTECTED_TRUSTED_HTML, "text/html; charset=utf-8").await
 }
 
 /// Build the API router with all endpoints.
