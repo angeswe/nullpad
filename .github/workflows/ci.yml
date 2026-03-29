@@ -98,11 +98,11 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - name: Build image
         run: docker build -t nullpad:scan .
-      - name: Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # v0.33.1
-        with:
-          image-ref: 'nullpad:scan'
-          format: 'table'
-          exit-code: '1'
-          severity: 'CRITICAL,HIGH'
-          ignore-unfixed: true
+      - name: Trivy vulnerability scan # no trivy-action — supply chain compromised twice (2025, 2026)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            ghcr.io/aquasecurity/trivy:0.69.3@sha256:7228e304ae0f610a1fad937baa463598cadac0c2ac4027cc68f3a8b997115689 \
+            image --exit-code 1 --severity CRITICAL,HIGH \
+            --ignore-unfixed --format table \
+            nullpad:scan
