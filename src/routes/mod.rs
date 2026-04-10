@@ -94,11 +94,13 @@ pub fn hash_ip(salt: &[u8], ip: &IpAddr) -> String {
     mac.update(ip.to_string().as_bytes());
     let result = mac.finalize();
     let bytes = result.into_bytes();
-    bytes.iter().fold(String::with_capacity(64), |mut s: String, b| {
-        use std::fmt::Write;
-        let _ = write!(s, "{:02x}", b);
-        s
-    })
+    bytes
+        .iter()
+        .fold(String::with_capacity(64), |mut s: String, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+            s
+        })
 }
 
 /// Extract client IP from X-Forwarded-For header, falling back to ConnectInfo.
