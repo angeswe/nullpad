@@ -12,7 +12,7 @@ use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 #[allow(unused_imports)]
 use futures::FutureExt;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use nullpad::{
     auth::middleware::AppState, config::Config, middleware::security_headers, routes, storage,
 };

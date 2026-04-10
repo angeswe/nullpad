@@ -16,7 +16,7 @@ use axum::{
     Json, Router,
 };
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::net::{IpAddr, SocketAddr};
 
@@ -94,7 +94,7 @@ pub fn hash_ip(salt: &[u8], ip: &IpAddr) -> String {
     mac.update(ip.to_string().as_bytes());
     let result = mac.finalize();
     let bytes = result.into_bytes();
-    bytes.iter().fold(String::with_capacity(64), |mut s, b| {
+    bytes.iter().fold(String::with_capacity(64), |mut s: String, b| {
         use std::fmt::Write;
         let _ = write!(s, "{:02x}", b);
         s
