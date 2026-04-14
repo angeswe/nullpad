@@ -1,0 +1,33 @@
+services:
+  # Override: when this file is layered on top of docker-compose.yml, stop
+  # publishing nullpad's plaintext port so the only reachable endpoint is
+  # Caddy on :3016. Hitting :3015 would otherwise bypass TLS, drop Secure
+  # cookies, and break crypto.subtle — defeating the point of the override.
+  nullpad:
+    ports: !reset []
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "3016:443"
+    depends_on:
+      nullpad:
+        condition: service_healthy
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - internal
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: '0.5'
+
+volumes:
+  caddy-data:
+  caddy-config:
