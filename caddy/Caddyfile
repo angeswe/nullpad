@@ -1,0 +1,6 @@
+# Dev-only HTTPS front for LAN testing. NOT for production.
+# Generates a self-signed cert via Caddy's internal CA.
+:443 {
+	tls internal
+	reverse_proxy nullpad:3000
+}
