@@ -22,7 +22,7 @@ redis = { version = "1.2.0", features = ["tokio-comp", "aio", "connection-manage
 # Cryptography & authentication
 ed25519-dalek = { version = "2.2", features = ["rand_core", "zeroize"] }
 argon2 = "0.5"
-rand = "0.10.0"
+rand = "0.10.1"
 base64 = "0.22.1"
 zeroize = { version = "1.8", features = ["derive"] }
 hmac = "0.13"
