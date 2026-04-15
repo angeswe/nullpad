@@ -23,7 +23,8 @@ jobs:
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
       - name: Start Redis with authentication
         run: |
-          docker run -d --name redis -p 6379:6379 redis:7-alpine \
+          docker run -d --name redis -p 6379:6379 \
+            redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065 \
             redis-server --requirepass ci-test-pass
           for i in $(seq 1 30); do
             if docker exec redis redis-cli -a ci-test-pass ping 2>/dev/null | grep -q PONG; then
@@ -35,11 +36,11 @@ jobs:
       - name: Verify vendor JS hashes and SRI attributes
         run: bash tools/verify-vendor.sh
       - name: Unit tests
-        run: cargo test --lib
+        run: cargo test --locked --lib
         env:
           REDIS_URL: redis://:ci-test-pass@127.0.0.1:6379
       - name: Integration tests (sequential, shared Redis)
-        run: cargo test --test integration -- --test-threads=1
+        run: cargo test --locked --test integration -- --test-threads=1
         env:
           REDIS_URL: redis://:ci-test-pass@127.0.0.1:6379
 
@@ -55,7 +56,7 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
       - run: cargo fmt --check
-      - run: cargo clippy -- -D warnings
+      - run: cargo clippy --locked -- -D warnings
 
   audit:
     name: Security Audit
