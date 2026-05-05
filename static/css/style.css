@@ -139,6 +139,10 @@ pre code {
   padding: 2rem 1rem;
 }
 
+.container--wide {
+  max-width: 1100px;
+}
+
 .page-header {
   margin-bottom: 2rem;
   padding-bottom: 1rem;
