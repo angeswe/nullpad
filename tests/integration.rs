@@ -128,6 +128,8 @@ async fn main() {
         test_protected_html_with_session_cookie,
         test_protected_html_not_served_by_static_fallback,
         test_verify_sets_np_session_cookie,
+        test_clearnet_https_sets_secure_cookie,
+        test_onion_mode_omits_secure_cookie,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -194,6 +196,73 @@ async fn spawn_test_server_with_auth_limit(
         admin_alias: admin_alias.clone(),
         redis_url: test_redis_url.clone(),
         rate_limit_auth_per_min: limit,
+        paste_storage_path,
+        ..Config::test_default()
+    };
+
+    let state = AppState {
+        redis: redis_manager,
+        config: Arc::new(config),
+        ip_hmac_salt: Arc::new(rand::random()),
+    };
+
+    let app = routes::api_router()
+        .fallback_service(ServeDir::new("static"))
+        .layer(axum::middleware::from_fn(security_headers))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind");
+    let addr = listener.local_addr().unwrap();
+
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let base_url = format!("http://{}", addr);
+    (base_url, con, admin_key, admin_alias)
+}
+
+/// Spin up a test server with onion_mode + trusted_proxy_count overrides.
+/// Used to exercise the Secure cookie attribute logic under both Tor (onion_mode=true)
+/// and clearnet-HTTPS-behind-proxy (onion_mode=false, trusted_proxy_count=1) shapes.
+async fn spawn_test_server_with_cookie_config(
+    onion_mode: bool,
+    trusted_proxy_count: usize,
+) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
+    let (admin_key, admin_pubkey) = test_keypair();
+    let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
+
+    let test_redis_url = get_redis_url().to_string();
+    let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
+    let redis_manager = redis_client
+        .get_connection_manager()
+        .await
+        .expect("Failed to get connection manager");
+    let mut con = redis_manager.clone();
+
+    nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, &admin_alias)
+        .await
+        .expect("Failed to upsert admin");
+
+    let paste_storage_path =
+        std::env::temp_dir().join(format!("nullpad_test_{}", nanoid::nanoid!(8)));
+    nullpad::storage::blob::init_storage(&paste_storage_path)
+        .await
+        .expect("Failed to init paste storage");
+
+    let config = Config {
+        admin_pubkey,
+        admin_alias: admin_alias.clone(),
+        redis_url: test_redis_url.clone(),
+        onion_mode,
+        trusted_proxy_count,
         paste_storage_path,
         ..Config::test_default()
     };
@@ -2457,5 +2526,85 @@ async fn test_verify_sets_np_session_cookie() {
     assert!(
         cookie.contains("SameSite=Strict"),
         "cookie should be SameSite=Strict"
+    );
+}
+
+/// Drive a verify flow against the given base URL, returning the Set-Cookie header.
+/// Optionally sets X-Forwarded-Proto: https to simulate a trusted reverse proxy.
+async fn fetch_verify_set_cookie(
+    base_url: &str,
+    alias: &str,
+    signing_key: &SigningKey,
+    forwarded_proto_https: bool,
+) -> String {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": alias}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let nonce_b64 = body["nonce"].as_str().unwrap();
+
+    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
+    let signature = signing_key.sign(&nonce_bytes);
+    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+
+    let mut req = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": alias, "signature": sig_b64}));
+    if forwarded_proto_https {
+        req = req.header("x-forwarded-proto", "https");
+    }
+    let resp = req.send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+
+    resp.headers()
+        .get("set-cookie")
+        .expect("verify response must set np_session cookie")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Baseline for the next test: with onion_mode=false, a trusted proxy forwarding
+/// X-Forwarded-Proto: https causes Secure to be set. Confirms our HTTPS detection
+/// works so the onion_mode=true test below is actually testing onion_mode's effect
+/// and not just the HTTP transport.
+async fn test_clearnet_https_sets_secure_cookie() {
+    let (base_url, _con, admin_key, admin_alias) =
+        spawn_test_server_with_cookie_config(false, 1).await;
+    let cookie = fetch_verify_set_cookie(&base_url, &admin_alias, &admin_key, true).await;
+    assert!(
+        cookie.contains("Secure"),
+        "clearnet + X-Forwarded-Proto: https must set Secure (got: {})",
+        cookie
+    );
+}
+
+/// With ONION_MODE=true, the Secure flag must be omitted from Set-Cookie even when
+/// a trusted reverse proxy forwards X-Forwarded-Proto: https. Tor's onion transport
+/// provides encryption; browsers discard Secure cookies over the plain HTTP that the
+/// onion endpoint receives, which would break auth.
+async fn test_onion_mode_omits_secure_cookie() {
+    let (base_url, _con, admin_key, admin_alias) =
+        spawn_test_server_with_cookie_config(true, 1).await;
+    let cookie = fetch_verify_set_cookie(&base_url, &admin_alias, &admin_key, true).await;
+    assert!(
+        !cookie.contains("Secure"),
+        "onion_mode=true must omit Secure attribute (got: {})",
+        cookie
+    );
+    // Other attributes still present.
+    assert!(cookie.contains("HttpOnly"), "HttpOnly must remain set");
+    assert!(
+        cookie.contains("SameSite=Strict"),
+        "SameSite=Strict must remain set"
     );
 }
