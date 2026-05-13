@@ -392,8 +392,8 @@
   // Logout
   // ============================================================================
 
-  function handleLogout() {
-    NullpadAuth.clearSession();
+  async function handleLogout() {
+    await NullpadAuth.clearSession();
     window.location.href = '/';
   }
 
