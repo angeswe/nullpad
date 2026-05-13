@@ -159,6 +159,12 @@ async fn main() {
     let config = Config::from_env().expect("Failed to load config");
     tracing::info!("Starting nullpad on {}", config.bind_addr);
 
+    if config.onion_mode {
+        tracing::warn!(
+            "onion mode active: Secure cookie flag disabled; assumes Tor transport provides encryption"
+        );
+    }
+
     // Initialize paste storage directory
     storage::blob::init_storage(&config.paste_storage_path)
         .await

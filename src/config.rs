@@ -42,6 +42,13 @@ pub struct Config {
 
     // Paste storage
     pub paste_storage_path: std::path::PathBuf,
+
+    // Tor / onion deployment: when true, omit the Secure flag on the session
+    // cookie. Tor transport already provides encryption end-to-end to the
+    // hidden service, and browsers silently discard Secure cookies over plain
+    // HTTP (how an onion address is reached inside Tor). Do NOT enable on
+    // clearnet deployments — Secure protects against MITM cookie theft there.
+    pub onion_mode: bool,
 }
 
 impl std::fmt::Debug for Config {
@@ -66,6 +73,7 @@ impl std::fmt::Debug for Config {
             .field("max_sessions_per_user", &self.max_sessions_per_user)
             .field("max_pastes_per_user", &self.max_pastes_per_user)
             .field("paste_storage_path", &self.paste_storage_path)
+            .field("onion_mode", &self.onion_mode)
             .finish()
     }
 }
@@ -193,6 +201,21 @@ impl Config {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|_| std::path::PathBuf::from("/data/pastes"));
 
+        // Onion mode: Tor hidden-service deployment toggle
+        let onion_mode = match env::var("ONION_MODE") {
+            Ok(v) => match v.to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => true,
+                "false" | "0" | "no" | "off" | "" => false,
+                _ => {
+                    return Err(ConfigError::InvalidValue(
+                        "ONION_MODE".to_string(),
+                        format!("expected true/false (got {:?})", v),
+                    ));
+                }
+            },
+            Err(_) => false,
+        };
+
         Ok(Config {
             admin_pubkey,
             admin_alias,
@@ -213,7 +236,39 @@ impl Config {
             max_sessions_per_user,
             max_pastes_per_user,
             paste_storage_path,
+            onion_mode,
         })
+    }
+}
+
+impl Config {
+    /// Minimal Config for use in tests. Override individual fields as needed:
+    /// `Config { rate_limit_auth_per_min: 1, ..Config::test_default() }`.
+    /// Public so integration tests in `tests/` can use it.
+    #[doc(hidden)]
+    pub fn test_default() -> Self {
+        Config {
+            admin_pubkey: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+            admin_alias: "admin".to_string(),
+            redis_url: "redis://127.0.0.1:6379".to_string(),
+            bind_addr: "127.0.0.1:0".parse().unwrap(),
+            max_upload_bytes: 52_428_800,
+            default_ttl_secs: 86_400,
+            max_ttl_secs: 604_800,
+            invite_ttl_secs: 43_200,
+            user_idle_ttl_secs: 172_800,
+            user_active_ttl_secs: 86_400,
+            session_ttl_secs: 900,
+            challenge_ttl_secs: 30,
+            rate_limit_paste_per_min: 10_000,
+            rate_limit_auth_per_min: 10_000,
+            rate_limit_pin_attempt: 10_000,
+            trusted_proxy_count: 0,
+            max_sessions_per_user: 5,
+            max_pastes_per_user: 50,
+            paste_storage_path: std::path::PathBuf::from("/tmp/nullpad-test"),
+            onion_mode: false,
+        }
     }
 }
 
@@ -264,6 +319,7 @@ mod tests {
         env::remove_var("MAX_SESSIONS_PER_USER");
         env::remove_var("MAX_PASTES_PER_USER");
         env::remove_var("PASTE_STORAGE_PATH");
+        env::remove_var("ONION_MODE");
     }
 
     #[test]
@@ -523,6 +579,53 @@ mod tests {
             config.paste_storage_path,
             std::path::PathBuf::from("/data/pastes")
         );
+        assert!(!config.onion_mode);
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_onion_mode_parses_truthy_values() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+
+        for v in ["true", "1", "yes", "on", "TRUE", "True"] {
+            env::set_var("ONION_MODE", v);
+            let config = Config::from_env().unwrap();
+            assert!(config.onion_mode, "value {:?} should enable onion_mode", v);
+        }
+
+        for v in ["false", "0", "no", "off", "", "False"] {
+            env::set_var("ONION_MODE", v);
+            let config = Config::from_env().unwrap();
+            assert!(
+                !config.onion_mode,
+                "value {:?} should disable onion_mode",
+                v
+            );
+        }
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_onion_mode_invalid_value_errors() {
+        let _guard = lock_test();
+        clear_test_env();
+
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("ONION_MODE", "maybe");
+
+        let result = Config::from_env();
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConfigError::InvalidValue(ref s, _) if s == "ONION_MODE"
+        ));
+
         clear_test_env();
     }
 }

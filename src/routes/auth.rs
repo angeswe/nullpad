@@ -18,6 +18,23 @@ use axum::{
 use base64::{engine::general_purpose, Engine as _};
 use std::net::SocketAddr;
 
+/// Compute the `Secure` cookie attribute fragment for the session cookie.
+///
+/// Returns `"; Secure"` when the transport is HTTPS and onion_mode is disabled.
+/// In onion_mode, omit `Secure` unconditionally: Tor provides transport encryption,
+/// and browsers silently discard `Secure` cookies over plain HTTP, which is how a
+/// hidden service is reached from inside the Tor network. Do NOT use onion_mode
+/// on clearnet deployments.
+fn secure_cookie_attr(headers: &HeaderMap, config: &crate::config::Config) -> &'static str {
+    if config.onion_mode {
+        ""
+    } else if is_https(headers, config.trusted_proxy_count) {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
 /// Check if the incoming request arrived over HTTPS.
 ///
 /// Only trusts `X-Forwarded-Proto` / `Forwarded` headers when `trusted_proxy_count > 0`
@@ -173,11 +190,7 @@ pub async fn verify_challenge(
     // Set HttpOnly session cookie for browser navigation to protected pages.
     // The same token is returned in JSON for JS to store in sessionStorage (API calls).
     let role_str = user.role.to_string();
-    let secure = if is_https(&headers, state.config.trusted_proxy_count) {
-        "; Secure"
-    } else {
-        ""
-    };
+    let secure = secure_cookie_attr(&headers, &state.config);
     let cookie = format!(
         "np_session={}; HttpOnly; SameSite=Strict{}; Path=/; Max-Age={}",
         token, secure, state.config.session_ttl_secs
@@ -294,11 +307,7 @@ pub async fn logout(
     tracing::info!(action = "logout", user_id = %session.user_id, "User logged out");
 
     // Clear the session cookie on logout.
-    let secure = if is_https(&headers, state.config.trusted_proxy_count) {
-        "; Secure"
-    } else {
-        ""
-    };
+    let secure = secure_cookie_attr(&headers, &state.config);
     let clear_cookie = format!(
         "np_session=; HttpOnly; SameSite=Strict{}; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
         secure
@@ -308,4 +317,49 @@ pub async fn logout(
         StatusCode::NO_CONTENT,
         [(axum::http::header::SET_COOKIE, clear_cookie)],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    fn test_config(onion_mode: bool, trusted_proxy_count: usize) -> Config {
+        Config {
+            onion_mode,
+            trusted_proxy_count,
+            ..Config::test_default()
+        }
+    }
+
+    fn https_headers() -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-proto", "https".parse().unwrap());
+        h
+    }
+
+    #[test]
+    fn secure_cookie_attr_https_no_onion_sets_secure() {
+        let cfg = test_config(false, 1);
+        assert_eq!(secure_cookie_attr(&https_headers(), &cfg), "; Secure");
+    }
+
+    #[test]
+    fn secure_cookie_attr_http_no_onion_no_secure() {
+        let cfg = test_config(false, 0);
+        assert_eq!(secure_cookie_attr(&HeaderMap::new(), &cfg), "");
+    }
+
+    #[test]
+    fn secure_cookie_attr_onion_mode_omits_secure_even_when_https() {
+        let cfg = test_config(true, 1);
+        // Even with X-Forwarded-Proto: https from a trusted proxy, onion_mode wins.
+        assert_eq!(secure_cookie_attr(&https_headers(), &cfg), "");
+    }
+
+    #[test]
+    fn secure_cookie_attr_onion_mode_omits_secure_on_http() {
+        let cfg = test_config(true, 0);
+        assert_eq!(secure_cookie_attr(&HeaderMap::new(), &cfg), "");
+    }
 }

@@ -193,22 +193,9 @@ async fn spawn_test_server_with_auth_limit(
         admin_pubkey,
         admin_alias: admin_alias.clone(),
         redis_url: test_redis_url.clone(),
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        max_upload_bytes: 52_428_800,
-        default_ttl_secs: 86400,
-        max_ttl_secs: 604800,
-        invite_ttl_secs: 43200,
-        user_idle_ttl_secs: 172800,
-        user_active_ttl_secs: 86400,
-        session_ttl_secs: 900,
-        challenge_ttl_secs: 30,
-        rate_limit_paste_per_min: 10000,
         rate_limit_auth_per_min: limit,
-        rate_limit_pin_attempt: 10000,
-        trusted_proxy_count: 0,
-        max_sessions_per_user: 5,
-        max_pastes_per_user: 50,
         paste_storage_path,
+        ..Config::test_default()
     };
 
     let state = AppState {
@@ -269,22 +256,9 @@ async fn spawn_test_server_with_pin_limit(
         admin_pubkey,
         admin_alias: admin_alias.clone(),
         redis_url: test_redis_url.clone(),
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        max_upload_bytes: 52_428_800,
-        default_ttl_secs: 86400,
-        max_ttl_secs: 604800,
-        invite_ttl_secs: 43200,
-        user_idle_ttl_secs: 172800,
-        user_active_ttl_secs: 86400,
-        session_ttl_secs: 900,
-        challenge_ttl_secs: 30,
-        rate_limit_paste_per_min: 10000,
-        rate_limit_auth_per_min: 10000,
         rate_limit_pin_attempt: limit,
-        trusted_proxy_count: 0,
-        max_sessions_per_user: 5,
-        max_pastes_per_user: 50,
         paste_storage_path,
+        ..Config::test_default()
     };
 
     let state = AppState {
