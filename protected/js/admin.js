@@ -64,7 +64,7 @@
     });
 
     if (response.status === 401) {
-      NullpadAuth.clearSession();
+      await NullpadAuth.clearSession();
       window.location.href = '/login.html';
       return;
     }
