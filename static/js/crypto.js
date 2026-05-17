@@ -124,6 +124,62 @@
     }
 
     // ============================================================================
+    // Plaintext Framing
+    // ============================================================================
+    //
+    // Inside the AES-GCM ciphertext, plaintext is framed as:
+    //   [version: 1 byte (0x01)] [length: 4 bytes LE] [data: <length> bytes] [padding: trailing bytes ignored]
+    //
+    // The version byte lets future formats add padding (forthcoming bucket
+    // ladder) without breaking existing pastes. The length prefix is what
+    // tells the decoder where real data ends so padding can be stripped.
+    //
+    // Backward compatibility: pastes encrypted before this change have no
+    // version byte. On decrypt, a first byte != VERSION_V1 (or a malformed
+    // V1 header) is treated as legacy v0 and returned unchanged.
+
+    const VERSION_V1 = 0x01;
+    const V1_HEADER_LEN = 5; // 1 byte version + 4 bytes length
+
+    /** Wrap raw plaintext bytes in the V1 frame: [0x01][length LE u32][data]. */
+    function frameV1(plaintextBytes) {
+        const out = new Uint8Array(V1_HEADER_LEN + plaintextBytes.length);
+        out[0] = VERSION_V1;
+        // 4-byte little-endian length prefix
+        new DataView(out.buffer).setUint32(1, plaintextBytes.length, true);
+        out.set(plaintextBytes, V1_HEADER_LEN);
+        return out;
+    }
+
+    /**
+     * Strip the V1 frame if present and well-formed. Returns null otherwise so
+     * the caller can fall back to the legacy v0 path (return bytes as-is).
+     *
+     * A legacy v0 plaintext whose first byte happens to be 0x01 followed by a
+     * 4-byte run that decodes to a length > body would mistakenly enter this
+     * function. By returning null on that mismatch rather than throwing, we
+     * keep legacy binary pastes (e.g. files starting with 0x01) decryptable
+     * instead of surfacing as the generic "Invalid key or PIN" error that the
+     * decrypt-retry chain in view.js would otherwise remap a throw into.
+     * The residual collision case — first byte 0x01 AND a 4-byte length value
+     * that happens to be <= body — silently truncates the legacy plaintext;
+     * this is the unavoidable migration cost of an in-band version sniff and
+     * affects only pre-existing binary pastes.
+     */
+    function unframeV1OrNull(decryptedBytes) {
+        if (decryptedBytes.length < V1_HEADER_LEN) return null;
+        if (decryptedBytes[0] !== VERSION_V1) return null;
+        const length = new DataView(
+            decryptedBytes.buffer,
+            decryptedBytes.byteOffset + 1,
+            4
+        ).getUint32(0, true);
+        const bodyLen = decryptedBytes.length - V1_HEADER_LEN;
+        if (length > bodyLen) return null;
+        return decryptedBytes.subarray(V1_HEADER_LEN, V1_HEADER_LEN + length);
+    }
+
+    // ============================================================================
     // Encryption
     // ============================================================================
 
@@ -139,6 +195,10 @@
         const plaintextBytes = typeof plaintext === 'string'
             ? textEncode(plaintext)
             : plaintext;
+
+        // Frame with version byte + length prefix before encryption so the
+        // decoder can strip future padding back to the real data length.
+        const framedBytes = frameV1(plaintextBytes);
 
         // Decode key
         const keyBytes = base64urlDecode(keyBase64url);
@@ -167,7 +227,7 @@
             const ciphertext = await crypto.subtle.encrypt(
                 params,
                 cryptoKey,
-                plaintextBytes
+                framedBytes
             );
 
             // Concatenate IV + ciphertext
@@ -228,7 +288,10 @@
                 ciphertext
             );
 
-            return new Uint8Array(plaintext);
+            const decryptedBytes = new Uint8Array(plaintext);
+            // Strip V1 frame ([0x01][len LE u32][data]) when present. Legacy
+            // (pre-frame) pastes lack the version byte and are returned as-is.
+            return unframeV1OrNull(decryptedBytes) ?? decryptedBytes;
         } finally {
             keyBytes.fill(0);
         }
