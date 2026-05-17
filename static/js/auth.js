@@ -174,18 +174,23 @@
   }
 
   /**
-   * Clear session from sessionStorage
+   * Clear session from sessionStorage and best-effort POST to /api/auth/logout.
+   * Network errors and non-2xx responses are logged via console.warn but do not
+   * throw — local sessionStorage is always cleared.
    */
   async function clearSession() {
     const token = sessionStorage.getItem(SESSION_TOKEN_KEY);
     if (token) {
+      const warnLogout = (reason) =>
+        console.warn(`Logout ${reason}; server-side session may persist until its TTL expires.`);
       try {
-        await fetch('/api/auth/logout', {
+        const response = await fetch('/api/auth/logout', {
           method: 'POST',
           headers: { 'Authorization': `Bearer ${token}` }
         });
-      } catch (_) {
-        // Best-effort server-side invalidation
+        if (!response.ok) warnLogout(`request returned status ${response.status}`);
+      } catch (err) {
+        warnLogout(`request failed (${err.name}: ${err.message})`);
       }
     }
     sessionStorage.removeItem(SESSION_TOKEN_KEY);
