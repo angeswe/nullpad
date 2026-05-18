@@ -221,18 +221,23 @@
           const fileMeta = JSON.parse(new TextDecoder().decode(metaBytes));
           if (typeof fileMeta.filename === 'string') metadata.filename = fileMeta.filename;
           if (typeof fileMeta.content_type === 'string') metadata.mimetype = fileMeta.content_type;
-        } catch {
-          // Fallback to server-provided plaintext metadata (legacy pastes)
+        } catch (err) {
+          // Intentional fallback to server-provided plaintext metadata for legacy
+          // pastes. Logged so unexpected failures (e.g. corruption, wrong key) are
+          // visible in devtools instead of silently masquerading as a legacy paste.
+          console.warn('Encrypted-metadata decrypt failed; using server-provided metadata:', err);
         }
       }
 
-      // Try decryption with paste ID as AAD first (new format),
-      // fall back to without AAD (backward compat for old pastes)
+      // Try decryption with paste ID as AAD first (new format), fall back to
+      // without AAD only on auth-tag mismatch (OperationError) — that's the
+      // genuine legacy compat case. Other error classes (TypeError, framing
+      // errors) propagate so they reach the outer catch's console.error.
       let bytes;
       try {
         bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey, pasteId);
-      } catch {
-        // Fallback to non-AAD decryption (backward compat for old pastes)
+      } catch (err) {
+        if (err.name !== 'OperationError') throw err;
         bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey);
       }
 
@@ -247,6 +252,9 @@
         return { type: 'binary', content: null, bytes: bytes };
       }
     } catch (err) {
+      // Surface the real error in devtools but keep the user-facing message
+      // generic to avoid leaking decryption-state details to bystanders.
+      console.error('Paste decryption failed:', err);
       throw new Error('Decryption failed. Invalid key or PIN.');
     }
   }
