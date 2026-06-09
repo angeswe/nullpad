@@ -155,6 +155,12 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - marked.js + highlight.js for markdown rendering
 - DOMPurify for XSS-safe HTML sanitization
 
+> **Note:** Mermaid/flowchart diagrams are intentionally **not** supported. A
+> `mermaid` code block renders as plain syntax-highlighted text, not a diagram.
+> Mermaid would require loosening the strict CSP (`style-src` inline styles) and
+> allowlisting a large SVG surface in DOMPurify, which conflicts with the
+> zero-knowledge/strict-CSP security posture.
+
 ## API Endpoints
 
 ### Public
