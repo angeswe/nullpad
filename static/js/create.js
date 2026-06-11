@@ -162,14 +162,36 @@
       // 4. Generate paste ID client-side (used as AAD for AES-GCM binding)
       const clientPasteId = NullpadCrypto.generateId();
 
-      // 5. Encrypt content with paste ID as AAD
-      const encrypted = await NullpadCrypto.encrypt(contentBytes, encryptionKey, clientPasteId);
+      // Pre-flight size check: ensure the framed content will fit the top bucket.
+      // contentPadTarget returns null when no bucket can hold the framed length,
+      // which encrypt() would also catch — this early check avoids allocating a
+      // large buffer first.
+      {
+        const { AES_GCM_OVERHEAD, V1_HEADER_LEN, contentPadTarget } = NullpadCrypto;
+        const framedLen = contentBytes.length + V1_HEADER_LEN;
+        const serverCap = (maxUploadBytes !== null ? maxUploadBytes : 52428800);
+        const topBucket = serverCap - AES_GCM_OVERHEAD;
+        if (contentPadTarget(framedLen) === null || framedLen >= topBucket) {
+          const limitMB = ((serverCap - AES_GCM_OVERHEAD - V1_HEADER_LEN) / (1024 * 1024)).toFixed(0);
+          throw new Error(`Content too large: exceeds maximum supported upload size. Maximum is ${limitMB}MB.`);
+        }
+      }
+
+      // 5. Encrypt content with paste ID as AAD, padded to the content bucket ladder.
+      // Bucket selection uses "strictly greater than framed length" so equal-to-bucket
+      // inputs are pushed to the next bucket, preventing a no-padding side channel.
+      const encrypted = await NullpadCrypto.encrypt(
+        contentBytes, encryptionKey, clientPasteId, { pad: 'content' }
+      );
       const encryptedBytes = NullpadCrypto.base64Decode(encrypted);
 
-      // 6. Encrypt filename and content_type to prevent metadata leakage
+      // 6. Encrypt filename and content_type to prevent metadata leakage.
+      // Padded to the next multiple of 512 strictly greater than the framed length,
+      // hiding filename-length fingerprinting. Worst-case ciphertext ~1403 base64
+      // bytes — well within the server's 4096-byte encrypted_metadata cap.
       const fileMetadata = JSON.stringify({ filename: filename, content_type: contentType });
       const encryptedMetadata = await NullpadCrypto.encrypt(
-        NullpadCrypto.textEncode(fileMetadata), encryptionKey, clientPasteId
+        NullpadCrypto.textEncode(fileMetadata), encryptionKey, clientPasteId, { pad: 'metadata' }
       );
 
       // 7. Compute PIN verifier for server-side validation (if PIN set)
@@ -317,7 +339,12 @@
   // ============================================================================
 
   async function init() {
-    // Fetch server config so client-side size check stays in sync
+    // Fetch server config to keep the client-side size pre-flight in sync with
+    // the server limit. On failure we fall back to the 50MiB default constant
+    // (same value baked into the crypto module). This is deliberate: the pre-flight
+    // is best-effort UX only — the server enforces the real limit authoritatively
+    // and any 413/400 rejection during upload surfaces through the existing error
+    // path in handleSubmit (the !response.ok branch throws and shows an inline error).
     try {
       const res = await fetch('/api/config');
       if (res.ok) {
