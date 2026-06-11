@@ -1317,6 +1317,14 @@ async fn test_admin_revoke_user() {
         .any(|u| u["alias"].as_str() == Some(&user_alias));
     assert!(has_user, "User should appear in list before revocation");
 
+    // Pubkey must NOT be exposed in the response (it is brute-force material)
+    for user in users.as_array().unwrap() {
+        assert!(
+            user.get("pubkey").is_none(),
+            "pubkey must not be present in /api/users response"
+        );
+    }
+
     // Find the user's ID from the list
     let user_id = users
         .as_array()

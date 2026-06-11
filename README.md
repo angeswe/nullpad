@@ -79,7 +79,7 @@ cargo run --release
 
 See `.env.example` for all available options. Key environment variables:
 
-- `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes), generated via `cargo run -- keygen` (required)
+- `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes), generated via `cargo run -- keygen` (required). **Keep this confidential** — treat it like a password hash. Because the Ed25519 keypair is derived deterministically from `Argon2id(secret, salt=alias)`, anyone who obtains the public key can run an offline dictionary attack against the secret with no rate limiting.
 - `ADMIN_ALIAS` — Admin username (default: "admin")
 - `REDIS_URL` — Redis connection string (default: "redis://127.0.0.1:6379")
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")
@@ -108,6 +108,12 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - Session tokens expire in 15 minutes
 - Auth challenge returns identical responses for valid and invalid aliases (anti-enumeration)
 - ADMIN_PUBKEY validated as correct Ed25519 key at startup (fail-fast)
+
+**Keypair Derivation & Secret Policy**
+
+- Ed25519 keypairs are derived deterministically: `Argon2id(secret, salt=alias)` — portability tradeoff (no server-stored salt)
+- Consequence: Ed25519 public keys are **confidential**. Anyone holding a public key can attempt an offline dictionary attack against the secret (no rate limit applies). Public keys are therefore never returned by the API.
+- Use a **strong, unique secret of at least 12 characters**. The Argon2id params (m=19456, t=2, p=1) raise the cost per guess, but a weak or short secret remains vulnerable to offline cracking.
 
 **Transport & Headers**
 
