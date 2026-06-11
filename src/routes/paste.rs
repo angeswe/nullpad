@@ -125,7 +125,13 @@ pub async fn create_paste(
         }
     }
 
-    // Validate encrypted_metadata: non-empty, valid base64, max 4096 bytes decoded
+    // Validate encrypted_metadata: non-empty, valid base64, max 4096 decoded bytes.
+    //
+    // Headroom math (worst case):
+    //   - 255-char multibyte filename → ~600 bytes JSON
+    //   - Padded to next multiple of 512 → 1024 bytes plaintext
+    //   - AES-256-GCM overhead: 12 (IV) + 1024 (padded plaintext) + 16 (tag) = 1052 bytes
+    //   - 1052 << 4096, so the cap has ~3× headroom.
     if metadata.encrypted_metadata.is_empty() {
         return Err(AppError::BadRequest(
             "Missing encrypted_metadata".to_string(),

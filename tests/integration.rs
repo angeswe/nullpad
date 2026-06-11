@@ -129,6 +129,7 @@ async fn main() {
         test_protected_html_with_session_cookie,
         test_protected_html_not_served_by_static_fallback,
         test_verify_sets_np_session_cookie,
+        test_stored_blob_preserves_bucket_size,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -188,9 +189,17 @@ impl Default for TestServerOverrides {
 ///
 /// All callers go through this function. Varying fields are supplied via
 /// `TestServerOverrides`; everything else is fixed to safe test defaults.
+/// Returns the paste storage path as the final tuple element so tests that
+/// inspect on-disk blobs can locate them; callers that don't need it discard it.
 async fn spawn_test_server_configured(
     overrides: TestServerOverrides,
-) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
+) -> (
+    String,
+    redis::aio::ConnectionManager,
+    SigningKey,
+    String,
+    std::path::PathBuf,
+) {
     let (admin_key, admin_pubkey) = test_keypair();
     let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
 
@@ -232,7 +241,7 @@ async fn spawn_test_server_configured(
         trusted_proxy_count: overrides.trusted_proxy_count,
         max_sessions_per_user: 5,
         max_pastes_per_user: 50,
-        paste_storage_path,
+        paste_storage_path: paste_storage_path.clone(),
     };
 
     let state = AppState {
@@ -261,18 +270,20 @@ async fn spawn_test_server_configured(
     });
 
     let base_url = format!("http://{}", addr);
-    (base_url, con, admin_key, admin_alias)
+    (base_url, con, admin_key, admin_alias, paste_storage_path)
 }
 
 /// Spin up a test server with a custom auth rate limit.
 async fn spawn_test_server_with_auth_limit(
     limit: u32,
 ) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
-    spawn_test_server_configured(TestServerOverrides {
-        rate_limit_auth_per_min: limit,
-        ..Default::default()
-    })
-    .await
+    let (base_url, con, admin_key, admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            rate_limit_auth_per_min: limit,
+            ..Default::default()
+        })
+        .await;
+    (base_url, con, admin_key, admin_alias)
 }
 
 /// Spin up a test server with custom per-IP and global PIN attempt rate limits.
@@ -281,13 +292,27 @@ async fn spawn_test_server_with_pin_limits(
     per_ip_limit: u32,
     global_limit: u32,
 ) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
-    spawn_test_server_configured(TestServerOverrides {
-        rate_limit_pin_attempt: per_ip_limit,
-        rate_limit_pin_attempt_global: global_limit,
-        trusted_proxy_count: 1,
-        ..Default::default()
-    })
-    .await
+    let (base_url, con, admin_key, admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            rate_limit_pin_attempt: per_ip_limit,
+            rate_limit_pin_attempt_global: global_limit,
+            trusted_proxy_count: 1,
+            ..Default::default()
+        })
+        .await;
+    (base_url, con, admin_key, admin_alias)
+}
+
+/// Spin up a test server and also return the paste storage path, for tests
+/// that need to inspect blobs on disk.
+async fn spawn_test_server_with_storage() -> (
+    String,
+    redis::aio::ConnectionManager,
+    SigningKey,
+    String,
+    std::path::PathBuf,
+) {
+    spawn_test_server_configured(TestServerOverrides::default()).await
 }
 
 /// Helper: perform full challenge -> sign -> verify login flow, return session token.
@@ -2505,6 +2530,92 @@ async fn test_protected_html_not_served_by_static_fallback() {
         .unwrap();
     // Should be 404 (protected/ is not in static/)
     assert_eq!(resp.status(), 404);
+}
+
+/// Upload payloads whose sizes land exactly on ciphertext bucket boundaries and
+/// verify the on-disk file size equals the uploaded byte count exactly.
+///
+/// Bucket sizes are powers-of-two multiples of 1024 bytes. The AES-256-GCM
+/// overhead is 28 bytes (12 IV + 16 tag), so for a bucket of N bytes the
+/// plaintext is N-28 bytes, and the total ciphertext is exactly N bytes.
+/// Tests two buckets: 1024 (→ 1052 upload bytes) and 4096 (→ 4124 upload bytes).
+async fn test_stored_blob_preserves_bucket_size() {
+    let (base_url, _con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::new();
+
+    // AES-256-GCM overhead: 12 (IV) + 16 (auth tag) = 28 bytes
+    const GCM_OVERHEAD: usize = 28;
+
+    for bucket in [1024usize, 4096usize] {
+        let upload_len = bucket + GCM_OVERHEAD;
+        let payload: Vec<u8> = (0..upload_len).map(|i| (i & 0xff) as u8).collect();
+
+        // Use a fixed paste ID so we can locate the blob on disk
+        let paste_id = nanoid::nanoid!(12);
+        let encrypted_metadata = general_purpose::STANDARD.encode(b"encrypted-file-metadata");
+
+        let metadata = serde_json::json!({
+            "paste_id": paste_id,
+            "encrypted_metadata": encrypted_metadata,
+            "paste_type": "text",
+            "ttl_secs": 3600,
+            "burn_after_reading": false,
+            "has_pin": false,
+        });
+
+        let form = reqwest::multipart::Form::new()
+            .part(
+                "metadata",
+                reqwest::multipart::Part::text(metadata.to_string())
+                    .mime_str("application/json")
+                    .expect("valid mime type"),
+            )
+            .part(
+                "file",
+                reqwest::multipart::Part::bytes(payload.clone())
+                    .file_name("encrypted")
+                    .mime_str("application/octet-stream")
+                    .expect("valid mime type"),
+            );
+
+        let resp = client
+            .post(format!("{}/api/paste", base_url))
+            .multipart(form)
+            .send()
+            .await
+            .expect("Failed to send request");
+        assert_eq!(
+            resp.status(),
+            200,
+            "Upload failed for bucket {} (upload_len={})",
+            bucket,
+            upload_len
+        );
+
+        // Assert the server echoed back the paste_id we submitted so the
+        // on-disk check below can't silently inspect a different blob.
+        let resp_json: serde_json::Value = resp.json().await.expect("response must be JSON");
+        assert_eq!(
+            resp_json["id"].as_str(),
+            Some(paste_id.as_str()),
+            "Server returned a different paste id than submitted (bucket={})",
+            bucket
+        );
+
+        // Blobs are stored at {storage_path}/{id[0..2]}/{id}
+        let blob_path = storage_path.join(&paste_id[..2]).join(&paste_id);
+        assert!(blob_path.exists(), "blob not found at {:?}", blob_path);
+        let on_disk_len = std::fs::metadata(&blob_path)
+            .expect("failed to read blob metadata")
+            .len() as usize;
+
+        assert_eq!(
+            on_disk_len, upload_len,
+            "On-disk size mismatch for bucket {} (paste_id={}): expected {}, got {}",
+            bucket, paste_id, upload_len, on_disk_len
+        );
+    }
 }
 
 /// Login verify endpoint sets np_session cookie with correct attributes.
