@@ -105,22 +105,37 @@ pub fn hash_ip(salt: &[u8], ip: &IpAddr) -> String {
 
 /// Extract client IP from X-Forwarded-For header, falling back to ConnectInfo.
 ///
-/// When `trusted_proxy_count` > 0, reads the Nth-from-right IP in X-Forwarded-For
-/// (e.g., with 1 trusted proxy, reads the 2nd-from-right, which is the real client).
-/// When `trusted_proxy_count` == 0, falls back to direct connection IP (no proxy trust).
+/// # Proxy model
+///
+/// Each appending proxy adds the IP of whoever connected to it at the **right** end of XFF.
+/// With N trusted appending proxies, the rightmost N entries were written by those proxies.
+/// The entry immediately to their left — at index `len - N` — is the IP the first trusted
+/// proxy saw: the real client (or the last untrusted proxy, which is as far as we can go).
+///
+/// # Boundary conditions
+///
+/// - `trusted_proxy_count == 0`: never trust XFF; always return the direct connection IP.
+/// - `len < N` (XFF has fewer entries than expected): some proxies didn't append — the
+///   header is malformed or shorter than the trusted chain. Fall back to connection IP
+///   rather than returning a potentially attacker-controlled entry.
+/// - `len == N`: index 0 is the entry the outermost trusted proxy appended (real client).
+/// - `len > N`: entries 0..len-N-1 are potentially attacker-injected; pick index `len-N`.
+/// - Unparseable entry at the target index: fall back to connection IP.
 pub fn client_ip(headers: &HeaderMap, addr: &SocketAddr, trusted_proxy_count: usize) -> IpAddr {
     if trusted_proxy_count > 0 {
         if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
             let ips: Vec<&str> = xff.split(',').map(|s| s.trim()).collect();
-            // With N trusted proxies, the real client IP is at position len - N - 1
-            // (proxies append, so rightmost N entries are proxy IPs)
-            let target_idx = ips.len().saturating_sub(trusted_proxy_count + 1);
-            if let Ok(ip) = ips[target_idx].parse::<IpAddr>() {
-                return normalize_ip(ip);
+            // Require at least N entries (one per trusted proxy). Fewer means the chain
+            // is shorter than expected; don't trust anything.
+            if ips.len() >= trusted_proxy_count {
+                let target_idx = ips.len() - trusted_proxy_count;
+                if let Ok(ip) = ips[target_idx].parse::<IpAddr>() {
+                    return normalize_ip(ip);
+                }
             }
         }
     }
-    // No proxy trust or no valid XFF: use direct connection IP
+    // No proxy trust, malformed/short XFF, or unparseable target: use direct connection IP.
     normalize_ip(addr.ip())
 }
 
@@ -347,9 +362,11 @@ mod tests {
     }
 
     #[test]
-    fn test_client_ip_one_proxy() {
-        // XFF: "client, proxy1" with 1 trusted proxy -> pick client (index 0)
-        let headers = make_headers_with_xff("1.2.3.4, 5.6.7.8");
+    fn test_client_ip_one_proxy_attacker_injected() {
+        // Attacker sends "9.9.9.9" in XFF; proxy appends "1.2.3.4".
+        // With 1 trusted proxy: last 1 entry is proxy-appended; real client is at len-1 = index 1.
+        // Must NOT return the attacker-controlled 9.9.9.9.
+        let headers = make_headers_with_xff("9.9.9.9, 1.2.3.4");
         let addr = make_addr("10.0.0.1");
         assert_eq!(
             client_ip(&headers, &addr, 1),
@@ -358,20 +375,9 @@ mod tests {
     }
 
     #[test]
-    fn test_client_ip_two_proxies() {
-        // XFF: "client, proxy1, proxy2" with 2 trusted proxies -> pick client (index 0)
-        let headers = make_headers_with_xff("1.1.1.1, 2.2.2.2, 3.3.3.3");
-        let addr = make_addr("10.0.0.1");
-        assert_eq!(
-            client_ip(&headers, &addr, 2),
-            "1.1.1.1".parse::<IpAddr>().unwrap()
-        );
-    }
-
-    #[test]
-    fn test_client_ip_single_ip_xff_one_proxy() {
-        // XFF has only 1 IP but trusted_proxy_count=1
-        // target_idx = 1.saturating_sub(1+1) = 1.saturating_sub(2) = 0
+    fn test_client_ip_one_proxy_no_injected() {
+        // Client sends no XFF; proxy appends "1.2.3.4". XFF = "1.2.3.4".
+        // With 1 trusted proxy: len=1 == N=1, target index = len-N = 0 → "1.2.3.4". Trustworthy.
         let headers = make_headers_with_xff("1.2.3.4");
         let addr = make_addr("10.0.0.1");
         assert_eq!(
@@ -381,20 +387,69 @@ mod tests {
     }
 
     #[test]
-    fn test_client_ip_whitespace_in_xff() {
-        // XFF entries have extra whitespace
-        let headers = make_headers_with_xff("  1.2.3.4 ,  5.6.7.8 ");
+    fn test_client_ip_two_proxies_with_injected() {
+        // Attacker injects "9.9.9.9", proxy1 appends "1.2.3.4", proxy2 appends "5.6.7.8".
+        // XFF = "9.9.9.9, 1.2.3.4, 5.6.7.8". With 2 trusted proxies: target = len-2 = 1 → "1.2.3.4".
+        let headers = make_headers_with_xff("9.9.9.9, 1.2.3.4, 5.6.7.8");
         let addr = make_addr("10.0.0.1");
         assert_eq!(
-            client_ip(&headers, &addr, 1),
+            client_ip(&headers, &addr, 2),
             "1.2.3.4".parse::<IpAddr>().unwrap()
         );
     }
 
     #[test]
+    fn test_client_ip_two_proxies_no_injected() {
+        // No attacker injection. Proxy1 appends "1.2.3.4", proxy2 appends "5.6.7.8".
+        // XFF = "1.2.3.4, 5.6.7.8". With 2 trusted proxies: target = len-2 = 0 → "1.2.3.4".
+        let headers = make_headers_with_xff("1.2.3.4, 5.6.7.8");
+        let addr = make_addr("10.0.0.1");
+        assert_eq!(
+            client_ip(&headers, &addr, 2),
+            "1.2.3.4".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_client_ip_short_xff_falls_back() {
+        // XFF has fewer entries than trusted_proxy_count: header is truncated/missing proxies.
+        // Cannot trust any entry — fall back to connection IP.
+        let headers = make_headers_with_xff("5.6.7.8");
+        let addr = make_addr("10.0.0.1");
+        assert_eq!(
+            client_ip(&headers, &addr, 2),
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_client_ip_empty_xff_falls_back() {
+        // Empty XFF value: fall back to connection IP.
+        let headers = make_headers_with_xff("");
+        let addr = make_addr("10.0.0.1");
+        assert_eq!(
+            client_ip(&headers, &addr, 1),
+            "10.0.0.1".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_client_ip_whitespace_in_xff() {
+        // XFF entries have extra whitespace; proxy appends "5.6.7.8".
+        // Real client "1.2.3.4" is at len-1 = index 1.
+        let headers = make_headers_with_xff("  1.2.3.4 ,  5.6.7.8 ");
+        let addr = make_addr("10.0.0.1");
+        assert_eq!(
+            client_ip(&headers, &addr, 1),
+            "5.6.7.8".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
     fn test_client_ip_unparseable_target() {
-        // Target IP position is not a valid IP -> falls back to direct IP
-        let headers = make_headers_with_xff("not-an-ip, 5.6.7.8");
+        // Target IP position is not a valid IP -> falls back to direct IP.
+        // With 1 proxy and XFF "1.2.3.4, not-an-ip": target = index 1 = "not-an-ip" → fallback.
+        let headers = make_headers_with_xff("1.2.3.4, not-an-ip");
         let addr = make_addr("10.0.0.1");
         assert_eq!(
             client_ip(&headers, &addr, 1),
@@ -404,23 +459,23 @@ mod tests {
 
     #[test]
     fn test_client_ip_ipv6() {
+        // IPv6: proxy appends "fe80::1", client sent "::1". target = index 1.
         let headers = make_headers_with_xff("::1, fe80::1");
         let addr = make_addr("10.0.0.1");
         assert_eq!(
             client_ip(&headers, &addr, 1),
-            "::1".parse::<IpAddr>().unwrap()
+            "fe80::1".parse::<IpAddr>().unwrap()
         );
     }
 
     #[test]
     fn test_client_ip_proxy_count_exceeds_xff() {
-        // trusted_proxy_count=5 but only 2 IPs in XFF
-        // target_idx = 2.saturating_sub(5+1) = 2.saturating_sub(6) = 0
+        // trusted_proxy_count=5 but only 2 IPs in XFF: len < N, fall back to connection IP.
         let headers = make_headers_with_xff("1.2.3.4, 5.6.7.8");
         let addr = make_addr("10.0.0.1");
         assert_eq!(
             client_ip(&headers, &addr, 5),
-            "1.2.3.4".parse::<IpAddr>().unwrap()
+            "10.0.0.1".parse::<IpAddr>().unwrap()
         );
     }
 }
