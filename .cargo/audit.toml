@@ -2,8 +2,6 @@
 # See: https://rustsec.org/
 
 [advisories]
-# Ignore RUSTSEC-2025-0134: rustls-pemfile unmaintained
-# - This is informational only (not a vulnerability)
-# - Dependency comes from testcontainers (dev-only)
-# - Will be resolved when bollard updates
-ignore = ["RUSTSEC-2025-0134"]
+# No ignores. RUSTSEC-2025-0134 (rustls-pemfile, dev-only via testcontainers)
+# was ignored here until the crate left the dependency tree; re-justify from
+# scratch if an ignore is ever needed again.
