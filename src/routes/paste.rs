@@ -339,6 +339,18 @@ pub async fn attempt_paste(
 
     let mut con = state.redis.clone();
 
+    // Rate limit globally per paste (distributed brute-force protection).
+    // Check global first so an exhausted paste doesn't leak per-IP budget.
+    let global_key = format!("ratelimit:pin_attempt_global:{}", id);
+    super::enforce_rate_limit(
+        &mut con,
+        &global_key,
+        state.config.rate_limit_pin_attempt_global,
+        3600,
+        Some(("pin_attempt_global", &id)),
+    )
+    .await?;
+
     // Rate limit per IP per paste
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
@@ -348,7 +360,7 @@ pub async fn attempt_paste(
         &rate_limit_key,
         state.config.rate_limit_pin_attempt,
         60,
-        Some(("pin_attempt", &ip_hash)),
+        Some(("pin_attempt_per_ip", &ip_hash)),
     )
     .await?;
 

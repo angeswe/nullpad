@@ -30,6 +30,7 @@ pub struct Config {
     pub rate_limit_paste_per_min: u32,
     pub rate_limit_auth_per_min: u32,
     pub rate_limit_pin_attempt: u32,
+    pub rate_limit_pin_attempt_global: u32,
 
     // Proxy
     pub trusted_proxy_count: usize,
@@ -62,6 +63,10 @@ impl std::fmt::Debug for Config {
             .field("rate_limit_paste_per_min", &self.rate_limit_paste_per_min)
             .field("rate_limit_auth_per_min", &self.rate_limit_auth_per_min)
             .field("rate_limit_pin_attempt", &self.rate_limit_pin_attempt)
+            .field(
+                "rate_limit_pin_attempt_global",
+                &self.rate_limit_pin_attempt_global,
+            )
             .field("trusted_proxy_count", &self.trusted_proxy_count)
             .field("max_sessions_per_user", &self.max_sessions_per_user)
             .field("max_pastes_per_user", &self.max_pastes_per_user)
@@ -164,6 +169,8 @@ impl Config {
         let rate_limit_paste_per_min = parse_env_or_default("RATE_LIMIT_PASTE_PER_MIN", 10)?;
         let rate_limit_auth_per_min = parse_env_or_default("RATE_LIMIT_AUTH_PER_MIN", 5)?;
         let rate_limit_pin_attempt = parse_env_or_default("RATE_LIMIT_PIN_ATTEMPT", 5)?;
+        let rate_limit_pin_attempt_global =
+            parse_env_or_default("RATE_LIMIT_PIN_ATTEMPT_GLOBAL", 30)?;
 
         // Proxy configuration
         let trusted_proxy_count = parse_env_or_default("TRUSTED_PROXY_COUNT", 0)?;
@@ -209,6 +216,7 @@ impl Config {
             rate_limit_paste_per_min,
             rate_limit_auth_per_min,
             rate_limit_pin_attempt,
+            rate_limit_pin_attempt_global,
             trusted_proxy_count,
             max_sessions_per_user,
             max_pastes_per_user,
@@ -260,6 +268,7 @@ mod tests {
         env::remove_var("RATE_LIMIT_PASTE_PER_MIN");
         env::remove_var("RATE_LIMIT_AUTH_PER_MIN");
         env::remove_var("RATE_LIMIT_PIN_ATTEMPT");
+        env::remove_var("RATE_LIMIT_PIN_ATTEMPT_GLOBAL");
         env::remove_var("TRUSTED_PROXY_COUNT");
         env::remove_var("MAX_SESSIONS_PER_USER");
         env::remove_var("MAX_PASTES_PER_USER");
@@ -497,6 +506,7 @@ mod tests {
         env::set_var("RATE_LIMIT_PASTE_PER_MIN", "10");
         env::set_var("RATE_LIMIT_AUTH_PER_MIN", "5");
         env::set_var("RATE_LIMIT_PIN_ATTEMPT", "5");
+        env::set_var("RATE_LIMIT_PIN_ATTEMPT_GLOBAL", "30");
         env::set_var("MAX_SESSIONS_PER_USER", "5");
         env::set_var("MAX_PASTES_PER_USER", "50");
 
@@ -517,6 +527,7 @@ mod tests {
         assert_eq!(config.rate_limit_paste_per_min, 10);
         assert_eq!(config.rate_limit_auth_per_min, 5);
         assert_eq!(config.rate_limit_pin_attempt, 5);
+        assert_eq!(config.rate_limit_pin_attempt_global, 30);
         assert_eq!(config.max_sessions_per_user, 5);
         assert_eq!(config.max_pastes_per_user, 50);
         assert_eq!(

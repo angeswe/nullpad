@@ -120,6 +120,7 @@ async fn main() {
         test_pin_gated_attempt_returns_content,
         test_pin_gated_attempt_wrong_verifier_returns_403,
         test_pin_gated_attempt_rate_limited,
+        test_pin_gated_global_attempt_rate_limited,
         test_pin_gated_burn_consumed_on_attempt,
         test_non_pin_attempt_returns_404,
         test_non_pin_get_unchanged,
@@ -162,9 +163,33 @@ async fn spawn_test_server() -> (String, redis::aio::ConnectionManager, SigningK
     spawn_test_server_with_auth_limit(10000).await
 }
 
-/// Spin up a test server with a custom auth rate limit.
-async fn spawn_test_server_with_auth_limit(
-    limit: u32,
+/// Overrides for [`spawn_test_server_configured`]. Only the fields that differ
+/// between test scenarios need to be set; everything else stays at safe defaults.
+struct TestServerOverrides {
+    rate_limit_auth_per_min: u32,
+    rate_limit_pin_attempt: u32,
+    rate_limit_pin_attempt_global: u32,
+    /// Number of trusted proxies (affects which XFF entry is used as client IP).
+    trusted_proxy_count: usize,
+}
+
+impl Default for TestServerOverrides {
+    fn default() -> Self {
+        Self {
+            rate_limit_auth_per_min: 10000,
+            rate_limit_pin_attempt: 10000,
+            rate_limit_pin_attempt_global: 10000,
+            trusted_proxy_count: 0,
+        }
+    }
+}
+
+/// Core helper: spin up a test server with configurable rate limits.
+///
+/// All callers go through this function. Varying fields are supplied via
+/// `TestServerOverrides`; everything else is fixed to safe test defaults.
+async fn spawn_test_server_configured(
+    overrides: TestServerOverrides,
 ) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
     let (admin_key, admin_pubkey) = test_keypair();
     let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
@@ -177,12 +202,10 @@ async fn spawn_test_server_with_auth_limit(
         .expect("Failed to get connection manager");
     let mut con = redis_manager.clone();
 
-    // Set up admin user
     nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, &admin_alias)
         .await
         .expect("Failed to upsert admin");
 
-    // Create temp directory for paste storage
     let paste_storage_path =
         std::env::temp_dir().join(format!("nullpad_test_{}", nanoid::nanoid!(8)));
     storage::blob::init_storage(&paste_storage_path)
@@ -203,9 +226,10 @@ async fn spawn_test_server_with_auth_limit(
         session_ttl_secs: 900,
         challenge_ttl_secs: 30,
         rate_limit_paste_per_min: 10000,
-        rate_limit_auth_per_min: limit,
-        rate_limit_pin_attempt: 10000,
-        trusted_proxy_count: 0,
+        rate_limit_auth_per_min: overrides.rate_limit_auth_per_min,
+        rate_limit_pin_attempt: overrides.rate_limit_pin_attempt,
+        rate_limit_pin_attempt_global: overrides.rate_limit_pin_attempt_global,
+        trusted_proxy_count: overrides.trusted_proxy_count,
         max_sessions_per_user: 5,
         max_pastes_per_user: 50,
         paste_storage_path,
@@ -240,80 +264,30 @@ async fn spawn_test_server_with_auth_limit(
     (base_url, con, admin_key, admin_alias)
 }
 
-/// Spin up a test server with a custom PIN attempt rate limit.
-async fn spawn_test_server_with_pin_limit(
+/// Spin up a test server with a custom auth rate limit.
+async fn spawn_test_server_with_auth_limit(
     limit: u32,
 ) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
-    let (admin_key, admin_pubkey) = test_keypair();
-    let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
+    spawn_test_server_configured(TestServerOverrides {
+        rate_limit_auth_per_min: limit,
+        ..Default::default()
+    })
+    .await
+}
 
-    let test_redis_url = get_redis_url().to_string();
-    let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
-    let redis_manager = redis_client
-        .get_connection_manager()
-        .await
-        .expect("Failed to get connection manager");
-    let mut con = redis_manager.clone();
-
-    nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, &admin_alias)
-        .await
-        .expect("Failed to upsert admin");
-
-    let paste_storage_path =
-        std::env::temp_dir().join(format!("nullpad_test_{}", nanoid::nanoid!(8)));
-    nullpad::storage::blob::init_storage(&paste_storage_path)
-        .await
-        .expect("Failed to init paste storage");
-
-    let config = Config {
-        admin_pubkey,
-        admin_alias: admin_alias.clone(),
-        redis_url: test_redis_url.clone(),
-        bind_addr: "127.0.0.1:0".parse().unwrap(),
-        max_upload_bytes: 52_428_800,
-        default_ttl_secs: 86400,
-        max_ttl_secs: 604800,
-        invite_ttl_secs: 43200,
-        user_idle_ttl_secs: 172800,
-        user_active_ttl_secs: 86400,
-        session_ttl_secs: 900,
-        challenge_ttl_secs: 30,
-        rate_limit_paste_per_min: 10000,
-        rate_limit_auth_per_min: 10000,
-        rate_limit_pin_attempt: limit,
-        trusted_proxy_count: 0,
-        max_sessions_per_user: 5,
-        max_pastes_per_user: 50,
-        paste_storage_path,
-    };
-
-    let state = AppState {
-        redis: redis_manager,
-        config: Arc::new(config),
-        ip_hmac_salt: Arc::new(rand::random()),
-    };
-
-    let app = routes::api_router()
-        .fallback_service(ServeDir::new("static"))
-        .layer(axum::middleware::from_fn(security_headers))
-        .with_state(state);
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind");
-    let addr = listener.local_addr().unwrap();
-
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
-
-    let base_url = format!("http://{}", addr);
-    (base_url, con, admin_key, admin_alias)
+/// Spin up a test server with custom per-IP and global PIN attempt rate limits.
+/// Uses `trusted_proxy_count=1` so XFF headers control client IP selection.
+async fn spawn_test_server_with_pin_limits(
+    per_ip_limit: u32,
+    global_limit: u32,
+) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
+    spawn_test_server_configured(TestServerOverrides {
+        rate_limit_pin_attempt: per_ip_limit,
+        rate_limit_pin_attempt_global: global_limit,
+        trusted_proxy_count: 1,
+        ..Default::default()
+    })
+    .await
 }
 
 /// Helper: perform full challenge -> sign -> verify login flow, return session token.
@@ -2053,6 +2027,28 @@ async fn test_trusted_user_can_upload_files() {
 // PIN Gating Tests
 // ============================================================================
 
+/// POST a PIN attempt with a spoofed client IP via X-Forwarded-For.
+///
+/// `client_ip_suffix` sets the last octet of a 10.0.0.N address in the XFF
+/// header alongside a fixed trusted proxy IP, giving each distinct suffix its
+/// own per-IP rate-limit bucket.
+async fn pin_attempt_with_xff(
+    client: &reqwest::Client,
+    base_url: &str,
+    id: &str,
+    verifier: &str,
+    client_ip_suffix: u8,
+) -> Result<reqwest::Response, reqwest::Error> {
+    let xff = format!("10.0.0.{}, 192.168.1.1", client_ip_suffix);
+    client
+        .post(format!("{}/api/paste/{}", base_url, id))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", xff)
+        .body(serde_json::json!({ "pin_verifier": verifier }).to_string())
+        .send()
+        .await
+}
+
 async fn test_pin_gated_get_returns_needs_pin() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
@@ -2179,8 +2175,9 @@ async fn test_pin_gated_attempt_wrong_verifier_returns_403() {
 }
 
 async fn test_pin_gated_attempt_rate_limited() {
-    // Use a server with very low PIN attempt limit
-    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server_with_pin_limit(2).await;
+    // per-IP limit = 2, global limit = 10000 (well above attempt count, won't fire)
+    let (base_url, _con, _admin_key, _admin_alias) =
+        spawn_test_server_with_pin_limits(2, 10000).await;
     let client = reqwest::Client::new();
 
     // Create a PIN-gated paste
@@ -2222,6 +2219,81 @@ async fn test_pin_gated_attempt_rate_limited() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 429);
+    let retry_after: u64 = resp
+        .headers()
+        .get("retry-after")
+        .expect("429 must include Retry-After header")
+        .to_str()
+        .unwrap()
+        .parse()
+        .expect("Retry-After must be a positive integer");
+    assert!(retry_after > 0, "Retry-After must be positive");
+}
+
+async fn test_pin_gated_global_attempt_rate_limited() {
+    // Global cap = 3. Per-IP cap = 100: set well above the 3 attempts made here
+    // so only the global cap can fire, not any per-IP bucket.
+    // Three distinct client IPs each make 1 attempt (each under per-IP limit).
+    // The 4th attempt from yet another IP must be 429 due to global cap.
+    let (base_url, _con, _admin_key, _admin_alias) =
+        spawn_test_server_with_pin_limits(100, 3).await;
+    let client = reqwest::Client::new();
+
+    // Create a PIN-gated paste
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"global secret",
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let dummy_key = test_dummy_key();
+    let verifier = test_pin_verifier(&dummy_key, &id);
+
+    // Three distinct client IPs, each within per-IP limit → correct PIN → 200.
+    //
+    // With trusted_proxy_count=1, client_ip() reads XFF[len - 1 - 1] = XFF[0]
+    // from a two-entry header "10.0.0.N, 192.168.1.1", so 10.0.0.N is the client
+    // IP. Each distinct N lands in its own per-IP rate-limit bucket.
+    for ip_suffix in 1u8..=3 {
+        let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, ip_suffix)
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            200,
+            "Expected 200 for client IP 10.0.0.{}, got {}",
+            ip_suffix,
+            resp.status()
+        );
+    }
+
+    // 4th attempt from a fresh IP — global cap exhausted → 429
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, 4)
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        429,
+        "Expected 429 after global cap exhausted"
+    );
+    let retry_after: u64 = resp
+        .headers()
+        .get("retry-after")
+        .expect("429 must include Retry-After header")
+        .to_str()
+        .unwrap()
+        .parse()
+        .expect("Retry-After must be a positive integer");
+    assert!(retry_after > 0, "Retry-After must be positive");
 }
 
 async fn test_pin_gated_burn_consumed_on_attempt() {
