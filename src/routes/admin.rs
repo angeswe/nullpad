@@ -112,13 +112,14 @@ pub async fn list_users(
 
     let users = storage::user::list_users(&mut con).await?;
 
-    // Convert to UserInfo
+    // Convert to UserInfo — pubkey is intentionally excluded: it is brute-force
+    // material because the Ed25519 keypair is derived as Argon2id(secret, salt=alias),
+    // so anyone holding a pubkey can crack the secret fully offline.
     let user_infos: Vec<UserInfo> = users
         .into_iter()
         .map(|user| UserInfo {
             id: user.id,
             alias: user.alias,
-            pubkey: user.pubkey,
             role: user.role.to_string(),
             created_at: user.created_at,
         })

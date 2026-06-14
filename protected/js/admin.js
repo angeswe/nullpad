@@ -246,7 +246,7 @@
       if (users.length === 0) {
         const row = document.createElement('tr');
         const cell = document.createElement('td');
-        cell.colSpan = 4;
+        cell.colSpan = 3;
         cell.className = 'text-center text-muted';
         cell.textContent = 'No users found';
         row.appendChild(cell);
@@ -272,15 +272,6 @@
         idCell.appendChild(idCode);
         row.appendChild(idCell);
 
-        // Public key cell
-        const pubkeyCell = document.createElement('td');
-        const pubkeyCode = document.createElement('code');
-        pubkeyCode.className = 'text-muted';
-        pubkeyCode.style.fontSize = '0.75em';
-        pubkeyCode.textContent = user.pubkey ? user.pubkey.substring(0, 32) + '...' : 'N/A';
-        pubkeyCell.appendChild(pubkeyCode);
-        row.appendChild(pubkeyCell);
-
         // Actions cell
         const actionsCell = document.createElement('td');
         if (user.id !== 'admin') {
@@ -303,7 +294,7 @@
       clearElement(usersList);
       const row = document.createElement('tr');
       const cell = document.createElement('td');
-      cell.colSpan = 4;
+      cell.colSpan = 3;
       cell.className = 'text-center text-error';
       cell.textContent = 'Failed to load users';
       row.appendChild(cell);

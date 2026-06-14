@@ -18,6 +18,11 @@
   const submitBtn = registerForm.querySelector('button[type="submit"]');
   const successPanel = document.getElementById('success-panel');
 
+  // Minimum secret length enforced at registration only.
+  // Login must NOT enforce this — existing users may have shorter secrets;
+  // a wrong secret simply derives a non-matching keypair rather than locking out.
+  const MIN_SECRET_LENGTH = 12;
+
   // State
   let inviteToken = null;
 
@@ -74,8 +79,8 @@
       return;
     }
 
-    if (secret.length < 8) {
-      showError('Secret must be at least 8 characters long.');
+    if (secret.length < MIN_SECRET_LENGTH) {
+      showError(`Secret must be at least ${MIN_SECRET_LENGTH} characters long. Your keypair is derived from this secret — a longer secret resists offline cracking.`);
       return;
     }
 
