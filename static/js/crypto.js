@@ -180,17 +180,123 @@
     }
 
     // ============================================================================
+    // Padding
+    // ============================================================================
+    //
+    // After V1 framing and before AES-GCM, plaintext is padded to a fixed size
+    // to hide length information from the server.
+    //
+    // Metadata mode: pad to the smallest multiple of 512 that is STRICTLY
+    // greater than the framed length. This hides filename-length fingerprinting.
+    // Worst case (255-char multibyte filename) produces ~830 framed bytes → 1024
+    // padded plaintext → ~1052-byte ciphertext → ~1403 base64 bytes, well within
+    // the server's 4096-byte encrypted_metadata cap.
+    //
+    // Content mode: pad to the first bucket from the ladder below that is
+    // STRICTLY greater than the framed length. "Strictly greater" means that an
+    // input whose framed length exactly equals a bucket boundary is pushed to the
+    // next bucket — this prevents a no-padding side channel.
+    //
+    // Buckets: 1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB, 4MiB, 16MiB, MAX_CONTENT_BUCKET
+    //
+    // MAX_CONTENT_BUCKET = MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD (28 bytes) so that
+    // padded plaintext (bucket size) + 12-byte IV + 16-byte GCM tag never exceeds
+    // the server's MAX_UPLOAD_BYTES limit (default 52,428,800). Inputs with a framed
+    // length ≥ MAX_CONTENT_BUCKET must be rejected with a client-side error before
+    // encryption rather than producing an oversized blob.
+    //
+    // The length prefix in the V1 frame already tells the decoder where real data
+    // ends — unframeV1OrNull() strips trailing padding on decrypt with no changes.
+
+    // AES-GCM overhead: 12-byte IV + 16-byte authentication tag.
+    const AES_GCM_OVERHEAD = 28;
+
+    // Default server upload cap. Fetched from /api/config at runtime in create.js;
+    // this constant is a safe fallback for the crypto module's own checks.
+    const DEFAULT_MAX_UPLOAD_BYTES = 52428800; // 50 MiB
+
+    // Maximum framed plaintext that, after AES-GCM encryption, fits the default cap.
+    // = DEFAULT_MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD
+    const MAX_CONTENT_BUCKET = DEFAULT_MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD; // 52,428,772
+
+    // Content padding bucket ladder (bytes). All values < MAX_CONTENT_BUCKET.
+    const CONTENT_BUCKETS = [
+        1024,           // 1 KiB
+        4096,           // 4 KiB
+        16384,          // 16 KiB
+        65536,          // 64 KiB
+        262144,         // 256 KiB
+        1048576,        // 1 MiB
+        4194304,        // 4 MiB
+        16777216,       // 16 MiB
+        MAX_CONTENT_BUCKET
+    ];
+
+    /**
+     * Pad framedBytes to targetLen with zero bytes.
+     * Caller is responsible for ensuring targetLen >= framedBytes.length.
+     * @param {Uint8Array} framedBytes
+     * @param {number} targetLen
+     * @returns {Uint8Array}
+     */
+    function padTo(framedBytes, targetLen) {
+        if (targetLen === framedBytes.length) return framedBytes;
+        const out = new Uint8Array(targetLen); // zero-filled by default
+        out.set(framedBytes, 0);
+        return out;
+    }
+
+    /**
+     * Select the metadata padding target: smallest multiple of 512 strictly
+     * greater than framedLen.
+     * @param {number} framedLen
+     * @returns {number}
+     */
+    function metadataPadTarget(framedLen) {
+        // Adding 1 before ceil ensures we get the NEXT multiple, not the same
+        // one — equality (framedLen already a multiple of 512) must promote up.
+        return Math.ceil((framedLen + 1) / 512) * 512;
+    }
+
+    /**
+     * Select the content padding target: first bucket strictly greater than
+     * framedLen. Returns null if no bucket can hold the framed data (caller
+     * must reject the upload before encryption).
+     * @param {number} framedLen
+     * @returns {number|null}
+     */
+    function contentPadTarget(framedLen) {
+        for (const bucket of CONTENT_BUCKETS) {
+            if (bucket > framedLen) return bucket;
+        }
+        return null; // input too large for any bucket
+    }
+
+    // ============================================================================
     // Encryption
     // ============================================================================
 
     /**
-     * Encrypt plaintext with AES-256-GCM
+     * Encrypt plaintext with AES-256-GCM.
+     *
      * @param {string|Uint8Array} plaintext - Data to encrypt
      * @param {string} keyBase64url - Encryption key as base64url string
      * @param {string} [aad] - Optional Additional Authenticated Data (e.g. paste ID)
+     * @param {object} [options]
+     * @param {'metadata'|'content'|'none'} [options.pad='none'] - Padding mode:
+     *   'metadata' pads framed plaintext to the next multiple of 512 (>= framed+1),
+     *   'content'  pads to the first bucket from the ladder strictly greater than
+     *              framed length,
+     *   'none'     no padding (legacy / default).
      * @returns {Promise<string>} Base64-encoded (IV + ciphertext)
+     * @throws {Error} if pad='content' and framed length exceeds the top bucket
      */
-    async function encrypt(plaintext, keyBase64url, aad) {
+    async function encrypt(plaintext, keyBase64url, aad, options) {
+        if (options !== undefined && options !== null && typeof options !== 'object') {
+            throw new TypeError('encrypt(): options must be an object');
+        }
+        const padMode = (options && options.pad !== undefined) ? options.pad : 'none';
+
         // Convert plaintext to bytes if it's a string
         const plaintextBytes = typeof plaintext === 'string'
             ? textEncode(plaintext)
@@ -199,6 +305,26 @@
         // Frame with version byte + length prefix before encryption so the
         // decoder can strip future padding back to the real data length.
         const framedBytes = frameV1(plaintextBytes);
+
+        // Apply padding after framing. The length prefix lets the decoder ignore
+        // the trailing zero bytes during decryption — no decrypt changes needed.
+        let paddedBytes;
+        if (padMode === 'metadata') {
+            const target = metadataPadTarget(framedBytes.length);
+            paddedBytes = padTo(framedBytes, target);
+        } else if (padMode === 'content') {
+            const target = contentPadTarget(framedBytes.length);
+            if (target === null) {
+                throw new Error(
+                    'Content too large: exceeds maximum supported upload size.'
+                );
+            }
+            paddedBytes = padTo(framedBytes, target);
+        } else if (padMode === 'none') {
+            paddedBytes = framedBytes;
+        } else {
+            throw new Error(`encrypt(): Unknown padding mode: ${padMode}`);
+        }
 
         // Decode key
         const keyBytes = base64urlDecode(keyBase64url);
@@ -227,7 +353,7 @@
             const ciphertext = await crypto.subtle.encrypt(
                 params,
                 cryptoKey,
-                framedBytes
+                paddedBytes
             );
 
             // Concatenate IV + ciphertext
@@ -347,6 +473,14 @@
         // Encryption/Decryption
         encrypt,
         decrypt,
+
+        // Padding helpers (used by create.js for pre-flight size checks)
+        contentPadTarget,
+        metadataPadTarget,
+
+        // Framing/overhead constants (exported so create.js avoids duplicating them)
+        AES_GCM_OVERHEAD,
+        V1_HEADER_LEN,
 
         // Helpers
         base64urlEncode,
