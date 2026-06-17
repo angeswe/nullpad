@@ -81,7 +81,7 @@ See `.env.example` for all available options. Key environment variables:
 
 - `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes), generated via `cargo run -- keygen` (required). **Keep this confidential** — treat it like a password hash. Because the Ed25519 keypair is derived deterministically from `Argon2id(secret, salt=alias)`, anyone who obtains the public key can run an offline dictionary attack against the secret with no rate limiting.
 - `ADMIN_ALIAS` — Admin username (default: "admin")
-- `VALKEY_URL` — Valkey connection string (default: "redis://127.0.0.1:6379")
+- `VALKEY_URL` — Valkey connection string (default: "redis://127.0.0.1:6379"). nullpad speaks RESP via the redis-rs client, so any RESP-compatible server works (Valkey or Redis); the URL keeps the `redis://` scheme either way
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")
 - `PASTE_STORAGE_PATH` — Directory for encrypted paste content (default: "/data/pastes")
 - `VALKEY_PASSWORD` — Valkey authentication password (required in Docker)
@@ -148,7 +148,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 **Backend**
 
 - Rust with Axum 0.8 web framework
-- Valkey for metadata and sessions (everything expires)
+- Valkey for metadata and sessions (everything expires; any RESP-compatible server works, including Redis)
 - Filesystem for encrypted paste content (low memory footprint)
 - ed25519-dalek for signature verification
 - zeroize for secure memory cleanup
