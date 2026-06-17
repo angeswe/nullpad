@@ -1,10 +1,10 @@
 //! Storage layer for pastes, users, sessions, and challenges.
 //!
-//! - Redis: metadata, users, sessions, challenges
+//! - Valkey: metadata, users, sessions, challenges
 //! - Filesystem: paste content (encrypted blobs)
 //!
-//! All functions are async. Redis uses redis::AsyncCommands.
-//! Data is serialized to JSON for storage in Redis.
+//! All functions are async. Valkey uses redis::AsyncCommands.
+//! Data is serialized to JSON for storage in Valkey.
 
 pub mod blob;
 pub mod paste;
@@ -34,9 +34,9 @@ pub(crate) fn json_deserialize_err(e: serde_json::Error) -> RedisError {
 /// Maximum number of keys returned by scan_keys to prevent unbounded memory allocation.
 const SCAN_MAX_KEYS: usize = 10_000;
 
-/// Scan for Redis keys matching a pattern using SCAN (non-blocking).
+/// Scan for Valkey keys matching a pattern using SCAN (non-blocking).
 ///
-/// Unlike KEYS, SCAN does not block the Redis server during iteration.
+/// Unlike KEYS, SCAN does not block the Valkey server during iteration.
 /// Capped at SCAN_MAX_KEYS results to prevent unbounded memory growth.
 pub async fn scan_keys<C>(con: &mut C, pattern: &str) -> Result<Vec<String>, redis::RedisError>
 where

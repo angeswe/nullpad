@@ -11,12 +11,12 @@ use std::sync::Arc;
 /// Application state shared across handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// Redis connection manager with automatic reconnection.
+    /// Valkey connection manager with automatic reconnection.
     /// ConnectionManager handles connection failures with exponential backoff retry,
-    /// eliminating the need for manual pod restarts when Redis becomes temporarily unavailable.
+    /// eliminating the need for manual pod restarts when Valkey becomes temporarily unavailable.
     pub redis: redis::aio::ConnectionManager,
     pub config: Arc<Config>,
-    /// Random 32-byte salt for HMAC-SHA256 hashing of client IPs in Redis keys.
+    /// Random 32-byte salt for HMAC-SHA256 hashing of client IPs in Valkey keys.
     pub ip_hmac_salt: Arc<[u8; 32]>,
 }
 
@@ -99,7 +99,7 @@ fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
 ///
 /// Returns Some(AuthSession) if valid Bearer header or `np_session` cookie present,
 /// None if neither source provides credentials.
-/// Propagates system errors (Redis failures) instead of silently degrading.
+/// Propagates system errors (Valkey failures) instead of silently degrading.
 impl FromRequestParts<AppState> for Option<AuthSession> {
     type Rejection = AppError;
 
@@ -158,10 +158,10 @@ pub struct RateLimitResult {
     pub retry_after: Option<u64>,
 }
 
-/// Check rate limit using Redis INCR with TTL.
+/// Check rate limit using Valkey INCR with TTL.
 ///
 /// # Arguments
-/// * `con` - Redis connection
+/// * `con` - Valkey connection
 /// * `key` - Rate limit key (e.g., "ratelimit:ip:127.0.0.1")
 /// * `max` - Maximum requests allowed in window
 /// * `window_secs` - Time window in seconds
@@ -211,15 +211,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_check_rate_limit() {
-        // Note: This test requires a running Redis instance
-        // Skip if REDIS_URL is not set
-        let redis_url =
-            std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+        // Note: This test requires a running Valkey instance
+        // Skip if VALKEY_URL is not set
+        let valkey_url =
+            std::env::var("VALKEY_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
 
-        let client = match redis::Client::open(redis_url) {
+        let client = match redis::Client::open(valkey_url) {
             Ok(c) => c,
             Err(_) => {
-                eprintln!("Skipping test: Redis not available");
+                eprintln!("Skipping test: Valkey not available");
                 return;
             }
         };
@@ -227,7 +227,7 @@ mod tests {
         let mut con = match client.get_multiplexed_async_connection().await {
             Ok(c) => c,
             Err(_) => {
-                eprintln!("Skipping test: Redis connection failed");
+                eprintln!("Skipping test: Valkey connection failed");
                 return;
             }
         };

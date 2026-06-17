@@ -85,7 +85,7 @@ impl IntoResponse for AppError {
 // Convenience conversions from common error types
 impl From<redis::RedisError> for AppError {
     fn from(err: redis::RedisError) -> Self {
-        AppError::Internal(format!("Redis error: {}", err))
+        AppError::Internal(format!("Valkey error: {}", err))
     }
 }
 
@@ -115,13 +115,13 @@ mod tests {
     async fn test_internal_hides_details() {
         // CRITICAL: Internal error must NOT leak detailed message to client
         let (status, body) = error_response(AppError::Internal(
-            "Redis connection refused at 10.0.0.5:6379".to_string(),
+            "Valkey connection refused at 10.0.0.5:6379".to_string(),
         ))
         .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(body["error"], "Internal server error");
         // Must NOT contain the actual error details
-        assert!(!body["error"].as_str().unwrap().contains("Redis"));
+        assert!(!body["error"].as_str().unwrap().contains("Valkey"));
         assert!(!body["error"].as_str().unwrap().contains("10.0.0.5"));
     }
 
@@ -183,7 +183,7 @@ mod tests {
         ));
         let app_err = AppError::from(redis_err);
         match app_err {
-            AppError::Internal(msg) => assert!(msg.contains("Redis error")),
+            AppError::Internal(msg) => assert!(msg.contains("Valkey error")),
             _ => panic!("Expected Internal variant"),
         }
     }

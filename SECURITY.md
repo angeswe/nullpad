@@ -35,7 +35,7 @@ Out of scope:
 - Vulnerabilities in dependencies (report upstream, but let us know)
 - Social engineering
 - Physical attacks
-- Issues in third-party services (Cloudflare, Redis, etc.)
+- Issues in third-party services (Cloudflare, Valkey, etc.)
 
 ## Security Model
 

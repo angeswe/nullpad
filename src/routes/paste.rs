@@ -163,7 +163,7 @@ pub async fn create_paste(
     }
 
     // Use config default if client omitted ttl_secs.
-    // ttl_secs=0 means "forever" (no expiration) — admin only to prevent Redis memory exhaustion.
+    // ttl_secs=0 means "forever" (no expiration) — admin only to prevent Valkey memory exhaustion.
     let requested_ttl = metadata.ttl_secs.unwrap_or(state.config.default_ttl_secs);
     let ttl_secs = if requested_ttl == 0 {
         match &auth_session {
@@ -211,7 +211,7 @@ pub async fn create_paste(
         encrypted_content,
     };
 
-    // Store paste (metadata to Redis via SETNX, then content to disk)
+    // Store paste (metadata to Valkey via SETNX, then content to disk)
     storage::paste::store_paste(
         &mut con,
         &state.config.paste_storage_path,

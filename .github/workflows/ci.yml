@@ -23,14 +23,14 @@ jobs:
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2
-      - name: Start Redis with authentication
+      - name: Start Valkey with authentication
         run: |
-          docker run -d --name redis -p 6379:6379 \
-            redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065 \
-            redis-server --requirepass ci-test-pass
+          docker run -d --name valkey -p 6379:6379 \
+            valkey/valkey:9.1.0-alpine@sha256:a35428eba9043cc0b79dbe54100f0c92784f2de00ad09b01182bfb1c5c83d1bd \
+            valkey-server --requirepass ci-test-pass
           for i in $(seq 1 30); do
-            if docker exec redis redis-cli -a ci-test-pass ping 2>/dev/null | grep -q PONG; then
-              echo "Redis is ready"
+            if docker exec valkey valkey-cli -a ci-test-pass ping 2>/dev/null | grep -q PONG; then
+              echo "Valkey is ready"
               break
             fi
             sleep 1
@@ -40,11 +40,11 @@ jobs:
       - name: Unit tests
         run: cargo test --locked --lib
         env:
-          REDIS_URL: redis://:ci-test-pass@127.0.0.1:6379
-      - name: Integration tests (sequential, shared Redis)
+          VALKEY_URL: redis://:ci-test-pass@127.0.0.1:6379
+      - name: Integration tests (sequential, shared Valkey)
         run: cargo test --locked --test integration -- --test-threads=1
         env:
-          REDIS_URL: redis://:ci-test-pass@127.0.0.1:6379
+          VALKEY_URL: redis://:ci-test-pass@127.0.0.1:6379
 
   lint:
     name: Lint

@@ -37,7 +37,7 @@ cargo run -- keygen <alias> <secret>
 nano .env
 # Set ADMIN_ALIAS=<your alias>
 # Set ADMIN_PUBKEY=<generated public key>
-# Set REDIS_PASSWORD=<strong password>
+# Set VALKEY_PASSWORD=<strong password>
 
 # 4. Start nullpad
 docker compose up -d
@@ -52,16 +52,16 @@ docker compose up -d
 
 ## Development Setup
 
-**Prerequisites**: Rust (latest stable), Redis (7.0+)
+**Prerequisites**: Rust (latest stable), Valkey (7.0+, a Redis-compatible fork)
 
 ```bash
-# Install Redis
-# Ubuntu/Debian: apt install redis-server
-# macOS: brew install redis
-# Or run via Docker: docker run -d -p 6379:6379 redis:7-alpine
+# Install Valkey (or any Redis-compatible server)
+# Ubuntu/Debian: apt install valkey
+# macOS: brew install valkey
+# Or run via Docker: docker run -d -p 6379:6379 valkey/valkey:9.1.0-alpine
 
-# Start Redis (skip if using Docker)
-redis-server
+# Start Valkey (skip if using Docker)
+valkey-server
 
 # Copy config and set ADMIN_PUBKEY
 cp .env.example .env
@@ -81,10 +81,10 @@ See `.env.example` for all available options. Key environment variables:
 
 - `ADMIN_PUBKEY` — Base64-encoded Ed25519 public key (32 bytes), generated via `cargo run -- keygen` (required). **Keep this confidential** — treat it like a password hash. Because the Ed25519 keypair is derived deterministically from `Argon2id(secret, salt=alias)`, anyone who obtains the public key can run an offline dictionary attack against the secret with no rate limiting.
 - `ADMIN_ALIAS` — Admin username (default: "admin")
-- `REDIS_URL` — Redis connection string (default: "redis://127.0.0.1:6379")
+- `VALKEY_URL` — Valkey connection string (default: "redis://127.0.0.1:6379")
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")
 - `PASTE_STORAGE_PATH` — Directory for encrypted paste content (default: "/data/pastes")
-- `REDIS_PASSWORD` — Redis authentication password (required in Docker)
+- `VALKEY_PASSWORD` — Valkey authentication password (required in Docker)
 - `MAX_UPLOAD_BYTES` — Max file size (default: 52428800 / 50MB)
 - `DEFAULT_TTL_SECS` — Default paste expiration (default: 86400 / 24h)
 - `MAX_TTL_SECS` — Maximum paste lifetime (default: 604800 / 7d)
@@ -131,7 +131,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 **Data Expiration**
 
-- All Redis keys have TTLs — pastes expire based on chosen duration (1 minute to 1 week)
+- All Valkey keys have TTLs — pastes expire based on chosen duration (1 minute to 1 week)
 - Burn-after-reading uses atomic Lua script (no race conditions)
 - Burn and admin delete clean up user_pastes references atomically
 
@@ -148,7 +148,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 **Backend**
 
 - Rust with Axum 0.8 web framework
-- Redis for metadata and sessions (everything expires)
+- Valkey for metadata and sessions (everything expires)
 - Filesystem for encrypted paste content (low memory footprint)
 - ed25519-dalek for signature verification
 - zeroize for secure memory cleanup
@@ -171,7 +171,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 ### Public
 
-- `GET /healthz` — Health check (returns Redis connectivity status)
+- `GET /healthz` — Health check (returns Valkey connectivity status)
 - `POST /api/paste` — Create encrypted paste
 - `GET /api/paste/{id}` — Retrieve paste (deletes if burn-after-reading)
 - `POST /api/auth/challenge` — Request authentication nonce

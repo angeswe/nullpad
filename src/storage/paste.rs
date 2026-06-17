@@ -1,6 +1,6 @@
 //! Paste storage operations.
 //!
-//! Redis key patterns:
+//! Valkey key patterns:
 //! - `paste:{nanoid}` — paste metadata (JSON, no content)
 //! - `user_pastes:{user_id}` — SET of paste IDs owned by user
 //!
@@ -12,7 +12,7 @@ use crate::storage::blob;
 use redis::AsyncCommands;
 use std::path::Path;
 
-/// Store a paste: claim ID in Redis first (SETNX), then write content to disk.
+/// Store a paste: claim ID in Valkey first (SETNX), then write content to disk.
 ///
 /// Uses SET NX (set-if-not-exists) to atomically claim the paste ID, preventing
 /// overwrites of existing pastes. If the ID already exists, returns an error
@@ -35,7 +35,7 @@ where
 
     // Step 1: Atomically claim the paste ID with SET NX (set-if-not-exists).
     // This prevents overwriting existing pastes when clients control the ID.
-    // Redis SET NX returns "OK" on success or nil when key exists.
+    // Valkey SET NX returns "OK" on success or nil when key exists.
     let mut cmd = redis::cmd("SET");
     cmd.arg(&key).arg(&json);
     if ttl_secs > 0 {
@@ -43,9 +43,9 @@ where
     }
     cmd.arg("NX");
 
-    // Redis SET NX returns "OK" (Some) on success, nil (None) when key exists.
+    // Valkey SET NX returns "OK" (Some) on success, nil (None) when key exists.
     // Using Option<String> correctly maps nil to None without type errors.
-    // Real Redis errors (connection, auth, OOM) propagate via `?`.
+    // Real Valkey errors (connection, auth, OOM) propagate via `?`.
     let result: Option<String> = cmd.query_async(con).await?;
     let claimed = result.is_some();
 
@@ -57,14 +57,14 @@ where
         )));
     }
 
-    // Step 2: Write content to disk (only after Redis confirms the ID is ours).
+    // Step 2: Write content to disk (only after Valkey confirms the ID is ours).
     if let Err(e) = blob::write_blob(storage_path, &paste.meta.id, &paste.encrypted_content).await {
-        // Cleanup: delete Redis key if blob write fails
+        // Cleanup: delete Valkey key if blob write fails
         if let Err(cleanup_err) = con.del::<_, ()>(&key).await {
             tracing::error!(
                 paste_id = %paste.meta.id,
                 error = %cleanup_err,
-                "Failed to clean up Redis key after blob write failure"
+                "Failed to clean up Valkey key after blob write failure"
             );
         }
         return Err(redis::RedisError::from((
@@ -99,7 +99,7 @@ where
     Ok(())
 }
 
-/// Get paste metadata only (Redis GET, no blob read, no burn side effects).
+/// Get paste metadata only (Valkey GET, no blob read, no burn side effects).
 ///
 /// Used by PIN gating probe to check `has_pin` without consuming burn pastes.
 pub async fn get_paste_meta<C>(
@@ -129,7 +129,7 @@ where
 /// deleted after confirming the blob can be read, preventing data loss.
 /// `max_blob_bytes` limits the blob size to prevent OOM.
 ///
-/// NOTE: If Redis AOF persistence is enabled, burn-after-reading metadata may
+/// NOTE: If Valkey AOF persistence is enabled, burn-after-reading metadata may
 /// be retained in the AOF log even after deletion. The Lua DEL command is
 /// recorded in the AOF. On AOF rewrite, the key won't appear (since it's
 /// already deleted), but between rewrites the original SET + DEL are both
@@ -207,7 +207,7 @@ where
     }
 }
 
-/// Delete a paste from Redis and disk, cleaning up the owner's user_pastes SET.
+/// Delete a paste from Valkey and disk, cleaning up the owner's user_pastes SET.
 ///
 /// Uses a Lua script to atomically fetch the metadata (for owner_id), delete it,
 /// and SREM from the owner's user_pastes SET. Then deletes the blob from disk.
@@ -326,9 +326,9 @@ where
     Ok(())
 }
 
-/// Delete all pastes owned by a user (Redis metadata + disk blobs).
+/// Delete all pastes owned by a user (Valkey metadata + disk blobs).
 ///
-/// First fetches paste IDs, then deletes Redis metadata via Lua script,
+/// First fetches paste IDs, then deletes Valkey metadata via Lua script,
 /// then deletes blobs from disk. Blob deletion failures are logged but
 /// don't fail the operation (orphaned blobs are cleaned up by cleanup job).
 pub async fn delete_user_pastes<C>(
@@ -350,7 +350,7 @@ where
         return Ok(());
     }
 
-    // Delete Redis metadata via Lua script
+    // Delete Valkey metadata via Lua script
     let script = redis::Script::new(
         r#"
         local user_pastes_key = KEYS[1]

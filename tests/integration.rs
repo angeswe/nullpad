@@ -1,9 +1,9 @@
 //! Integration tests for nullpad API.
 //!
-//! Tests use testcontainers to spin up a throwaway Redis instance automatically.
-//! Only a running Docker daemon is required — no external Redis needed.
+//! Tests use testcontainers to spin up a throwaway Valkey-compatible instance automatically.
+//! Only a running Docker daemon is required — no external Valkey needed.
 //!
-//! Uses a custom harness (`harness = false`) so that the Redis container is owned
+//! Uses a custom harness (`harness = false`) so that the Valkey container is owned
 //! by `main()` and explicitly removed after all tests complete. This prevents
 //! container leaks — `static` containers never drop, so previous versions leaked
 //! one Docker container per test process.
@@ -24,13 +24,13 @@ use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::ImageExt;
 use tower_http::services::ServeDir;
 
-/// Redis URL set once in `main()`, read by all test helpers.
-static REDIS_URL: OnceLock<String> = OnceLock::new();
+/// Valkey URL set once in `main()`, read by all test helpers.
+static VALKEY_URL: OnceLock<String> = OnceLock::new();
 
-fn get_redis_url() -> &'static str {
-    REDIS_URL
+fn get_valkey_url() -> &'static str {
+    VALKEY_URL
         .get()
-        .expect("REDIS_URL not initialized — tests must run via main()")
+        .expect("VALKEY_URL not initialized — tests must run via main()")
 }
 
 /// Run a named async test function, printing pass/fail like the default harness.
@@ -71,17 +71,17 @@ macro_rules! run_tests {
 
 #[tokio::main]
 async fn main() {
-    // Start Redis container — owned by main(), removed at end.
+    // Start Valkey-compatible Redis testcontainer — owned by main(), removed at end.
     let container = Redis::default()
         .with_tag("7-alpine")
         .start()
         .await
-        .expect("Failed to start Redis container");
+        .expect("Failed to start Valkey container");
     let host = container.get_host().await.unwrap();
     let port = container.get_host_port_ipv4(6379).await.unwrap();
-    REDIS_URL
+    VALKEY_URL
         .set(format!("redis://{}:{}", host, port))
-        .expect("REDIS_URL already set");
+        .expect("VALKEY_URL already set");
 
     let (passed, failed) = run_tests![
         test_create_and_get_paste,
@@ -136,7 +136,7 @@ async fn main() {
     container
         .rm()
         .await
-        .expect("Failed to remove Redis container");
+        .expect("Failed to remove Valkey container");
 
     println!(
         "\ntest result: {}. {} passed; {} failed\n",
@@ -203,13 +203,14 @@ async fn spawn_test_server_configured(
     let (admin_key, admin_pubkey) = test_keypair();
     let admin_alias = format!("testadmin_{}", nanoid::nanoid!(6));
 
-    let test_redis_url = get_redis_url().to_string();
-    let redis_client = redis::Client::open(test_redis_url.as_str()).expect("Failed to open Redis");
-    let redis_manager = redis_client
+    let test_valkey_url = get_valkey_url().to_string();
+    let valkey_client =
+        redis::Client::open(test_valkey_url.as_str()).expect("Failed to open Valkey");
+    let valkey_manager = valkey_client
         .get_connection_manager()
         .await
         .expect("Failed to get connection manager");
-    let mut con = redis_manager.clone();
+    let mut con = valkey_manager.clone();
 
     nullpad::storage::user::upsert_admin(&mut con, &admin_pubkey, &admin_alias)
         .await
@@ -224,7 +225,7 @@ async fn spawn_test_server_configured(
     let config = Config {
         admin_pubkey,
         admin_alias: admin_alias.clone(),
-        redis_url: test_redis_url.clone(),
+        valkey_url: test_valkey_url.clone(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         max_upload_bytes: 52_428_800,
         default_ttl_secs: 86400,
@@ -245,7 +246,7 @@ async fn spawn_test_server_configured(
     };
 
     let state = AppState {
-        redis: redis_manager,
+        redis: valkey_manager,
         config: Arc::new(config),
         ip_hmac_salt: Arc::new(rand::random()),
     };

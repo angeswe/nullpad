@@ -220,7 +220,7 @@ pub async fn register(
     // Validate invite token format
     super::validate_id(&req.token, "invite token", 16)?;
 
-    // Validate pubkey FIRST (before touching Redis): must be valid base64, 32 bytes, and a valid Ed25519 public key
+    // Validate pubkey FIRST (before touching Valkey): must be valid base64, 32 bytes, and a valid Ed25519 public key
     let pubkey_bytes = general_purpose::STANDARD
         .decode(&req.pubkey)
         .map_err(|_| AppError::BadRequest("Invalid public key: not valid base64".to_string()))?;
