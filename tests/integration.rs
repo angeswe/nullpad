@@ -1,6 +1,6 @@
 //! Integration tests for nullpad API.
 //!
-//! Tests use testcontainers to spin up a throwaway Valkey-compatible instance automatically.
+//! Tests use testcontainers to spin up a throwaway Valkey instance automatically.
 //! Only a running Docker daemon is required — no external Valkey needed.
 //!
 //! Uses a custom harness (`harness = false`) so that the Valkey container is owned
@@ -19,9 +19,9 @@ use nullpad::{
 use reqwest::multipart;
 use sha2::Sha256;
 use std::sync::{Arc, OnceLock};
-use testcontainers_modules::redis::Redis;
 use testcontainers_modules::testcontainers::runners::AsyncRunner;
 use testcontainers_modules::testcontainers::ImageExt;
+use testcontainers_modules::valkey::Valkey;
 use tower_http::services::ServeDir;
 
 /// Valkey URL set once in `main()`, read by all test helpers.
@@ -71,9 +71,10 @@ macro_rules! run_tests {
 
 #[tokio::main]
 async fn main() {
-    // Start Valkey-compatible Redis testcontainer — owned by main(), removed at end.
-    let container = Redis::default()
-        .with_tag("7-alpine")
+    // Start a throwaway Valkey testcontainer — owned by main(), removed at end.
+    // Pinned to the tag deployed in CI and the cluster.
+    let container = Valkey::default()
+        .with_tag("9.1.0-alpine")
         .start()
         .await
         .expect("Failed to start Valkey container");
