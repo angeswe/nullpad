@@ -1,7 +1,7 @@
 //! Request and response models for the API.
 //!
 //! All models use serde for serialization/deserialization.
-//! Storage models represent Redis data structures.
+//! Storage models represent Valkey data structures.
 
 use serde::{Deserialize, Serialize};
 
@@ -70,7 +70,7 @@ pub struct GetPasteResponse {
     pub needs_pin: Option<bool>,
 }
 
-/// Paste metadata as stored in Redis.
+/// Paste metadata as stored in Valkey.
 /// Content is stored separately on disk via storage::blob.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredPasteMeta {
@@ -98,7 +98,7 @@ pub struct StoredPasteMeta {
 }
 
 /// Full paste data (metadata + content) for API operations.
-/// Used when creating/fetching pastes - combines metadata from Redis with content from disk.
+/// Used when creating/fetching pastes - combines metadata from Valkey with content from disk.
 #[derive(Debug, Clone)]
 pub struct StoredPaste {
     pub meta: StoredPasteMeta,
@@ -175,7 +175,7 @@ pub struct UserInfo {
 // Storage Models
 // ============================================================================
 
-/// User data as stored in Redis.
+/// User data as stored in Valkey.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredUser {
     pub id: String,
@@ -185,21 +185,21 @@ pub struct StoredUser {
     pub created_at: u64,
 }
 
-/// Invite data as stored in Redis.
+/// Invite data as stored in Valkey.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredInvite {
     pub token: String,
     pub created_at: u64,
 }
 
-/// Challenge data as stored in Redis.
+/// Challenge data as stored in Valkey.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredChallenge {
     pub nonce: String, // base64
     pub created_at: u64,
 }
 
-/// Session data as stored in Redis.
+/// Session data as stored in Valkey.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
     pub user_id: String,

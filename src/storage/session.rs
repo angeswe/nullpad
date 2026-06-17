@@ -1,6 +1,6 @@
-//! Session and challenge Redis operations.
+//! Session and challenge Valkey operations.
 //!
-//! Redis key patterns:
+//! Valkey key patterns:
 //! - `session:{token}` — session data (JSON)
 //! - `challenge:{alias}` — challenge nonce (JSON)
 //!
@@ -11,7 +11,7 @@
 //! - Challenge nonces are zeroized after verification
 //! - Session tokens are zeroized after consumption
 //!
-//! **Limitations**: Redis stores data in its own memory space, so zeroize only protects
+//! **Limitations**: Valkey stores data in its own memory space, so zeroize only protects
 //! the Rust application's memory. This is defense-in-depth for the application layer.
 //! Additionally, since we're working with String types that come from JSON deserialization,
 //! intermediate copies may exist. We zeroize what we can control directly.
@@ -99,7 +99,7 @@ where
     }
 }
 
-/// Store a session in Redis with TTL (default 15min).
+/// Store a session in Valkey with TTL (default 15min).
 ///
 /// Also adds the session token to the user's session tracking set
 /// (`user_sessions:{user_id}`) for efficient cleanup on user revocation.
@@ -251,7 +251,7 @@ where
     }
 }
 
-/// Delete a session from Redis.
+/// Delete a session from Valkey.
 ///
 /// Also removes the token from the user's session tracking set.
 /// Returns true if the session was deleted, false if it didn't exist.

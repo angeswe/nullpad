@@ -87,7 +87,7 @@ pub fn validate_id(id: &str, label: &str, expected_len: usize) -> Result<(), App
     Ok(())
 }
 
-/// Hash an IP address with HMAC-SHA256 for use in Redis keys and logs.
+/// Hash an IP address with HMAC-SHA256 for use in Valkey keys and logs.
 pub fn hash_ip(salt: &[u8], ip: &IpAddr) -> String {
     type HmacSha256 = Hmac<Sha256>;
     let mut mac = HmacSha256::new_from_slice(salt).expect("HMAC accepts any key size");
@@ -165,7 +165,7 @@ async fn server_config(State(state): State<AppState>) -> impl IntoResponse {
 
 /// GET /healthz — Health check endpoint for liveness/readiness probes.
 ///
-/// Pings Redis and returns 200 if healthy, 503 if Redis is unreachable.
+/// Pings Valkey and returns 200 if healthy, 503 if Valkey is unreachable.
 async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
     // ConnectionManager handles auto-reconnection; just try to PING
     let mut con = state.redis.clone();
@@ -173,7 +173,7 @@ async fn healthz(State(state): State<AppState>) -> impl IntoResponse {
         Ok(_) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))),
         Err(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({"status": "error", "detail": "redis ping failed"})),
+            Json(serde_json::json!({"status": "error", "detail": "valkey ping failed"})),
         ),
     }
 }
@@ -211,7 +211,7 @@ async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse
 
 /// GET /admin.html — Admin dashboard (requires valid admin session)
 ///
-/// Validates the `np_session` HttpOnly cookie against Redis — same session
+/// Validates the `np_session` HttpOnly cookie against Valkey — same session
 /// check as Bearer-authenticated API calls.
 async fn protected_admin_html(
     AdminSession(_): AdminSession,

@@ -2,7 +2,7 @@
 //!
 //! Bootstraps the server:
 //! 1. Load configuration from environment
-//! 2. Connect to Redis
+//! 2. Connect to Valkey
 //! 3. Upsert admin user
 //! 4. Build router with API routes + static file serving
 //! 5. Apply security headers middleware
@@ -164,18 +164,19 @@ async fn main() {
         .await
         .expect("Failed to initialize paste storage");
 
-    // Connect to Redis with ConnectionManager for automatic reconnection.
+    // Connect to Valkey with ConnectionManager for automatic reconnection.
     // ConnectionManager handles connection failures with exponential backoff retry,
-    // eliminating the need for manual pod restarts when Redis becomes temporarily unavailable.
-    let redis_client = redis::Client::open(config.redis_url.as_str()).expect("Invalid Redis URL");
-    let mut redis_manager = redis_client
+    // eliminating the need for manual pod restarts when Valkey becomes temporarily unavailable.
+    let valkey_client =
+        redis::Client::open(config.valkey_url.as_str()).expect("Invalid Valkey URL");
+    let mut valkey_manager = valkey_client
         .get_connection_manager()
         .await
-        .expect("Failed to connect to Redis");
+        .expect("Failed to connect to Valkey");
 
     // Upsert admin user (permanent, no TTL)
     storage::user::upsert_admin(
-        &mut redis_manager,
+        &mut valkey_manager,
         &config.admin_pubkey,
         &config.admin_alias,
     )
@@ -183,8 +184,8 @@ async fn main() {
     .expect("Failed to upsert admin user");
     tracing::info!("Admin user '{}' configured", config.admin_alias);
 
-    // Clone redis for cleanup job before building state
-    let cleanup_redis = redis_manager.clone();
+    // Clone the Valkey connection for the cleanup job before building state
+    let cleanup_valkey = valkey_manager.clone();
 
     // Load or generate a random HMAC salt for IP hashing in rate-limit keys.
     // Persisted to data/hmac_salt so rate-limit keys survive restarts.
@@ -221,7 +222,7 @@ async fn main() {
 
     // Build shared state
     let state = AppState {
-        redis: redis_manager,
+        redis: valkey_manager,
         config: Arc::new(config.clone()),
         ip_hmac_salt: Arc::new(ip_hmac_salt),
     };
@@ -248,7 +249,7 @@ async fn main() {
     // Start cleanup job for orphaned paste files (runs every 5 minutes)
     let cleanup_path = config.paste_storage_path.clone();
     tokio::spawn(async move {
-        cleanup::run_cleanup_loop(cleanup_redis, &cleanup_path, Duration::from_secs(300)).await;
+        cleanup::run_cleanup_loop(cleanup_valkey, &cleanup_path, Duration::from_secs(300)).await;
     });
     tracing::info!("Cleanup job started (5 minute interval)");
 

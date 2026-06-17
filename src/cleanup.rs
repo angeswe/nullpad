@@ -1,8 +1,8 @@
 //! Background cleanup job for orphaned paste files.
 //!
-//! When Redis expires paste metadata (via TTL), the corresponding file
+//! When Valkey expires paste metadata (via TTL), the corresponding file
 //! on disk becomes orphaned. This job periodically scans the storage
-//! directory and deletes files whose metadata no longer exists in Redis.
+//! directory and deletes files whose metadata no longer exists in Valkey.
 
 use crate::util::{is_valid_nanoid, now_secs};
 use redis::AsyncCommands;
@@ -10,7 +10,7 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::fs;
 
-/// Maximum files to process per cleanup cycle to bound Redis load.
+/// Maximum files to process per cleanup cycle to bound Valkey load.
 const CLEANUP_BATCH_SIZE: usize = 50;
 const CLEANUP_MAX_FILES_PER_CYCLE: usize = 1000;
 
@@ -20,7 +20,7 @@ const STALE_TMP_SECS: u64 = 3600;
 /// Run the cleanup loop.
 ///
 /// Scans the paste storage directory every `interval` and deletes
-/// orphaned files (those without corresponding Redis metadata).
+/// orphaned files (those without corresponding Valkey metadata).
 pub async fn run_cleanup_loop<C>(mut redis: C, storage_path: &Path, interval: Duration)
 where
     C: AsyncCommands + Clone + Send + 'static,
@@ -112,7 +112,7 @@ where
                 None => continue,
             };
 
-            // Validate paste ID before using in Redis key
+            // Validate paste ID before using in Valkey key
             if !is_valid_paste_id(&paste_id) {
                 tracing::warn!(
                     filename = %paste_id,
@@ -165,7 +165,7 @@ where
     Ok(())
 }
 
-/// Process a batch of files: pipeline Redis EXISTS queries, then delete orphans.
+/// Process a batch of files: pipeline Valkey EXISTS queries, then delete orphans.
 async fn process_batch<C>(
     redis: &mut C,
     files: &mut Vec<(String, std::path::PathBuf)>,
@@ -176,7 +176,7 @@ where
     let mut checked: u64 = 0;
     let mut deleted: u64 = 0;
 
-    // Build Redis pipeline for batched EXISTS queries
+    // Build Valkey pipeline for batched EXISTS queries
     let mut pipe = redis::pipe();
     for (paste_id, _) in files.iter() {
         let redis_key = format!("paste:{}", paste_id);
@@ -186,7 +186,7 @@ where
     let results: Vec<bool> = match pipe.query_async(redis).await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!(error = %e, batch_size = files.len(), "Cleanup: Redis pipeline failed, skipping batch");
+            tracing::warn!(error = %e, batch_size = files.len(), "Cleanup: Valkey pipeline failed, skipping batch");
             files.clear();
             return Ok((0, 0));
         }
@@ -219,6 +219,6 @@ pub enum CleanupError {
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("Redis error: {0}")]
+    #[error("Valkey error: {0}")]
     Redis(#[from] redis::RedisError),
 }

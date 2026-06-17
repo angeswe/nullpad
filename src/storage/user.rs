@@ -1,6 +1,6 @@
-//! User and invite Redis operations.
+//! User and invite Valkey operations.
 //!
-//! Redis key patterns:
+//! Valkey key patterns:
 //! - `user:{nanoid}` — individual user data (JSON)
 //! - `alias:{alias}` — alias lookup to user_id (STRING)
 //! - `invite:{token}` — invite data (JSON)
@@ -153,7 +153,7 @@ where
     Ok(())
 }
 
-/// List all users in Redis.
+/// List all users in Valkey.
 ///
 /// Scans for keys matching `user:*` and deserializes each.
 /// User JSON data is zeroized after deserialization.
@@ -266,7 +266,7 @@ where
     }
 }
 
-/// Store an invite in Redis with TTL.
+/// Store an invite in Valkey with TTL.
 pub async fn store_invite<C>(
     con: &mut C,
     invite: &StoredInvite,
@@ -282,7 +282,7 @@ where
     Ok(())
 }
 
-/// Delete an invite from Redis.
+/// Delete an invite from Valkey.
 ///
 /// Returns true if the invite was deleted, false if it didn't exist.
 pub async fn delete_invite<C>(con: &mut C, token: &str) -> Result<bool, redis::RedisError>
@@ -294,7 +294,7 @@ where
     Ok(deleted > 0)
 }
 
-/// List all invites in Redis.
+/// List all invites in Valkey.
 ///
 /// Scans for keys matching `invite:*` and deserializes each.
 /// Invite JSON data is zeroized after deserialization.

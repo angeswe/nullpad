@@ -4,12 +4,12 @@ services:
     ports:
       - "3015:3000"
     depends_on:
-      redis:
+      valkey:
         condition: service_healthy
     env_file:
       - .env
     environment:
-      - REDIS_URL=redis://:${REDIS_PASSWORD:?REDIS_PASSWORD must be set}@redis:6379
+      - VALKEY_URL=redis://:${VALKEY_PASSWORD:?VALKEY_PASSWORD must be set}@valkey:6379
       - RUST_LOG=info
     restart: unless-stopped
     networks:
@@ -36,12 +36,12 @@ services:
     tmpfs:
       - /tmp
 
-  redis:
-    # To update: docker pull redis:7-alpine && docker inspect --format='{{index .RepoDigests 0}}' redis:7-alpine
-    image: redis:7-alpine@sha256:8b81dd37ff027bec4e516d41acfbe9fe2460070dc6d4a4570a2ac5b9d59df065
-    user: redis
+  valkey:
+    # To update: docker pull valkey/valkey:9.1.0-alpine && docker inspect --format='{{index .RepoDigests 0}}' valkey/valkey:9.1.0-alpine
+    image: valkey/valkey:9.1.0-alpine@sha256:a35428eba9043cc0b79dbe54100f0c92784f2de00ad09b01182bfb1c5c83d1bd
+    user: valkey
     volumes:
-      - redis-data:/data
+      - valkey-data:/data
     env_file:
       - .env
     restart: unless-stopped
@@ -49,18 +49,18 @@ services:
     # file until rewrite. Aggressive rewrite settings below minimize this window.
     # For stronger burn guarantees, disable AOF (--appendonly no --save "").
     command: >-
-      sh -c 'redis-server --appendonly yes
+      sh -c 'valkey-server --appendonly yes
       --auto-aof-rewrite-percentage 50
       --auto-aof-rewrite-min-size 16mb
-      --requirepass "$$REDIS_PASSWORD"
-      --maxmemory "$${REDIS_MAXMEMORY:-2gb}"
+      --requirepass "$$VALKEY_PASSWORD"
+      --maxmemory "$${VALKEY_MAXMEMORY:-2gb}"
       --maxmemory-policy volatile-lru
       --rename-command FLUSHALL ""
       --rename-command FLUSHDB ""
       --rename-command DEBUG ""
       --rename-command CONFIG ""'
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a \"$REDIS_PASSWORD\" --no-auth-warning ping"]
+      test: ["CMD-SHELL", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -84,5 +84,5 @@ networks:
     driver: bridge
 
 volumes:
-  redis-data:
+  valkey-data:
   paste-data:

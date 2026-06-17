@@ -8,8 +8,8 @@ pub struct Config {
     pub admin_pubkey: String,
     pub admin_alias: String,
 
-    // Redis
-    pub redis_url: String,
+    // Valkey
+    pub valkey_url: String,
 
     // Server
     pub bind_addr: SocketAddr,
@@ -50,7 +50,7 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("admin_pubkey", &"[REDACTED]")
             .field("admin_alias", &self.admin_alias)
-            .field("redis_url", &"[REDACTED]")
+            .field("valkey_url", &"[REDACTED]")
             .field("bind_addr", &self.bind_addr)
             .field("max_upload_bytes", &self.max_upload_bytes)
             .field("default_ttl_secs", &self.default_ttl_secs)
@@ -143,9 +143,9 @@ impl Config {
             ));
         }
 
-        // Redis — required to prevent silent unauthenticated connections
-        let redis_url =
-            env::var("REDIS_URL").map_err(|_| ConfigError::MissingVar("REDIS_URL".to_string()))?;
+        // Valkey — required to prevent silent unauthenticated connections
+        let valkey_url = env::var("VALKEY_URL")
+            .map_err(|_| ConfigError::MissingVar("VALKEY_URL".to_string()))?;
 
         // Server
         let bind_addr_str = env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
@@ -203,7 +203,7 @@ impl Config {
         Ok(Config {
             admin_pubkey,
             admin_alias,
-            redis_url,
+            valkey_url,
             bind_addr,
             max_upload_bytes,
             default_ttl_secs,
@@ -255,7 +255,7 @@ mod tests {
     fn clear_test_env() {
         env::remove_var("ADMIN_PUBKEY");
         env::remove_var("ADMIN_ALIAS");
-        env::remove_var("REDIS_URL");
+        env::remove_var("VALKEY_URL");
         env::remove_var("BIND_ADDR");
         env::remove_var("MAX_UPLOAD_BYTES");
         env::remove_var("DEFAULT_TTL_SECS");
@@ -297,7 +297,7 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         env::set_var("BIND_ADDR", "invalid_address");
 
         let result = Config::from_env();
@@ -385,7 +385,7 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         env::set_var("ADMIN_ALIAS", "a"); // Only 1 character
 
         let result = Config::from_env();
@@ -404,7 +404,7 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         // 65 characters (exceeds 64 max)
         env::set_var("ADMIN_ALIAS", "a".repeat(65));
 
@@ -424,7 +424,7 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         env::set_var("ADMIN_ALIAS", "admin@example"); // Contains '@'
 
         let result = Config::from_env();
@@ -443,7 +443,7 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         env::set_var("ADMIN_ALIAS", "admin user"); // Contains space
 
         let result = Config::from_env();
@@ -462,7 +462,7 @@ mod tests {
         clear_test_env();
 
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         env::set_var("ADMIN_ALIAS", "admin_user-123");
 
         let config = Config::from_env().unwrap();
@@ -478,7 +478,7 @@ mod tests {
 
         // Test minimum length (2 chars)
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         env::set_var("ADMIN_ALIAS", "ab");
 
         let config = Config::from_env().unwrap();
@@ -501,7 +501,7 @@ mod tests {
         // dotenvy::dotenv() won't override existing env vars, so pre-setting them
         // prevents .env from leaking non-default values into the test.
         env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
-        env::set_var("REDIS_URL", "redis://127.0.0.1:6379");
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
         env::set_var("BIND_ADDR", "0.0.0.0:3000");
         env::set_var("RATE_LIMIT_PASTE_PER_MIN", "10");
         env::set_var("RATE_LIMIT_AUTH_PER_MIN", "5");
@@ -514,7 +514,7 @@ mod tests {
 
         assert_eq!(config.admin_pubkey, TEST_PUBKEY_B64);
         assert_eq!(config.admin_alias, "admin");
-        assert_eq!(config.redis_url, "redis://127.0.0.1:6379");
+        assert_eq!(config.valkey_url, "redis://127.0.0.1:6379");
         assert_eq!(config.bind_addr.to_string(), "0.0.0.0:3000");
         assert_eq!(config.max_upload_bytes, 52_428_800);
         assert_eq!(config.default_ttl_secs, 86_400);
