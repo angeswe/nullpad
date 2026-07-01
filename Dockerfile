@@ -3,7 +3,7 @@
 # Stage 1: Build
 # Pin base images by digest for reproducible builds.
 # To update: docker pull rust:slim-bookworm && docker inspect --format='{{index .RepoDigests 0}}' rust:slim-bookworm
-FROM rust:slim-bookworm@sha256:5b9332190bb3b9ece73b810cd1f1e9f06343b294ce184bcb067f0747d7d333ea AS builder
+FROM rust:slim-bookworm@sha256:e18a79fc84dfcfc3ab5ba72290398a644c135c97eaa881447fddc354ee4701a3 AS builder
 
 WORKDIR /build
 
@@ -21,7 +21,7 @@ RUN cargo build --release --locked
 
 # Stage 2: Runtime
 # To update: docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
-FROM debian:bookworm-slim@sha256:74d56e3931e0d5a1dd51f8c8a2466d21de84a271cd3b5a733b803aa91abf4421
+FROM debian:bookworm-slim@sha256:60eac759739651111db372c07be67863818726f754804b8707c90979bda511df
 
 # Install runtime dependencies and apply security updates
 # curl is needed for Docker healthcheck (hits /healthz)
