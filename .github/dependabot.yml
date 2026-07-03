@@ -13,3 +13,15 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      # init/analyze are separate deps to dependabot, but the action rejects
+      # mixed versions in one workflow run — bump them together
+      codeql-action:
+        patterns:
+          - "github/codeql-action*"
+      # groups only apply to version-updates by default; without this second
+      # group a security update could still split the versions
+      codeql-action-security:
+        applies-to: security-updates
+        patterns:
+          - "github/codeql-action*"
