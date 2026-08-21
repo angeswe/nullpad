@@ -1,13 +1,16 @@
+// Loads the auth-gated trusted dashboard app as an external script.
+// The browser attaches the np_session cookie automatically on same-origin
+// script loads, and the server validates it (same check as Bearer auth).
+// An external <script src> is required because the CSP forbids inline
+// scripts, so fetching the code and injecting it inline would be blocked.
 (function() {
   var token = sessionStorage.getItem('nullpad_session_token');
   if (!token) { window.location.href = '/login.html'; return; }
-  fetch('/js/trusted.js', { headers: { 'Authorization': 'Bearer ' + token } })
-    .then(function(r) {
-      if (!r.ok) { console.error('trusted-loader: fetch failed', r.status); window.location.href = '/login.html'; return; }
-      return r.text();
-    })
-    .then(function(code) {
-      if (code) { var s = document.createElement('script'); s.textContent = code; document.body.appendChild(s); }
-    })
-    .catch(function(e) { console.error('trusted-loader:', e); window.location.href = '/login.html'; });
+  var s = document.createElement('script');
+  s.src = '/js/trusted.js';
+  s.onerror = function() {
+    console.error('trusted-loader: failed to load /js/trusted.js (session may have expired)');
+    window.location.href = '/login.html';
+  };
+  document.body.appendChild(s);
 })();
