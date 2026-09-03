@@ -544,6 +544,11 @@ input[type="checkbox"]:checked::after {
   background-color: rgba(74, 222, 128, 0.2);
 }
 
+.copy-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ==========================================================================
    File Upload & Drag-Drop
    ========================================================================== */

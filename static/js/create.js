@@ -23,6 +23,7 @@
   const successPanel = document.getElementById('success-panel');
   const pasteUrlInput = document.getElementById('paste-url');
   const copyBtn = document.getElementById('copy-btn');
+  const shareBtn = document.getElementById('share-btn');
   const createAnotherBtn = document.getElementById('create-another-btn');
   const burnNotice = document.getElementById('burn-notice');
   const pinNotice = document.getElementById('pin-notice');
@@ -293,6 +294,11 @@
     form.classList.add('hidden');
     successPanel.classList.remove('hidden');
     pasteUrlInput.value = url;
+    // Hidden in markup; offered per paste, see NullpadUtils.canOfferShare.
+    shareBtn.classList.toggle(
+      'hidden',
+      !NullpadUtils.canOfferShare(navigator, { burnAfterReading: isBurn, hasPin: hasPIN })
+    );
 
     if (isBurn) {
       burnNotice.classList.remove('hidden');
@@ -305,6 +311,9 @@
   function resetForm() {
     form.reset();
     pasteUrlInput.value = '';
+    shareBtn.disabled = false;
+    copyFlash.reset();
+    shareFlash.reset();
     currentFile = null;
     if (fileInfo) fileInfo.classList.add('hidden');
     contentTextarea.disabled = false;
@@ -323,23 +332,76 @@
   }
 
   // ============================================================================
+  // Button feedback
+  // ============================================================================
+
+  // Two-second label flashes for the Copy and Share buttons. The resting label
+  // is a literal rather than a captured one, so a fast second click cannot
+  // capture the flash text as the original, and the previous timer is cleared
+  // so a second outcome gets its full two seconds. Only the label is reset on
+  // the timer: the disabled state belongs to the in-flight action.
+  function labelFlasher(button, restingLabel) {
+    let timer = null;
+    function reset() {
+      clearTimeout(timer);
+      button.textContent = restingLabel;
+    }
+    return {
+      reset,
+      flash(label) {
+        clearTimeout(timer);
+        button.textContent = label;
+        timer = setTimeout(reset, 2000);
+      }
+    };
+  }
+
+  const copyFlash = labelFlasher(copyBtn, 'Copy');
+  const shareFlash = labelFlasher(shareBtn, 'Share');
+
+  // ============================================================================
   // Copy to Clipboard
   // ============================================================================
 
   function copyToClipboard(text) {
     navigator.clipboard.writeText(text).then(() => {
       clipboardDirty = true;
-      const originalText = copyBtn.textContent;
-      copyBtn.textContent = 'Copied!';
-      copyBtn.classList.add('btn-primary');
-      copyBtn.classList.remove('btn-secondary');
+      copyFlash.flash('Copied!');
+    }).catch((err) => {
+      // Clipboard permission denied or document not focused: the URL field is
+      // selectable, so manual copy still works. Never log the URL itself.
+      copyFlash.flash('Failed, select URL');
+      console.warn('Copy failed:', (err && err.name) || String(err));
+    });
+  }
 
-      setTimeout(() => {
-        copyBtn.textContent = originalText;
-        copyBtn.classList.remove('btn-primary');
-        copyBtn.classList.add('btn-secondary');
-      }, 2000);
-    }).catch(() => {});
+  // ============================================================================
+  // Share via OS share sheet (Web Share API, mainly phones)
+  // ============================================================================
+
+  function handleShare() {
+    // Disabled while the sheet is open: a second share() call during the first
+    // rejects with InvalidStateError on Android. resetForm re-enables it should
+    // a browser never settle the promise.
+    shareBtn.disabled = true;
+    NullpadUtils.shareUrl(navigator, pasteUrlInput.value)
+      .then((outcome) => {
+        if (outcome !== 'shared') return;
+        // Both OS sheets offer a Copy target and the page cannot tell which
+        // target was picked, so treat a completed share as a possible copy
+        // for the pagehide clipboard clear.
+        clipboardDirty = true;
+        shareFlash.flash('Shared!');
+      })
+      .catch((err) => {
+        // Not a dismissal (those resolve): no user gesture, the browser refused
+        // the payload, or the URL was already cleared. Copy is still available.
+        shareFlash.flash('Failed, use Copy');
+        console.warn('Share failed:', (err && err.name) || String(err));
+      })
+      .finally(() => {
+        shareBtn.disabled = false;
+      });
   }
 
   // ============================================================================
@@ -347,6 +409,19 @@
   // ============================================================================
 
   async function init() {
+    // Clear clipboard and sensitive data on page unload. Registered first so
+    // the cleanup does not depend on any DOM lookup or fetch below succeeding.
+    window.addEventListener('pagehide', () => {
+      if (clipboardDirty) {
+        navigator.clipboard.writeText('').catch(() => {});
+        clipboardDirty = false;
+      }
+      // Clear sensitive DOM values (paste URL contains key in fragment)
+      pinInput.value = '';
+      pasteUrlInput.value = '';
+      currentFile = null;
+    });
+
     // Fetch server config to keep the client-side size pre-flight in sync with
     // the server limit. On failure we fall back to the 50MiB default constant
     // (same value baked into the crypto module). This is deliberate: the pre-flight
@@ -368,19 +443,8 @@
     copyBtn.addEventListener('click', () => {
       copyToClipboard(pasteUrlInput.value);
     });
+    shareBtn.addEventListener('click', handleShare);
     createAnotherBtn.addEventListener('click', resetForm);
-
-    // Clear clipboard and sensitive data on page unload
-    window.addEventListener('pagehide', () => {
-      if (clipboardDirty) {
-        navigator.clipboard.writeText('').catch(() => {});
-        clipboardDirty = false;
-      }
-      // Clear sensitive DOM values (paste URL contains key in fragment)
-      pinInput.value = '';
-      pasteUrlInput.value = '';
-      currentFile = null;
-    });
   }
 
   if (document.readyState === 'loading') {
