@@ -974,6 +974,19 @@ input[type="checkbox"]:checked::after {
   }
 }
 
+/* iOS Safari zooms the page when a focused field is under 16px. Keyed on
+   touch input rather than viewport width so landscape phones are covered. */
+@media (pointer: coarse) {
+  input[type="text"],
+  input[type="password"],
+  input[type="number"],
+  input[type="email"],
+  textarea,
+  select {
+    font-size: 16px;
+  }
+}
+
 /* ==========================================================================
    Accessibility
    ========================================================================== */
