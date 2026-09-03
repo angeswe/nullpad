@@ -544,6 +544,11 @@ input[type="checkbox"]:checked::after {
   background-color: rgba(74, 222, 128, 0.2);
 }
 
+.copy-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* ==========================================================================
    File Upload & Drag-Drop
    ========================================================================== */
@@ -966,6 +971,19 @@ input[type="checkbox"]:checked::after {
 
   .copy-btn {
     width: 100%;
+  }
+}
+
+/* iOS Safari zooms the page when a focused field is under 16px. Keyed on
+   touch input rather than viewport width so landscape phones are covered. */
+@media (pointer: coarse) {
+  input[type="text"],
+  input[type="password"],
+  input[type="number"],
+  input[type="email"],
+  textarea,
+  select {
+    font-size: 16px;
   }
 }
 

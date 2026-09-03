@@ -21,7 +21,13 @@ function loadNullpadUtils() {
   return window.NullpadUtils;
 }
 
-const { shouldRenderMarkdown, contentTypeForFile, contentTypeForRenderMode } = loadNullpadUtils();
+const {
+  shouldRenderMarkdown,
+  contentTypeForFile,
+  contentTypeForRenderMode,
+  canOfferShare,
+  shareUrl
+} = loadNullpadUtils();
 
 test('shouldRenderMarkdown returns true for text/markdown', () => {
   assert.equal(shouldRenderMarkdown('text/markdown'), true);
@@ -93,4 +99,87 @@ test('a raw text paste round-trips to the raw view', () => {
 
 test('a markdown text paste round-trips to the rendered view', () => {
   assert.equal(shouldRenderMarkdown(contentTypeForRenderMode('markdown')), true);
+});
+
+// Web Share API helpers. `nav` is injected so the tests can stand in for the
+// browser's navigator without a DOM.
+
+const PASTE_URL = 'https://example.test/view.html?id=abc#key';
+const PLAIN_PASTE = { burnAfterReading: false, hasPin: false };
+
+test('canOfferShare returns false when the browser has no Web Share API', () => {
+  assert.equal(canOfferShare({}, PLAIN_PASTE), false);
+});
+
+test('canOfferShare returns true for a plain paste when navigator.share is a function', () => {
+  assert.equal(canOfferShare({ share() {} }, PLAIN_PASTE), true);
+});
+
+test('canOfferShare returns false for a burn-after-reading paste without a PIN', () => {
+  // A share-sheet link preview may load the page, and that first load burns it.
+  assert.equal(canOfferShare({ share() {} }, { burnAfterReading: true, hasPin: false }), false);
+});
+
+test('canOfferShare returns true for a burn-after-reading paste with a PIN', () => {
+  assert.equal(canOfferShare({ share() {} }, { burnAfterReading: true, hasPin: true }), true);
+});
+
+test('shareUrl passes only the URL to the share sheet', async () => {
+  let payload;
+  const nav = { share(data) { payload = data; return Promise.resolve(); } };
+  await shareUrl(nav, PASTE_URL);
+  // Spread copies the payload out of the vm realm so prototypes compare equal.
+  assert.deepEqual({ ...payload }, { url: PASTE_URL });
+});
+
+test('shareUrl calls share with navigator as this', async () => {
+  let receiver;
+  const nav = { share() { receiver = this; return Promise.resolve(); } };
+  await shareUrl(nav, PASTE_URL);
+  assert.equal(receiver, nav);
+});
+
+test('shareUrl resolves "shared" when the share sheet completes', async () => {
+  const nav = { share() { return Promise.resolve(); } };
+  assert.equal(await shareUrl(nav, PASTE_URL), 'shared');
+});
+
+test('shareUrl resolves "cancelled" when the user dismisses the share sheet', async () => {
+  const abort = new Error('Share canceled');
+  abort.name = 'AbortError';
+  const nav = { share() { return Promise.reject(abort); } };
+  assert.equal(await shareUrl(nav, PASTE_URL), 'cancelled');
+});
+
+test('shareUrl rejects with the original error for any other share failure', async () => {
+  const denied = new Error('Must be handling a user gesture');
+  denied.name = 'NotAllowedError';
+  const nav = { share() { return Promise.reject(denied); } };
+  await assert.rejects(shareUrl(nav, PASTE_URL), (err) => err === denied);
+});
+
+test('shareUrl rejects instead of throwing when share throws synchronously', async () => {
+  const thrown = new Error('Share already in progress');
+  thrown.name = 'InvalidStateError';
+  const nav = { share() { throw thrown; } };
+  // Call first, then assert on the promise: passing a thunk would let
+  // assert.rejects turn a synchronous throw into a rejection and hide the bug.
+  let pending;
+  assert.doesNotThrow(() => { pending = shareUrl(nav, PASTE_URL); });
+  await assert.rejects(pending, (err) => err === thrown);
+});
+
+test('shareUrl rethrows a non-Error rejection unchanged', async () => {
+  for (const reason of [undefined, 'nope']) {
+    const nav = { share() { return Promise.reject(reason); } };
+    await assert.rejects(shareUrl(nav, PASTE_URL), (err) => err === reason);
+  }
+});
+
+test('shareUrl rejects an empty URL without calling share', async () => {
+  let calls = 0;
+  const nav = { share() { calls += 1; return Promise.resolve(); } };
+  // Name check, not instanceof: the error is the vm realm's TypeError.
+  await assert.rejects(shareUrl(nav, ''), (err) => err.name === 'TypeError');
+  assert.equal(calls, 0);
 });
