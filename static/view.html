@@ -20,6 +20,13 @@
       <strong>Warning:</strong> This paste will be destroyed after viewing. Make sure to save any content you need.
     </div>
 
+    <div id="burn-reveal" class="panel hidden" role="region" aria-labelledby="burn-reveal-title">
+      <div class="panel-body text-center">
+        <p id="burn-reveal-title">This paste self-destructs after it is viewed once. Reveal it now?</p>
+        <button id="reveal-btn" type="button" class="btn btn-primary">Reveal paste</button>
+      </div>
+    </div>
+
     <div id="pin-prompt" class="panel hidden">
       <div class="panel-header">
         <h2>PIN Required</h2>
@@ -90,8 +97,8 @@
   <script src="/js/vendor/purify.min.js" integrity="sha384-80VlBZnyAwkkqtSfg5NhPyZff6nU4K/qniLBL8Jnm4KDv6jZhLiYtJbhglg/i9ww" crossorigin="anonymous"></script>
   <script src="/js/vendor/argon2.umd.min.js" integrity="sha384-tP0Wy54CKmng7i9EoTlPySD0hBx6Octj0VS6MfwlnUu111MPa+JLm0CCbep6XJ1W" crossorigin="anonymous"></script>
   <script src="/js/base64.js" integrity="sha384-dPTAiUm9yBw/r5Adl39R/YFMjDuMdHLZzDlXUciVyVhDdowN5rilt9FSG8+ca8Z5" crossorigin="anonymous"></script>
-  <script src="/js/utils.js" integrity="sha384-Z1fZ1dp6Fl2lZCo1mXBwR7lupKhfap7ky4Sawqnc4amrwQ6cu1LiD3gUFjpiGazR" crossorigin="anonymous"></script>
+  <script src="/js/utils.js" integrity="sha384-Sh9EbL8V1oLU9KcHgjfdyAvHSYQm/z50XXITJA6m03wVzrnpzF7cak4v7RC5sLjA" crossorigin="anonymous"></script>
   <script src="/js/crypto.js" integrity="sha384-/NNOcWedGxb4PPablVyHeM46uB8RojuO853+WXnSLNm0b7jhQJny4jVkpjJEy600" crossorigin="anonymous"></script>
-  <script src="/js/view.js" integrity="sha384-wcfnrIEzprLdkXipA20vB2gBGAOjp55K09NYzsHIvDSFvi/cYW0mqSMcO/VHnGbG" crossorigin="anonymous"></script>
+  <script src="/js/view.js" integrity="sha384-clb8zvuMESP1SHYl3ijfcJmkkFTgmqjTS2tpE5eOAq40LuBgZhnNoVob4atbYTHT" crossorigin="anonymous"></script>
 </body>
 </html>

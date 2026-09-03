@@ -21,6 +21,8 @@
   const copyContentBtn = document.getElementById('copy-content-btn');
   const toggleRawBtn = document.getElementById('toggle-raw-btn');
   const burnNotice = document.getElementById('burn-notice');
+  const burnReveal = document.getElementById('burn-reveal');
+  const revealBtn = document.getElementById('reveal-btn');
 
   // State
   let pasteId = null;
@@ -36,6 +38,7 @@
   let imageBlobUrl = null;
   let useAttemptEndpoint = false;
   let contentFetched = false;
+  let burnHint = false;
 
   // ============================================================================
   // URL Parsing
@@ -45,6 +48,20 @@
   let pinSalt = null;
 
   function parseUrl() {
+    // NullpadUtils may have failed to load (SRI mismatch); surface it like
+    // the NullpadCrypto failures below instead of an unhandled rejection out
+    // of init().
+    try {
+      burnHint = NullpadUtils.hasBurnHint(window.location.search);
+    } catch (e) {
+      // Logged so the real cause (an SRI-mismatch load failure, or a genuine
+      // bug inside hasBurnHint) survives in devtools instead of being
+      // discarded behind the generic message shown below.
+      console.error('Failed to read burn-after-reading hint:', e);
+      showError('Failed to load page resources. Please refresh and try again.');
+      return false;
+    }
+
     // Extract paste ID from query: /view.html?id=xxxxx
     const params = new URLSearchParams(window.location.search);
     pasteId = params.get('id');
@@ -99,11 +116,6 @@
     if (!/^[A-Za-z0-9_-]{12}$/.test(pasteId)) {
       showError('Invalid paste ID format.');
       return false;
-    }
-
-    // Clear key material from URL bar and browser history
-    if (fragment && window.history && window.history.replaceState) {
-      window.history.replaceState(null, '', window.location.pathname + window.location.search);
     }
 
     return true;
@@ -544,9 +556,46 @@
     // Parse URL
     if (!parseUrl()) return;
 
-    // Show burn warning if this is a burn-after-reading paste
-    // (we don't know yet, will check after fetch)
+    // See NullpadUtils.pasteViewUrl for why burn-without-PIN links carry the
+    // hint: gate the fetch behind an explicit click instead of page load.
+    if (burnHint) {
+      loading.classList.add('hidden');
+      loading.setAttribute('aria-busy', 'false');
+      burnReveal.classList.remove('hidden');
+      revealBtn.addEventListener('click', () => {
+        burnReveal.classList.add('hidden');
+        loading.classList.remove('hidden');
+        loading.setAttribute('aria-busy', 'true');
+        fetchAndShow();
+      }, { once: true });
+      return;
+    }
 
+    await fetchAndShow();
+  }
+
+  async function fetchAndShow() {
+    // Clear key material from URL bar and browser history. Deferred here
+    // (rather than in parseUrl()) so a burn-hinted paste keeps its fragment
+    // in the address bar until Reveal is actually clicked — otherwise a
+    // mobile tab discarded while idle on the reveal gate would reload from a
+    // fragment-less URL and show "Invalid paste URL" even though the paste
+    // is still intact server-side.
+    if (window.location.hash && window.history && window.history.replaceState) {
+      try {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      } catch (e) {
+        // Non-fatal: e.g. SecurityError from browser history-mutation rate
+        // limiting, or a hardened browser/extension blocking the History
+        // API. Leaving the fragment in the address bar is harmless to the
+        // fetch below, so log and continue rather than let the paste hang
+        // on the loading spinner with an unhandled rejection.
+        console.warn('Failed to strip key fragment from URL:', e);
+      }
+    }
+
+    // Burn status comes from the fetched metadata below; the burn=1 hint in
+    // the URL only decided whether that fetch was gated behind Reveal.
     try {
       // Fetch encrypted paste
       const data = await fetchPaste();
