@@ -192,6 +192,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 - **Public pastes**: Text/markdown paste only (no file upload), TTL up to 7 days
 - **Trusted users**: Any file type via drag & drop after registration, TTL up to 7 days
+- **Display mode**: Each text paste is created as either rendered Markdown or raw text (for `.env` files, logs, code). The choice is stored inside the encrypted metadata, so the server never sees it. Uploaded files open rendered only when they are Markdown files (`text/markdown`, or a `.md`/`.markdown` name when the browser reports no type). Recipients can always toggle between views.
 
 ## Deployment
 

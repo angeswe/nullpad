@@ -352,8 +352,10 @@
     if (decrypted.type === 'text') {
       decryptedText = decrypted.content;
 
-      if (canRenderMarkdown()) {
-        toggleRawBtn.classList.remove('hidden');
+      const markdownAvailable = canRenderMarkdown();
+      if (markdownAvailable) toggleRawBtn.classList.remove('hidden');
+
+      if (markdownAvailable && NullpadUtils.shouldRenderMarkdown(metadata.mimetype)) {
         renderMarkdownView(decrypted.content);
       } else {
         renderRawView(decrypted.content);
