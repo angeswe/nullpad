@@ -16,6 +16,7 @@
   const pinInput = document.getElementById('pin');
   const burnCheckbox = document.getElementById('burn-after-reading');
   const ttlSelect = document.getElementById('ttl');
+  const renderModeSelect = document.getElementById('render-mode');
   const fileUploadArea = document.getElementById('file-upload-area');
   const fileInput = document.getElementById('file-input');
   const fileInfo = document.getElementById('file-info');
@@ -73,6 +74,10 @@
     fileInfo.classList.remove('hidden');
     contentTextarea.value = '';
     contentTextarea.disabled = true;
+    // Uploaded files keep their own type; lock the select but show the resulting view
+    const fileType = NullpadUtils.contentTypeForFile(file.name, file.type);
+    renderModeSelect.value = NullpadUtils.shouldRenderMarkdown(fileType) ? 'markdown' : 'raw';
+    renderModeSelect.disabled = true;
   }
 
   function formatFileSize(bytes) {
@@ -152,11 +157,13 @@
       if (currentFile) {
         contentBytes = new Uint8Array(await currentFile.arrayBuffer());
         filename = NullpadUtils.sanitizeFilename(currentFile.name);
-        contentType = currentFile.type || 'application/octet-stream';
+        contentType = NullpadUtils.contentTypeForFile(currentFile.name, currentFile.type);
       } else {
         contentBytes = NullpadCrypto.textEncode(text);
-        filename = 'paste.md';
-        contentType = 'text/markdown';
+        // The "Display as" choice travels as the content type inside the encrypted metadata.
+        const renderMode = renderModeSelect.value;
+        filename = renderMode === 'raw' ? 'paste.txt' : 'paste.md';
+        contentType = NullpadUtils.contentTypeForRenderMode(renderMode);
       }
 
       // 4. Generate paste ID client-side (used as AAD for AES-GCM binding)
@@ -301,6 +308,7 @@
     currentFile = null;
     if (fileInfo) fileInfo.classList.add('hidden');
     contentTextarea.disabled = false;
+    renderModeSelect.disabled = false;
 
     successPanel.classList.add('hidden');
     form.classList.remove('hidden');
