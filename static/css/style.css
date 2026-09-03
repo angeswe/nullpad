@@ -1101,7 +1101,8 @@ input[type="checkbox"]:checked::after {
 
 .site-footer .build-version {
   display: block;
-  margin-top: 0.25rem;
+  width: fit-content;
+  margin: 0.25rem auto 0;
   color: #444;
   font-size: 0.65rem;
 }

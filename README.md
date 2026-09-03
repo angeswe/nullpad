@@ -264,6 +264,18 @@ TRUSTED_PROXY_COUNT=2
 
 The provided `docker-compose.yml` exposes the application on port 3015 (HTTP only). In production, place a TLS-terminating reverse proxy in front of it (nginx, Caddy, Traefik, etc.) and do not expose port 3015 publicly.
 
+### Build Version
+
+Every page footer shows the build version and links it to the matching commit on GitHub. Pass the commit SHA when building the image:
+
+```bash
+docker build --build-arg BUILD_VERSION=$(git rev-parse --short HEAD) -t nullpad .
+```
+
+`docker compose build --build-arg BUILD_VERSION=...` works the same way. Without the argument the footer shows `dev` and links to the repository. Any other value that is not a commit SHA fails the build.
+
+The footer shows whatever the running image was built with, so rebuild after pulling changes (`docker compose up -d --build`) or the old version stays on display.
+
 ### Local HTTPS for LAN Testing (Dev Only)
 
 Browsers disable `crypto.subtle` outside secure contexts, and cookies with the `Secure` flag are dropped over HTTP. This means testing nullpad from another device on your LAN (e.g. `http://192.168.x.y:3015`) will break client-side encryption and session persistence.

@@ -31,7 +31,6 @@ services:
     cap_drop:
       - ALL
     volumes:
-      - ./static:/app/static:ro
       - paste-data:/data/pastes
     tmpfs:
       - /tmp
