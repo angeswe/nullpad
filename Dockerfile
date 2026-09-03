@@ -40,23 +40,25 @@ WORKDIR /app
 # Copy binary from builder
 COPY --from=builder /build/target/release/nullpad /app/nullpad
 
-# Copy static files, protected pages, and SRI update script
+# Copy static files, protected pages, and build-time scripts
 COPY static /app/static
 COPY protected /app/protected
-COPY tools/update-sri.sh /app/tools/update-sri.sh
+COPY tools/update-sri.sh tools/stamp-build-version.sh /app/tools/
 
-# Build version (set via --build-arg or defaults to git short hash)
+# Build version: pass the git commit SHA via --build-arg so the footer links
+# to it on GitHub. "dev" (the default) links to the repository; anything else
+# fails the build.
 ARG BUILD_VERSION=dev
 
 # Regenerate SRI hashes and stamp build version, then remove openssl
 RUN apt-get update && \
     apt-get install -y --no-install-recommends openssl && \
     bash /app/tools/update-sri.sh && \
+    bash /app/tools/stamp-build-version.sh "${BUILD_VERSION}" && \
     rm -rf /app/tools && \
     apt-get purge -y openssl && \
     apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/* && \
-    find /app/static /app/protected -name '*.html' -exec sed -i "s/__BUILD_VERSION__/${BUILD_VERSION}/g" {} +
+    rm -rf /var/lib/apt/lists/*
 
 # Create paste storage directory
 RUN mkdir -p /data/pastes
