@@ -41,6 +41,7 @@ jobs:
         with:
           category: /language:${{ matrix.language }}
 
+
   dismiss-false-positives:
     name: Dismiss False Positives
     runs-on: ubuntu-latest
@@ -51,6 +52,10 @@ jobs:
       - name: Dismiss known false positives
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
+          # A transient 5xx mid-sweep would otherwise leave alerts half-processed.
+          # 403 is retry-exempt by default, so this cannot paper over the
+          # read-only-token case guarded below.
+          retries: 3
           script: |
             const { owner, repo } = context.repo;
 
@@ -72,23 +77,40 @@ jobs:
               }
             }
 
-            // expectedMax is the fail-closed bound: the number of alerts each entry is
-            // known to cover today. More than that means a NEW finding appeared that
-            // this justification was never reviewed against, so fail instead of
-            // dismissing it. Dropping to 0 means the entry can be deleted.
-            const knownFalsePositives = [
-              { ruleId: 'rust/path-injection', pathPattern: /^src\/storage\/blob\.rs$/, expectedMax: 10, comment: 'sanitize_blob_id rebuilds the ID from a constant charset, canonicalize_storage_root + strip_prefix verification' },
-              { ruleId: 'rust/hard-coded-cryptographic-value', pathPattern: /^tests\//, expectedMax: 20, comment: 'Test-only dummy keys with no security impact' }
-            ];
-
-            // Alerts are raised against the analysed ref. On a PR that is the head
-            // commit; on push/schedule/dispatch it is the branch the run is on.
-            // Without the non-PR cases, alerts introduced by a CodeQL engine
-            // upgrade on main are never evaluated and stay open indefinitely.
-            const ref = context.eventName === 'pull_request'
-              ? context.payload.pull_request.head.sha
-              : context.ref;
+            // Alerts are addressed by ref NAME, and context.ref already holds the
+            // right one for every event this job runs on: refs/heads/<branch> on
+            // push/schedule/dispatch, refs/pull/<n>/merge on pull_request. That is
+            // also the ref codeql-action uploads under, because the analyze job
+            // reaches the merge commit through a default actions/checkout.
+            //
+            // Never substitute a commit SHA. The API answers a SHA with HTTP 200 and
+            // an empty list, so the job examines nothing, dismisses nothing, and
+            // still reports success -- which is exactly how the previous version
+            // failed silently on every PR it ran on.
+            const ref = context.ref;
             core.info(`Evaluating alerts for ref ${ref} (event: ${context.eventName})`);
+
+            // Each entry names every alert a human has actually reviewed, by number.
+            // Identity, not a count: dismissing an alert removes it from the open
+            // set, so a count-based budget decays to zero matches and quietly becomes
+            // free headroom that auto-dismisses findings nobody has ever read. Alert
+            // numbers are never reused, so a new finding cannot inherit an older
+            // one's justification -- it lands in `unreviewed` and the job refuses to
+            // dismiss anything at all.
+            //
+            // To add an alert: read it, satisfy yourself it is a false positive, then
+            // add its number here in the same PR that argues why.
+            const knownFalsePositives = [
+              {
+                ruleId: 'rust/path-injection',
+                pathPattern: /^src\/storage\/blob\.rs$/,
+                comment: 'sanitize_blob_id rebuilds the ID from a constant charset, canonicalize_storage_root + strip_prefix verification',
+                reviewedAlerts: [
+                  9, 15, 16, 18, 19, 27, 28, 29, 30, 31, 32, 33, 34, 35,
+                  41, 42, 43, 44, 45, 46, 47, 48, 49, 50
+                ]
+              }
+            ];
 
             // Paginate: the default page size is 30, and silently dropping later
             // pages would leave known false positives open while the job goes green.
@@ -96,43 +118,95 @@ jobs:
               github.rest.codeScanning.listAlertsForRepo,
               { owner, repo, ref, per_page: 100 }
             );
+
+            // An empty list is ambiguous: the ref may be clean, or it may be a ref
+            // nothing was ever uploaded under. Analyses tell the two apart. `needs:
+            // analyze` has completed for this ref and codeql-action/analyze defaults
+            // to wait-for-processing: true, so results are queryable by now -- zero
+            // analyses means we are looking in the wrong place. Fail rather than
+            // warn: a green check that examined nothing is the failure this job
+            // keeps rediscovering.
+            if (alerts.length === 0) {
+              const { data: analyses } = await github.rest.codeScanning.listRecentAnalyses({
+                owner, repo, ref, per_page: 1
+              });
+              if (analyses.length === 0) {
+                core.setFailed(
+                  `No alerts and no CodeQL analyses exist for ref ${ref}, though the analyze ` +
+                  `job just ran. Nothing was examined. Check that the ref this job queries still ` +
+                  `matches the one codeql-action uploads under: adding a "ref:" input to the ` +
+                  `analyze checkout moves uploads to refs/pull/<n>/head.`
+                );
+                return;
+              }
+            }
+
             // Keep state === null: that is a pending alert on a PR ref, which still
             // needs dismissing. Do not "simplify" this to state === 'open'.
             const openAlerts = alerts.filter(a => a.state !== 'dismissed' && a.state !== 'fixed');
 
-            const matched = new Map(knownFalsePositives.map(fp => [fp, []]));
-            const unmatched = [];
+            const toDismiss = [], unreviewed = [], unmatched = [], malformed = [];
             for (const alert of openAlerts) {
               const location = alert.most_recent_instance?.location;
-              const ruleId = alert.rule?.id ?? 'unknown-rule';
-              if (!location) {
-                core.info(`Skipping alert #${alert.number} (${ruleId}): no location on most recent instance`);
+              const ruleId = alert.rule?.id;
+              if (!location || !ruleId) {
+                malformed.push(alert);
                 continue;
               }
               // find, not a nested loop: one alert must never be dismissed twice.
               const fp = knownFalsePositives.find(
                 entry => ruleId === entry.ruleId && entry.pathPattern.test(location.path)
               );
-              if (fp) matched.get(fp).push(alert);
-              else unmatched.push(alert);
+              if (!fp) unmatched.push(alert);
+              else if (fp.reviewedAlerts.includes(alert.number)) toDismiss.push({ alert, fp });
+              else unreviewed.push(alert);
             }
 
-            const overBudget = [...matched].filter(([fp, list]) => list.length > fp.expectedMax);
-            if (overBudget.length > 0) {
-              const detail = overBudget
-                .map(([fp, list]) => `${fp.ruleId} in ${fp.pathPattern}: ${list.length} alerts, expected at most ${fp.expectedMax} (#${list.map(a => a.number).join(', #')})`)
-                .join('; ');
+            const describe = (list) => list.length
+              ? list.map(a => `#${a.number} ${a.rule?.id ?? 'unknown rule'} at ${a.most_recent_instance?.location?.path ?? 'unknown path'}`).join(', ')
+              : 'none';
+
+            // Always written, including on the failure paths -- the budget table and
+            // the alert lists matter most on the run that refuses to do anything.
+            const summarise = async (outcome) => {
+              const rows = knownFalsePositives
+                .map(fp => `| \`${fp.ruleId}\` | \`${fp.pathPattern}\` | ${fp.reviewedAlerts.length} |`)
+                .join('\n');
+              await core.summary
+                .addHeading('CodeQL false-positive dismissal', 3)
+                .addRaw(`Ref \`${ref}\` (${context.eventName}) — ${outcome}\n\n`)
+                .addRaw(`${openAlerts.length} open alerts: ${toDismiss.length} reviewed, ${unreviewed.length} unreviewed, ${unmatched.length} unrelated, ${malformed.length} malformed.\n\n`)
+                .addRaw(`Unreviewed: ${describe(unreviewed)}\n\nUnrelated, left open: ${describe(unmatched)}\n\n`)
+                .addRaw(`| Rule | Path | Reviewed alerts |\n| --- | --- | --- |\n${rows}\n\n`)
+                .addRaw('On `pull_request` CodeQL analyses only the diff, so zero open alerts here is normal and says nothing about the rest of the repo. The push-to-main run is the repo-wide one.\n')
+                .write();
+            };
+
+            if (malformed.length > 0) {
+              core.warning(
+                `${malformed.length} alert(s) had no rule id or no location and were left open: ` +
+                `${malformed.map(a => `#${a.number}`).join(', ')}. The alert schema may have changed.`
+              );
+            }
+
+            // A matching alert nobody has read must never inherit the entry's
+            // justification, so one unreviewed alert stops the whole sweep.
+            if (unreviewed.length > 0) {
+              await summarise('refused to dismiss anything');
               core.setFailed(
-                `Refusing to auto-dismiss: more alerts match a known-false-positive entry than it was reviewed against. ` +
-                `Review each alert by hand, then either fix it or raise expectedMax. ${detail}`
+                `Refusing to auto-dismiss: ${unreviewed.length} alert(s) match a known-false-positive ` +
+                `entry but are not listed in its reviewedAlerts: ${describe(unreviewed)}. Review each ` +
+                `one, then either fix it or add its number to the entry.`
               );
               return;
             }
 
             let dismissed = 0;
-            for (const [fp, list] of matched) {
-              for (const alert of list) {
-                core.info(`Dismissing alert #${alert.number}: ${fp.ruleId} at ${alert.most_recent_instance.location.path}:${alert.most_recent_instance.location.start_line}`);
+            const failures = [];
+            for (const { alert, fp } of toDismiss) {
+              const at = `${alert.most_recent_instance.location.path}:${alert.most_recent_instance.location.start_line}`;
+              core.info(`Dismissing alert #${alert.number}: ${fp.ruleId} at ${at}`);
+              try {
                 await github.rest.codeScanning.updateAlert({
                   owner,
                   repo,
@@ -142,17 +216,14 @@ jobs:
                   dismissed_comment: `Auto-dismissed: ${fp.comment}`
                 });
                 dismissed++;
+              } catch (e) {
+                // Keep going: one 5xx must not cost the rest of the sweep, nor the
+                // summary. Every failure is named in the setFailed below.
+                failures.push(`#${alert.number} (${e.status ?? '?'}: ${e.message})`);
               }
             }
 
-            // Surface counts on the run summary, not just in logs nobody opens on a
-            // green run. A steady 0/0 is the signal that a rule id or path pattern
-            // has drifted and no longer matches anything.
-            const budgets = knownFalsePositives
-              .map(fp => `| \`${fp.ruleId}\` | \`${fp.pathPattern}\` | ${matched.get(fp).length} | ${fp.expectedMax} |`)
-              .join('\n');
-            await core.summary
-              .addHeading('CodeQL false-positive dismissal', 3)
-              .addRaw(`Ref \`${ref}\` — ${openAlerts.length} open alerts, ${dismissed} dismissed, ${unmatched.length} left open.\n\n`)
-              .addRaw(`| Rule | Path | Matched | Budget |\n| --- | --- | --- | --- |\n${budgets}\n`)
-              .write();
+            await summarise(`${dismissed} dismissed${failures.length ? `, ${failures.length} failed` : ''}`);
+            if (failures.length > 0) {
+              core.setFailed(`Failed to dismiss ${failures.length} alert(s): ${failures.join(', ')}`);
+            }
