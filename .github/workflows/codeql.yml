@@ -45,7 +45,6 @@ jobs:
     name: Dismiss False Positives
     runs-on: ubuntu-latest
     needs: analyze
-    if: github.event_name == 'pull_request'
     permissions:
       security-events: write
     steps:
@@ -53,34 +52,107 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const knownFalsePositives = [
-              { ruleId: 'rust/path-injection', pathPattern: /^src\/storage\/blob\.rs$/, comment: 'sanitize_blob_id validates [A-Za-z0-9_-] only, canonicalize_storage_root + strip_prefix verification' },
-              { ruleId: 'rust/hard-coded-cryptographic-value', pathPattern: /^tests\//, comment: 'Test-only dummy keys with no security impact' }
-            ];
+            const { owner, repo } = context.repo;
 
-            // Fetch all non-dismissed alerts (includes state: null for pending PR alerts)
-            const { data: alerts } = await github.rest.codeScanning.listAlertsForRepo({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: context.payload.pull_request.head.sha
-            });
-            const openAlerts = alerts.filter(a => a.state !== 'dismissed' && a.state !== 'fixed');
-
-            for (const alert of openAlerts) {
-              const location = alert.most_recent_instance?.location;
-              if (!location) continue;
-
-              for (const fp of knownFalsePositives) {
-                if (alert.rule.id === fp.ruleId && fp.pathPattern.test(location.path)) {
-                  console.log(`Dismissing alert #${alert.number}: ${alert.rule.id} at ${location.path}:${location.start_line}`);
-                  await github.rest.codeScanning.updateAlert({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    alert_number: alert.number,
-                    state: 'dismissed',
-                    dismissed_reason: 'false positive',
-                    dismissed_comment: `Auto-dismissed: ${fp.comment}`
-                  });
-                }
+            // Fork PRs and Dependabot PRs get a read-only GITHUB_TOKEN regardless of
+            // the permissions block, so updateAlert would 403. Guard at step level
+            // rather than job level so the run still reports and explains itself
+            // instead of showing up as an unexplained grey "skipped" check.
+            // Scoped to pull_request: on push/schedule the token is unrestricted
+            // even when github.actor resolves to dependabot[bot] (auto-merge).
+            if (context.eventName === 'pull_request') {
+              const head = context.payload.pull_request.head;
+              if (context.actor === 'dependabot[bot]' || head.repo?.full_name !== `${owner}/${repo}`) {
+                core.notice(
+                  'Auto-dismissal skipped: Dependabot and fork PRs get a read-only GITHUB_TOKEN. ' +
+                  'Known false positives will show as open alerts on this PR; the push-to-main ' +
+                  'run dismisses them after merge.'
+                );
+                return;
               }
             }
+
+            // expectedMax is the fail-closed bound: the number of alerts each entry is
+            // known to cover today. More than that means a NEW finding appeared that
+            // this justification was never reviewed against, so fail instead of
+            // dismissing it. Dropping to 0 means the entry can be deleted.
+            const knownFalsePositives = [
+              { ruleId: 'rust/path-injection', pathPattern: /^src\/storage\/blob\.rs$/, expectedMax: 10, comment: 'sanitize_blob_id rebuilds the ID from a constant charset, canonicalize_storage_root + strip_prefix verification' },
+              { ruleId: 'rust/hard-coded-cryptographic-value', pathPattern: /^tests\//, expectedMax: 20, comment: 'Test-only dummy keys with no security impact' }
+            ];
+
+            // Alerts are raised against the analysed ref. On a PR that is the head
+            // commit; on push/schedule/dispatch it is the branch the run is on.
+            // Without the non-PR cases, alerts introduced by a CodeQL engine
+            // upgrade on main are never evaluated and stay open indefinitely.
+            const ref = context.eventName === 'pull_request'
+              ? context.payload.pull_request.head.sha
+              : context.ref;
+            core.info(`Evaluating alerts for ref ${ref} (event: ${context.eventName})`);
+
+            // Paginate: the default page size is 30, and silently dropping later
+            // pages would leave known false positives open while the job goes green.
+            const alerts = await github.paginate(
+              github.rest.codeScanning.listAlertsForRepo,
+              { owner, repo, ref, per_page: 100 }
+            );
+            // Keep state === null: that is a pending alert on a PR ref, which still
+            // needs dismissing. Do not "simplify" this to state === 'open'.
+            const openAlerts = alerts.filter(a => a.state !== 'dismissed' && a.state !== 'fixed');
+
+            const matched = new Map(knownFalsePositives.map(fp => [fp, []]));
+            const unmatched = [];
+            for (const alert of openAlerts) {
+              const location = alert.most_recent_instance?.location;
+              const ruleId = alert.rule?.id ?? 'unknown-rule';
+              if (!location) {
+                core.info(`Skipping alert #${alert.number} (${ruleId}): no location on most recent instance`);
+                continue;
+              }
+              // find, not a nested loop: one alert must never be dismissed twice.
+              const fp = knownFalsePositives.find(
+                entry => ruleId === entry.ruleId && entry.pathPattern.test(location.path)
+              );
+              if (fp) matched.get(fp).push(alert);
+              else unmatched.push(alert);
+            }
+
+            const overBudget = [...matched].filter(([fp, list]) => list.length > fp.expectedMax);
+            if (overBudget.length > 0) {
+              const detail = overBudget
+                .map(([fp, list]) => `${fp.ruleId} in ${fp.pathPattern}: ${list.length} alerts, expected at most ${fp.expectedMax} (#${list.map(a => a.number).join(', #')})`)
+                .join('; ');
+              core.setFailed(
+                `Refusing to auto-dismiss: more alerts match a known-false-positive entry than it was reviewed against. ` +
+                `Review each alert by hand, then either fix it or raise expectedMax. ${detail}`
+              );
+              return;
+            }
+
+            let dismissed = 0;
+            for (const [fp, list] of matched) {
+              for (const alert of list) {
+                core.info(`Dismissing alert #${alert.number}: ${fp.ruleId} at ${alert.most_recent_instance.location.path}:${alert.most_recent_instance.location.start_line}`);
+                await github.rest.codeScanning.updateAlert({
+                  owner,
+                  repo,
+                  alert_number: alert.number,
+                  state: 'dismissed',
+                  dismissed_reason: 'false positive',
+                  dismissed_comment: `Auto-dismissed: ${fp.comment}`
+                });
+                dismissed++;
+              }
+            }
+
+            // Surface counts on the run summary, not just in logs nobody opens on a
+            // green run. A steady 0/0 is the signal that a rule id or path pattern
+            // has drifted and no longer matches anything.
+            const budgets = knownFalsePositives
+              .map(fp => `| \`${fp.ruleId}\` | \`${fp.pathPattern}\` | ${matched.get(fp).length} | ${fp.expectedMax} |`)
+              .join('\n');
+            await core.summary
+              .addHeading('CodeQL false-positive dismissal', 3)
+              .addRaw(`Ref \`${ref}\` — ${openAlerts.length} open alerts, ${dismissed} dismissed, ${unmatched.length} left open.\n\n`)
+              .addRaw(`| Rule | Path | Matched | Budget |\n| --- | --- | --- | --- |\n${budgets}\n`)
+              .write();
