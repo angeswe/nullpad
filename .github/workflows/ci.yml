@@ -71,6 +71,22 @@ jobs:
       checks: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false # nothing here uses git auth after checkout
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master HEAD 2026-06; action has no release tags — dependabot bumps this pin
+        with:
+          toolchain: stable
+      # audit-check runs `cargo install cargo-audit` unpinned and unlocked, so a
+      # broken release anywhere in cargo-audit's dep tree reds this job on every
+      # open PR (tinyvec 1.13.0, 2026-09-03). Install it here instead: --locked
+      # builds from cargo-audit's shipped Cargo.lock, and --version pins the tool
+      # itself, matching how actions and images are pinned elsewhere in this file.
+      # The action's findOrInstall() then finds the binary on PATH and skips its
+      # own install. Dependabot does not read `run:` bodies — bump this by hand.
+      - run: cargo install cargo-audit --locked --version 0.22.2
+      # Proves the pinned binary is the one the action will find. Without this,
+      # a PATH or CARGO_HOME change silently reverts to the unpinned install.
+      - run: command -v cargo-audit && cargo audit --version
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
