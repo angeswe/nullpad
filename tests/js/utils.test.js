@@ -17,7 +17,10 @@ const vm = require('node:vm');
 function loadNullpadUtils() {
   const src = fs.readFileSync(path.join(__dirname, '..', '..', 'static', 'js', 'utils.js'), 'utf8');
   const window = {};
-  vm.runInNewContext(src, { window });
+  // URLSearchParams is a WHATWG global, not part of the ECMAScript globals a
+  // fresh vm context gets by default, but hasBurnHint (like view.js's own
+  // parseUrl) relies on it — pass Node's implementation through.
+  vm.runInNewContext(src, { window, URLSearchParams });
   return window.NullpadUtils;
 }
 
@@ -26,7 +29,9 @@ const {
   contentTypeForFile,
   contentTypeForRenderMode,
   canOfferShare,
-  shareUrl
+  shareUrl,
+  pasteViewUrl,
+  hasBurnHint
 } = loadNullpadUtils();
 
 test('shouldRenderMarkdown returns true for text/markdown', () => {
@@ -105,23 +110,58 @@ test('a markdown text paste round-trips to the rendered view', () => {
 // browser's navigator without a DOM.
 
 const PASTE_URL = 'https://example.test/view.html?id=abc#key';
-const PLAIN_PASTE = { burnAfterReading: false, hasPin: false };
 
 test('canOfferShare returns false when the browser has no Web Share API', () => {
-  assert.equal(canOfferShare({}, PLAIN_PASTE), false);
+  assert.equal(canOfferShare({}), false);
 });
 
-test('canOfferShare returns true for a plain paste when navigator.share is a function', () => {
-  assert.equal(canOfferShare({ share() {} }, PLAIN_PASTE), true);
+test('canOfferShare returns true when navigator.share is a function', () => {
+  assert.equal(canOfferShare({ share() {} }), true);
 });
 
-test('canOfferShare returns false for a burn-after-reading paste without a PIN', () => {
-  // A share-sheet link preview may load the page, and that first load burns it.
-  assert.equal(canOfferShare({ share() {} }, { burnAfterReading: true, hasPin: false }), false);
+test('pasteViewUrl builds origin/view.html?id=<id>#<fragment> for a plain paste', () => {
+  assert.equal(
+    pasteViewUrl('https://example.test', 'abc123', 'key.salt', { burnAfterReading: false, hasPin: false }),
+    'https://example.test/view.html?id=abc123#key.salt'
+  );
 });
 
-test('canOfferShare returns true for a burn-after-reading paste with a PIN', () => {
-  assert.equal(canOfferShare({ share() {} }, { burnAfterReading: true, hasPin: true }), true);
+test('pasteViewUrl appends &burn=1 before the fragment for a burn-after-reading paste without a PIN', () => {
+  assert.equal(
+    pasteViewUrl('https://example.test', 'abc123', 'key.salt', { burnAfterReading: true, hasPin: false }),
+    'https://example.test/view.html?id=abc123&burn=1#key.salt'
+  );
+});
+
+test('pasteViewUrl omits the burn hint for a burn-after-reading paste with a PIN', () => {
+  assert.equal(
+    pasteViewUrl('https://example.test', 'abc123', 'key.salt', { burnAfterReading: true, hasPin: true }),
+    'https://example.test/view.html?id=abc123#key.salt'
+  );
+});
+
+test('pasteViewUrl omits the burn hint for a PIN paste that does not burn', () => {
+  assert.equal(
+    pasteViewUrl('https://example.test', 'abc123', 'key.salt', { burnAfterReading: false, hasPin: true }),
+    'https://example.test/view.html?id=abc123#key.salt'
+  );
+});
+
+test('hasBurnHint returns true for ?id=abc&burn=1', () => {
+  assert.equal(hasBurnHint('?id=abc&burn=1'), true);
+});
+
+test('hasBurnHint returns false when burn is absent', () => {
+  assert.equal(hasBurnHint('?id=abc'), false);
+});
+
+test('hasBurnHint returns false for burn=0 or burn=true (only the literal 1 counts)', () => {
+  assert.equal(hasBurnHint('?id=abc&burn=0'), false);
+  assert.equal(hasBurnHint('?id=abc&burn=true'), false);
+});
+
+test('hasBurnHint accepts a search string without the leading question mark', () => {
+  assert.equal(hasBurnHint('id=abc&burn=1'), true);
 });
 
 test('shareUrl passes only the URL to the share sheet', async () => {

@@ -61,17 +61,41 @@
   /**
    * Whether to offer the Share button for a freshly created paste.
    * Needs the Web Share API (absent in desktop Firefox and over plain http).
-   * Also withheld for a burn-after-reading paste without a PIN: share sheets
-   * (iOS at least) may load the link to build a preview, and the first load
-   * of such a paste is the one that burns it. A PIN-protected burn paste
-   * survives that load because the first request only asks for the PIN.
+   * See pasteViewUrl for why paste metadata no longer needs to factor in here.
    * @param {Navigator} nav - the page's navigator, injected for testability
-   * @param {{burnAfterReading: boolean, hasPin: boolean}} paste
    * @returns {boolean}
    */
-  function canOfferShare(nav, { burnAfterReading, hasPin }) {
-    if (typeof nav.share !== 'function') return false;
-    return !burnAfterReading || hasPin;
+  function canOfferShare(nav) {
+    return typeof nav.share === 'function';
+  }
+
+  /**
+   * Build the URL for a freshly created paste. Appends a non-secret `burn=1`
+   * query hint when the paste is burn-after-reading and has no PIN, so
+   * view.js can gate its fetch behind a click (see hasBurnHint) instead of
+   * firing on page load, where a link-preview fetch would burn the paste
+   * before the recipient opens it. PIN-protected burn pastes don't need the
+   * hint: the first GET only returns `needs_pin`, so a preview load can't
+   * burn them. The key material stays in the fragment, untouched.
+   * @param {string} origin - window.location.origin
+   * @param {string} id - paste ID returned by the server
+   * @param {string} fragment - key material for the URL fragment (key, or key.salt)
+   * @param {{burnAfterReading: boolean, hasPin: boolean}} paste
+   * @returns {string}
+   */
+  function pasteViewUrl(origin, id, fragment, { burnAfterReading, hasPin }) {
+    const burnHint = burnAfterReading && !hasPin ? '&burn=1' : '';
+    return `${origin}/view.html?id=${id}${burnHint}#${fragment}`;
+  }
+
+  /**
+   * Whether a view.html URL carries the burn reveal hint set by pasteViewUrl.
+   * Only the literal value `1` counts, matching what pasteViewUrl emits.
+   * @param {string} search - window.location.search, with or without the leading "?"
+   * @returns {boolean}
+   */
+  function hasBurnHint(search) {
+    return new URLSearchParams(search).get('burn') === '1';
   }
 
   /**
@@ -106,7 +130,9 @@
     contentTypeForFile,
     contentTypeForRenderMode,
     canOfferShare,
-    shareUrl
+    shareUrl,
+    pasteViewUrl,
+    hasBurnHint
   });
 
   Object.defineProperty(window, 'NullpadUtils', {

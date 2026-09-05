@@ -261,7 +261,10 @@
       const fragment = salt
         ? `${rawKey}.${NullpadCrypto.base64urlEncode(salt)}`
         : rawKey;
-      const pasteUrl = `${window.location.origin}/view.html?id=${result.id}#${fragment}`;
+      const pasteUrl = NullpadUtils.pasteViewUrl(window.location.origin, result.id, fragment, {
+        burnAfterReading: burnCheckbox.checked,
+        hasPin: !!pin
+      });
 
       // Zero salt after use
       if (salt instanceof Uint8Array) {
@@ -294,11 +297,9 @@
     form.classList.add('hidden');
     successPanel.classList.remove('hidden');
     pasteUrlInput.value = url;
-    // Hidden in markup; offered per paste, see NullpadUtils.canOfferShare.
-    shareBtn.classList.toggle(
-      'hidden',
-      !NullpadUtils.canOfferShare(navigator, { burnAfterReading: isBurn, hasPin: hasPIN })
-    );
+    // Hidden in markup; shown when the browser has the Web Share API. See
+    // NullpadUtils.pasteViewUrl for why burn-without-PIN links carry the hint.
+    shareBtn.classList.toggle('hidden', !NullpadUtils.canOfferShare(navigator));
 
     if (isBurn) {
       burnNotice.classList.remove('hidden');
