@@ -9,7 +9,7 @@
 //!
 //! Uses directory sharding (first 2 chars of ID) to avoid too many files in one directory.
 
-use crate::util::is_valid_nanoid;
+use crate::util::NANOID_CHARSET;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,22 +24,47 @@ pub enum BlobError {
     InvalidId(String),
 }
 
-/// Sanitize paste ID by validating it contains only safe characters.
+/// Rejection reason for an ID that cannot be used as a path component.
 ///
-/// Returns a validated ID string that is safe to use in paths.
-/// This is the security barrier that prevents path traversal attacks.
+/// Deliberately does not echo the offending byte. The error is logged by the
+/// caller, and untrusted bytes do not belong in log output. (An earlier version
+/// of this comment claimed echoing would re-taint the value for CodeQL; the
+/// error never reaches a path sink, so that was not the reason.)
+const INVALID_BLOB_ID: &str = "ID must be at least 2 characters and contain only [A-Za-z0-9_-]";
+
+/// Sanitize a paste ID into a value that is safe to use in paths.
 ///
-/// Allowed characters: `[A-Za-z0-9_-]` (nanoid charset)
-/// Minimum length: 2 characters (for sharding)
-fn sanitize_blob_id(id: &str) -> Result<&str, BlobError> {
-    // min_len=2: sharding requires at least 2 characters
-    // charset [A-Za-z0-9_-] prevents path traversal ('.' '/' '\' are all rejected)
-    if !is_valid_nanoid(id, 2) {
-        return Err(BlobError::InvalidId(
-            "ID must be at least 2 characters and contain only [A-Za-z0-9_-]".to_string(),
-        ));
+/// The security property is the charset restriction: an ID drawn from
+/// [`NANOID_CHARSET`] contains no `.`, `/` or `\`, so it cannot traverse. That
+/// property is the same one [`crate::util::is_valid_nanoid`] enforces elsewhere.
+///
+/// What differs here is the *shape*: rather than validating and handing back the
+/// caller's `&str`, each byte is looked up in the charset and the **table's** byte
+/// is pushed into a fresh `String`. At runtime the result is byte-identical to the
+/// input, but no data flows from the argument into the return value — which is what
+/// keeps CodeQL's `rust/path-injection` taint tracker off the `fs::rename`,
+/// `fs::File::open` and `fs::remove_file` calls downstream.
+///
+/// Do not "simplify" this to `safe.push(byte as char)` or to returning `id`:
+/// both re-taint the value and reopen the alerts. **No test in this crate will
+/// catch that** — the runtime values are identical, which is what
+/// `test_sanitize_returns_exact_copy_of_valid_id` pins. The guard is the CodeQL
+/// check, which the repository ruleset requires to pass before merge.
+///
+/// Minimum length is 2, because sharding takes the first 2 characters.
+fn sanitize_blob_id(id: &str) -> Result<String, BlobError> {
+    if id.len() < 2 {
+        return Err(BlobError::InvalidId(INVALID_BLOB_ID.to_string()));
     }
-    Ok(id)
+
+    let mut safe = String::with_capacity(id.len());
+    for byte in id.bytes() {
+        let Some(index) = NANOID_CHARSET.iter().position(|&allowed| allowed == byte) else {
+            return Err(BlobError::InvalidId(INVALID_BLOB_ID.to_string()));
+        };
+        safe.push(NANOID_CHARSET[index] as char);
+    }
+    Ok(safe)
 }
 
 /// Initialize the storage directory.
@@ -558,6 +583,40 @@ mod tests {
         // Should delete without error (skips overwrite for empty files)
         let deleted = delete_blob(storage_path, id).await.unwrap();
         assert!(deleted);
+    }
+
+    #[test]
+    fn test_sanitize_returns_exact_copy_of_valid_id() {
+        // The rebuilt String must be byte-identical to the input for every valid
+        // ID — reconstruction is a taint barrier, not a transformation.
+        for id in [
+            "abcdefghijkl",
+            "ABCDEFGHIJKL",
+            "0123456789ab",
+            "aB3_xY9-zZ0a",
+            "__",
+            "--",
+        ] {
+            let sanitized = sanitize_blob_id(id).unwrap();
+            assert_eq!(sanitized, id, "sanitize_blob_id altered valid ID '{}'", id);
+        }
+    }
+
+    #[test]
+    fn test_sanitize_agrees_with_shared_nanoid_validator() {
+        // blob.rs indexes NANOID_CHARSET while routes/cleanup call is_valid_nanoid.
+        // Pin both directions over the whole ASCII range: a byte either passes both
+        // or neither. Divergence would let routes accept IDs storage rejects, and
+        // make cleanup skip blobs it can no longer name.
+        for byte in 0u8..=127 {
+            let id = format!("aa{}", byte as char);
+            assert_eq!(
+                crate::util::is_valid_nanoid(&id, 2),
+                sanitize_blob_id(&id).is_ok(),
+                "charset disagreement on byte {:#04x}",
+                byte
+            );
+        }
     }
 
     #[tokio::test]
