@@ -2,11 +2,15 @@
 
 /// The nanoid charset: the only bytes an ID may contain.
 ///
-/// Single source of truth for the ID alphabet. `blob.rs` indexes this table to
-/// build filesystem paths, `routes` validates request IDs against it, and the
-/// cleanup job uses it to tell paste blobs from stray files. If these drifted
-/// apart, routes would accept IDs blob storage rejects and cleanup would
-/// misclassify live blobs as orphans.
+/// Single source of truth server-side: `blob.rs` indexes this table to build
+/// filesystem paths, `routes` validates request IDs against it, and the cleanup
+/// job uses it to tell paste blobs from stray files. Drift between them would
+/// let routes accept IDs blob storage rejects, and make cleanup skip live blobs
+/// it can no longer name.
+///
+/// The browser keeps its own copies — `NANOID_ALPHABET` in `static/js/crypto.js`
+/// generates the IDs, and `view.js`/`admin.js` validate them by regex. Changing
+/// this table means changing those too.
 ///
 /// No byte here is a path separator, so an ID drawn from it cannot traverse.
 pub const NANOID_CHARSET: &[u8; 64] =
@@ -41,10 +45,11 @@ mod tests {
     #[test]
     fn test_charset_is_exactly_alphanumeric_underscore_hyphen() {
         // Both directions matter. Subset is the security property: no separator
-        // may sneak in. Superset is the availability one: dropping a byte (a typo
+        // may sneak in. Superset is an availability one: dropping a byte (a typo
         // duplicating one and losing another still compiles and keeps the length
-        // at 64) would make every existing paste whose ID contains it unreadable,
-        // and cleanup would then delete those blobs as orphans.
+        // at 64) makes every existing paste whose ID contains it return 400, and
+        // cleanup then skips those files forever — it declines to name them, so
+        // their blobs outlive the Valkey metadata and leak disk permanently.
         let mut expected: Vec<u8> = (b'A'..=b'Z')
             .chain(b'a'..=b'z')
             .chain(b'0'..=b'9')

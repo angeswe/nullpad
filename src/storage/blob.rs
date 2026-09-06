@@ -26,8 +26,10 @@ pub enum BlobError {
 
 /// Rejection reason for an ID that cannot be used as a path component.
 ///
-/// Deliberately does not echo the offending byte: untrusted input in an error
-/// string would re-taint it for CodeQL and defeat the reconstruction below.
+/// Deliberately does not echo the offending byte. The error is logged by the
+/// caller, and untrusted bytes do not belong in log output. (An earlier version
+/// of this comment claimed echoing would re-taint the value for CodeQL; the
+/// error never reaches a path sink, so that was not the reason.)
 const INVALID_BLOB_ID: &str = "ID must be at least 2 characters and contain only [A-Za-z0-9_-]";
 
 /// Sanitize a paste ID into a value that is safe to use in paths.
@@ -44,8 +46,10 @@ const INVALID_BLOB_ID: &str = "ID must be at least 2 characters and contain only
 /// `fs::File::open` and `fs::remove_file` calls downstream.
 ///
 /// Do not "simplify" this to `safe.push(byte as char)` or to returning `id`:
-/// both re-taint the value and reopen the alerts. `test_sanitize_returns_exact_copy_of_valid_id`
-/// pins the identity property so the indirection stays invisible at runtime.
+/// both re-taint the value and reopen the alerts. **No test in this crate will
+/// catch that** — the runtime values are identical, which is what
+/// `test_sanitize_returns_exact_copy_of_valid_id` pins. The guard is the CodeQL
+/// check, which the repository ruleset requires to pass before merge.
 ///
 /// Minimum length is 2, because sharding takes the first 2 characters.
 fn sanitize_blob_id(id: &str) -> Result<String, BlobError> {
@@ -603,7 +607,7 @@ mod tests {
         // blob.rs indexes NANOID_CHARSET while routes/cleanup call is_valid_nanoid.
         // Pin both directions over the whole ASCII range: a byte either passes both
         // or neither. Divergence would let routes accept IDs storage rejects, and
-        // make cleanup treat live blobs as orphans.
+        // make cleanup skip blobs it can no longer name.
         for byte in 0u8..=127 {
             let id = format!("aa{}", byte as char);
             assert_eq!(
