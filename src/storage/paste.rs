@@ -135,6 +135,44 @@ where
 /// already deleted), but between rewrites the original SET + DEL are both
 /// present. Consider periodic AOF rewrite (BGREWRITEAOF) or disabling AOF
 /// if metadata retention is a concern.
+/// Turn a blob read failure into the right outcome for `get_paste_atomic`.
+///
+/// `BlobError::InvalidId` means the sanitizer rejected the ID — it cannot be a
+/// real paste, so this is logged at warn and treated the same as "not found"
+/// (`Ok(None)`, which the route maps to 404).
+///
+/// Every other variant (`Io`, `TooLarge`, and any future non-ID variant) is an
+/// infrastructure or data-integrity failure: the paste may well exist, but its
+/// content could not be read. These are logged at error and propagated as an
+/// error, which the route maps to 500 — never silently reported as "missing".
+///
+/// Deliberately matches every variant instead of using a wildcard `_` arm, so
+/// a new `BlobError` variant fails to compile here until someone decides
+/// which bucket it belongs in.
+fn classify_blob_read_error(
+    id: &str,
+    err: blob::BlobError,
+) -> Result<Option<StoredPaste>, redis::RedisError> {
+    match err {
+        blob::BlobError::InvalidId(_) => {
+            tracing::warn!(
+                paste_id = %id,
+                error = %err,
+                "Blob ID rejected by sanitizer; treating paste as not found"
+            );
+            Ok(None)
+        }
+        blob::BlobError::Io(_) | blob::BlobError::TooLarge(_) => {
+            tracing::error!(paste_id = %id, error = %err, "Failed to read blob");
+            Err(redis::RedisError::from((
+                redis::ErrorKind::UnexpectedReturnType,
+                "Blob read failed",
+                err.to_string(),
+            )))
+        }
+    }
+}
+
 pub async fn get_paste_atomic<C>(
     con: &mut C,
     storage_path: &Path,
@@ -158,7 +196,7 @@ where
             }
             return Ok(None);
         }
-        Err(_) => return Ok(None),
+        Err(e) => return classify_blob_read_error(id, e),
     };
 
     // Step 2: Lua script — GET metadata, DEL if burn + SREM from user_pastes
@@ -410,4 +448,54 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An I/O failure (disk full, unmounted volume, EACCES, corruption, etc.)
+    /// must not present as "paste does not exist" — it must propagate as an
+    /// error so the route returns 500, not 404.
+    #[test]
+    fn test_classify_blob_read_error_io_propagates_as_err() {
+        let io_err = std::io::Error::other("simulated unreadable blob");
+        let result = classify_blob_read_error("some-paste-id", blob::BlobError::Io(io_err));
+        assert!(
+            result.is_err(),
+            "expected an I/O blob read failure to propagate as Err, got {:?}",
+            result
+        );
+    }
+
+    /// A blob exceeding the configured size limit is an infrastructure/data
+    /// condition, not evidence the ID is bogus — it must also propagate as an
+    /// error (500), not be swallowed into Ok(None) (404).
+    #[test]
+    fn test_classify_blob_read_error_too_large_propagates_as_err() {
+        let result = classify_blob_read_error(
+            "some-paste-id",
+            blob::BlobError::TooLarge("blob too large".to_string()),
+        );
+        assert!(
+            result.is_err(),
+            "expected an oversized blob to propagate as Err, got {:?}",
+            result
+        );
+    }
+
+    /// A sanitizer rejection means the ID could never map to a real paste —
+    /// this is the one case that should still present as "not found" (404).
+    #[test]
+    fn test_classify_blob_read_error_invalid_id_yields_ok_none() {
+        let result = classify_blob_read_error(
+            "bad id",
+            blob::BlobError::InvalidId("invalid characters".to_string()),
+        );
+        assert!(
+            matches!(result, Ok(None)),
+            "expected an InvalidId blob read failure to yield Ok(None), got {:?}",
+            result
+        );
+    }
 }

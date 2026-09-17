@@ -131,6 +131,7 @@ async fn main() {
         test_protected_html_not_served_by_static_fallback,
         test_verify_sets_np_session_cookie,
         test_stored_blob_preserves_bucket_size,
+        test_unreadable_blob_returns_500_not_404,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -2618,6 +2619,52 @@ async fn test_stored_blob_preserves_bucket_size() {
             bucket, paste_id, upload_len, on_disk_len
         );
     }
+}
+
+/// An unreadable blob (disk failure, permissions, corruption, etc.) must not
+/// present to the client as a missing paste. Simulates an unreadable blob by
+/// replacing the blob file with a directory at the same path, which makes
+/// `File::open` fail with a real I/O error (EISDIR) rather than NotFound.
+/// The paste's metadata is still present in Valkey, so a correct fix returns
+/// 500 (server error), not 404 (not found).
+async fn test_unreadable_blob_returns_500_not_404() {
+    let (base_url, _con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::new();
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"encrypted data",
+        false,
+        3600,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // Blobs are stored at {storage_path}/{id[0..2]}/{id}. Replace the file
+    // with a directory so File::open fails with a real I/O error instead of
+    // NotFound, simulating disk corruption / an unreadable blob.
+    let blob_path = storage_path.join(&id[..2]).join(&id);
+    assert!(blob_path.exists(), "blob not found at {:?}", blob_path);
+    std::fs::remove_file(&blob_path).expect("failed to remove blob file");
+    std::fs::create_dir(&blob_path).expect("failed to create directory in place of blob");
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        500,
+        "an unreadable blob must surface as a server error, not a 404 'not found'"
+    );
 }
 
 /// Login verify endpoint sets np_session cookie with correct attributes.

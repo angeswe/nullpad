@@ -22,6 +22,15 @@ pub enum BlobError {
 
     #[error("Invalid paste ID: {0}")]
     InvalidId(String),
+
+    /// A blob on disk exceeds the configured size limit.
+    ///
+    /// Deliberately kept distinct from [`BlobError::InvalidId`]: this is an
+    /// infrastructure/data-integrity condition (a paste's content is larger
+    /// than allowed), not evidence that the ID is malformed or was never a
+    /// real paste. Callers must not treat it the same as `InvalidId`.
+    #[error("Blob exceeds size limit: {0}")]
+    TooLarge(String),
 }
 
 /// Rejection reason for an ID that cannot be used as a path component.
@@ -200,7 +209,7 @@ pub async fn read_blob(
     let file_size = metadata.len();
 
     if file_size > max_bytes {
-        return Err(BlobError::InvalidId(format!(
+        return Err(BlobError::TooLarge(format!(
             "Blob too large: {} bytes exceeds {}",
             file_size, max_bytes
         )));
