@@ -44,6 +44,11 @@ COPY --from=builder /build/target/release/nullpad /app/nullpad
 COPY static /app/static
 COPY protected /app/protected
 COPY tools/update-sri.sh tools/stamp-build-version.sh /app/tools/
+# update-sri.sh shells out to the shared <script>-tag parser; COPY with
+# multiple file sources flattens to basenames in the destination, so this
+# needs its own line to land at tools/lib/script-tags.pl as update-sri.sh
+# expects (it resolves the path relative to its own parent directory).
+COPY tools/lib/script-tags.pl /app/tools/lib/script-tags.pl
 
 # Build version: pass the git commit SHA via --build-arg so the footer links
 # to it on GitHub. "dev" (the default) links to the repository; anything else

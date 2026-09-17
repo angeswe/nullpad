@@ -37,6 +37,8 @@ jobs:
           done
       - name: Verify vendor JS hashes and SRI attributes
         run: bash tools/verify-vendor.sh
+      - name: Verify vendored JS against npm registry
+        run: VENDOR_VERIFY_UPSTREAM=1 bash tools/verify-vendor.sh
       - name: Frontend unit tests
         run: node --test tests/js/*.test.js
       - name: Unit tests
