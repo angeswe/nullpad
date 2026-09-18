@@ -143,6 +143,33 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 
 **Note on CDN/Proxy logging**: If you deploy behind Cloudflare, nginx, or another reverse proxy, those services may log requests independently. Nullpad has no control over upstream logging. For maximum privacy, review your proxy's logging configuration.
 
+## Vendored JavaScript
+
+marked, highlight.js, DOMPurify, and hash-wasm are vendored under `static/js/vendor/`. They are not installed with npm at build time. Each file is checked into the repo and pinned by hash so the server always serves exactly what was reviewed.
+
+`static/js/vendor/versions.json` records, per file: the npm package, the pinned version, the license, the in-tree sha384 (used for the SRI attribute in HTML), and the upstream data needed to prove the file matches what npm actually publishes: `registry_package` (the npm package that ships the file — this can differ from `package`, e.g. highlight.js's minified bundle ships from `@highlightjs/cdn-assets`, not `highlight.js`), `tarball` (the npm registry tarball URL), `tarball_path` (the file's path inside that tarball), and `dist_integrity` (the `dist.integrity` value npm reports for that tarball).
+
+To bump a vendored library:
+
+1. Find the new version and its tarball data:
+   ```bash
+   npm view <package>@<version> dist --json
+   ```
+2. Download the tarball and extract the file:
+   ```bash
+   curl -o pkg.tgz <dist.tarball>
+   tar xzf pkg.tgz <tarball_path>
+   ```
+3. Verify the tarball itself against `dist.integrity` before trusting anything inside it (see the "Upstream tarball verification" step in `tools/verify-vendor.sh` for the exact check).
+4. Copy the extracted file into `static/js/vendor/`, replacing the old one.
+5. Update its entry in `static/js/vendor/versions.json`: `version`, `sha384` (recompute with `openssl dgst -sha384 -binary <file> | openssl base64 -A`), `tarball`, `tarball_path`, and `dist_integrity`.
+6. If you are adding a new vendored file, or renaming/replacing one under a different registry package, add or update its pin in the hard-coded `PINNED_REGISTRY_PACKAGE` map at the top of `tools/verify-vendor.sh` (filename -> npm `registry_package`). `versions.json` is attacker-editable in a PR, so the upstream check refuses to trust its `registry_package` field unless it matches this pin — a file with no pin, or a pin with no `versions.json` entry, fails the check.
+7. Run `bash tools/update-sri.sh` to refresh the SRI hashes in every HTML page that references the file.
+8. Run `bash tools/sync-licenses.sh` if the license changed.
+9. Run `bash tools/verify-vendor.sh`, and `VENDOR_VERIFY_UPSTREAM=1 bash tools/verify-vendor.sh` to check the new file against the registry over the network.
+
+CI runs `tools/verify-vendor.sh` twice: once offline (the same check anyone runs locally), and once with `VENDOR_VERIFY_UPSTREAM=1` in a separate step, which verifies the vendored files against the npm registry over the network. Network verification is never enabled implicitly — only that explicit env var turns it on. A separate `Vendor JS Audit` workflow checks weekly, on manual dispatch, and on pull requests that touch `versions.json`, whether any vendored package has a newer release upstream; it fails the run when one does, and the weekly run also opens or updates a tracking issue.
+
 ## Tech Stack
 
 **Backend**

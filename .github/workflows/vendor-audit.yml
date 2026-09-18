@@ -4,6 +4,11 @@ on:
   schedule:
     - cron: '0 9 * * 1' # Weekly on Monday at 9am UTC
   workflow_dispatch: # Allow manual trigger
+  pull_request:
+    branches: [main]
+    paths:
+      - 'static/js/vendor/versions.json'
+      - '.github/workflows/vendor-audit.yml'
 
 permissions: {}
 
@@ -13,41 +18,101 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      report: ${{ steps.check.outputs.report }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check for outdated vendor libraries
+        id: check
         run: |
           set -euo pipefail
 
           manifest="static/js/vendor/versions.json"
           outdated=0
+          fetch_failed=0
+          report=""
 
           echo "Checking vendored JavaScript libraries..."
           echo ""
 
           for key in $(jq -r 'keys[]' "$manifest"); do
-            package=$(jq -r ".\"$key\".package" "$manifest")
+            package=$(jq -r ".\"$key\".registry_package // .\"$key\".package" "$manifest")
             current=$(jq -r ".\"$key\".version" "$manifest")
-            latest=$(npm view "$package" version 2>/dev/null || echo "FETCH_FAILED")
+            if ! latest=$(npm view "$package" version 2>/dev/null); then
+              latest="FETCH_FAILED"
+            fi
 
             if [ "$latest" = "FETCH_FAILED" ]; then
-              echo "::warning::Failed to fetch latest version for $package"
+              echo "::error::Failed to fetch latest version for $package"
+              report="${report}- FETCH_FAILED: $package ($key)"$'\n'
+              fetch_failed=$((fetch_failed + 1))
               continue
             fi
 
             if [ "$current" = "$latest" ]; then
               echo "  $package ($key): $current (up to date)"
             else
-              echo "::warning::$package ($key): $current -> $latest available"
+              echo "::error::$package ($key): $current -> $latest available"
+              report="${report}- outdated: $package ($key): $current -> $latest"$'\n'
               outdated=$((outdated + 1))
             fi
           done
 
           echo ""
-          if [ "$outdated" -gt 0 ]; then
-            echo "::warning::$outdated vendor libraries have updates available"
-            echo "Run: npm view <package> version to check, then update the file and versions.json"
+          {
+            echo "report<<VENDOR_AUDIT_EOF"
+            if [ -n "$report" ]; then
+              printf '%s' "$report"
+            else
+              echo "All vendor libraries are up to date."
+            fi
+            echo "VENDOR_AUDIT_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$outdated" -gt 0 ] || [ "$fetch_failed" -gt 0 ]; then
+            echo "::error::$outdated outdated, $fetch_failed fetch failure(s) among vendored JS libraries"
+            exit 1
+          fi
+
+          echo "All vendor libraries are up to date."
+
+  track-drift:
+    name: Open or update drift tracking issue
+    needs: check-versions
+    if: always() && needs.check-versions.result == 'failure' && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT: ${{ needs.check-versions.outputs.report }}
+        run: |
+          set -euo pipefail
+
+          title="Vendor JS versions have drifted"
+          body=$(printf 'The weekly vendor JS audit found drift:\n\n%s\n\nRun `bash tools/verify-vendor.sh` and update `static/js/vendor/versions.json` (see README for the vendoring steps).' "$REPORT")
+
+          existing=""
+          attempt=1
+          max_attempts=3
+          while [ "$attempt" -le "$max_attempts" ]; do
+            if existing=$(gh issue list --search "$title in:title" --state open --json number --jq '.[0].number // empty'); then
+              break
+            fi
+            echo "::warning::gh issue list failed (attempt $attempt/$max_attempts)"
+            if [ "$attempt" -eq "$max_attempts" ]; then
+              echo "::error::gh issue list failed after $max_attempts attempts; refusing to fall through to issue create (would risk duplicate issues)"
+              exit 1
+            fi
+            attempt=$((attempt + 1))
+            sleep 10
+          done
+
+          if [[ "$existing" =~ ^[0-9]+$ ]]; then
+            gh issue comment "$existing" --body "$body"
           else
-            echo "All vendor libraries are up to date."
+            gh issue create --title "$title" --body "$body"
           fi
