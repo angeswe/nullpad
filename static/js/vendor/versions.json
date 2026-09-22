@@ -1,36 +1,36 @@
 {
   "marked.min.js": {
     "package": "marked",
-    "version": "17.0.1",
+    "version": "18.0.14",
     "license": "MIT",
     "url": "https://marked.js.org",
-    "sha384": "sha384-KwzR5her+zXi/Bzz4PVrBjkrjsBZy9adZtt3jA6Jgj3/hzPihRUV6HqMONpTe7Ll",
+    "sha384": "sha384-2vpGtuKqJvFlwJqYnf/wUMuzUfhUnYBt9oay0e2yaFcq0Dh6/aEbQ8YAOeKGzlYo",
     "registry_package": "marked",
-    "tarball": "https://registry.npmjs.org/marked/-/marked-17.0.1.tgz",
+    "tarball": "https://registry.npmjs.org/marked/-/marked-18.0.14.tgz",
     "tarball_path": "package/lib/marked.umd.js",
-    "dist_integrity": "sha512-boeBdiS0ghpWcSwoNm/jJBwdpFaMnZWRzjA6SkUMYb40SVaN1x7mmfGKp0jvexGcx+7y2La5zRZsYFZI6Qpypg=="
+    "dist_integrity": "sha512-mBHK6FBHuBAlhgRe88w9F0O1AbwwXJUcQibUbC/QcdTbVGAD7aWza+xt3N6oT/jCZx3/OMeS+8rnuiHZcQ9s7A=="
   },
   "highlight.min.js": {
     "package": "highlight.js",
-    "version": "11.11.1",
+    "version": "11.12.0",
     "license": "BSD-3-Clause",
     "url": "https://highlightjs.org",
-    "sha384": "sha384-RH2xi4eIQ/gjtbs9fUXM68sLSi99C7ZWBRX1vDrVv6GQXRibxXLbwO2NGZB74MbU",
+    "sha384": "sha384-wjfDDhOPPdjtva8vWBhWeVprSpmxisEu5aYT3q1JyACqXpdKpo3PWZTMVq24MBix",
     "registry_package": "@highlightjs/cdn-assets",
-    "tarball": "https://registry.npmjs.org/@highlightjs/cdn-assets/-/cdn-assets-11.11.1.tgz",
+    "tarball": "https://registry.npmjs.org/@highlightjs/cdn-assets/-/cdn-assets-11.12.0.tgz",
     "tarball_path": "package/highlight.min.js",
-    "dist_integrity": "sha512-VEPdHzwelZ12hEX18BHduqxMZGolcUsrbeokHYxOUIm8X2+M7nx5QPtPeQgRxR9XjhdLv4/7DD5BWOlSrJ3k7Q=="
+    "dist_integrity": "sha512-KvOKXODaiFmId9xaq3xc5xCL66wVLUuOngDbO9B/kewbFTqdGbn2nJxNhN3H5R1cgDTVj6R8vH0zgiNDEGjpDw=="
   },
   "purify.min.js": {
     "package": "dompurify",
-    "version": "3.3.1",
+    "version": "3.4.15",
     "license": "(MPL-2.0 OR Apache-2.0)",
     "url": "https://github.com/cure53/DOMPurify",
-    "sha384": "sha384-80VlBZnyAwkkqtSfg5NhPyZff6nU4K/qniLBL8Jnm4KDv6jZhLiYtJbhglg/i9ww",
+    "sha384": "sha384-uUMu9JDY09vBzRf9SPcK2VgUj+W/70J6Soc+Dded5P474ElQ63iv9j5N3DE7Kp3N",
     "registry_package": "dompurify",
-    "tarball": "https://registry.npmjs.org/dompurify/-/dompurify-3.3.1.tgz",
+    "tarball": "https://registry.npmjs.org/dompurify/-/dompurify-3.4.15.tgz",
     "tarball_path": "package/dist/purify.min.js",
-    "dist_integrity": "sha512-qkdCKzLNtrgPFP1Vo+98FRzJnBRGe4ffyCea9IwHB1fyxPOeNTHpLKYGd4Uk9xvNoH0ZoOjwZxNptyMwqrId1Q=="
+    "dist_integrity": "sha512-EUBjM+B+lkDE41iE82DDSCfkoPGfXx8IxFxPMjNzm/Uk4xDet77rTN9wqlxlVg71kK7XGuUMv6wUxJUwwv+Xyw=="
   },
   "argon2.umd.min.js": {
     "package": "hash-wasm",
