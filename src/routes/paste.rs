@@ -57,9 +57,13 @@ pub async fn create_paste(
     let mut encrypted_content: Option<Vec<u8>> = None;
     let mut field_count: u32 = 0;
     const MAX_MULTIPART_FIELDS: u32 = 4;
+    // Legitimate metadata JSON is under ~6 KB (encrypted_metadata is capped at
+    // 4096 decoded bytes). The cap is checked while reading, so an oversized
+    // field is never fully buffered.
+    const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 
     // Parse multipart form (capped at MAX_MULTIPART_FIELDS to prevent DoS)
-    while let Some(field) = multipart
+    while let Some(mut field) = multipart
         .next_field()
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid multipart: {}", e)))?
@@ -77,10 +81,20 @@ pub async fn create_paste(
 
         match name.as_str() {
             "metadata" => {
-                let data = field
-                    .bytes()
+                let mut data = Vec::new();
+                while let Some(chunk) = field
+                    .chunk()
                     .await
-                    .map_err(|e| AppError::BadRequest(format!("Failed to read metadata: {}", e)))?;
+                    .map_err(|e| AppError::BadRequest(format!("Failed to read metadata: {}", e)))?
+                {
+                    if data.len() + chunk.len() > MAX_METADATA_FIELD_BYTES {
+                        return Err(AppError::BadRequest(format!(
+                            "metadata too large (max {} bytes)",
+                            MAX_METADATA_FIELD_BYTES
+                        )));
+                    }
+                    data.extend_from_slice(&chunk);
+                }
                 metadata =
                     Some(serde_json::from_slice(&data).map_err(|e| {
                         AppError::BadRequest(format!("Invalid metadata JSON: {}", e))
@@ -106,7 +120,8 @@ pub async fn create_paste(
     // Validate client-generated paste ID
     super::validate_id(&metadata.paste_id, "paste ID", 12)?;
 
-    // Require pin_verifier when has_pin is true
+    // Require pin_verifier when has_pin is true; reject it when has_pin is false,
+    // so an unchecked value can never be stored.
     if metadata.has_pin {
         let verifier = metadata.pin_verifier.as_deref().unwrap_or("");
         if verifier.is_empty() {
@@ -123,6 +138,14 @@ pub async fn create_paste(
                 "pin_verifier must be 32 bytes (HMAC-SHA256)".to_string(),
             ));
         }
+    } else if metadata
+        .pin_verifier
+        .as_deref()
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Err(AppError::BadRequest(
+            "pin_verifier not allowed when has_pin is false".to_string(),
+        ));
     }
 
     // Validate encrypted_metadata: non-empty, valid base64, max 4096 decoded bytes.
@@ -206,7 +229,12 @@ pub async fn create_paste(
             created_at: crate::util::now_secs(),
             owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
             has_pin: metadata.has_pin,
-            pin_verifier: metadata.pin_verifier,
+            // Only store a verifier that passed the has_pin checks above.
+            pin_verifier: if metadata.has_pin {
+                metadata.pin_verifier
+            } else {
+                None
+            },
         },
         encrypted_content,
     };

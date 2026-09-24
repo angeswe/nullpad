@@ -132,6 +132,9 @@ async fn main() {
         test_verify_sets_np_session_cookie,
         test_stored_blob_preserves_bucket_size,
         test_unreadable_blob_returns_500_not_404,
+        test_pin_verifier_rejected_when_has_pin_false,
+        test_small_pin_verifier_rejected_when_has_pin_false,
+        test_metadata_field_size_capped,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -2443,6 +2446,119 @@ async fn test_non_pin_get_unchanged() {
     assert!(body["encrypted_content"].is_string());
     assert!(body["created_at"].is_number());
     assert!(body.get("needs_pin").is_none());
+}
+
+// ============================================================================
+// Paste Metadata Validation Tests
+// ============================================================================
+
+/// Valid metadata for an anonymous text paste with `has_pin` false and
+/// `pin_verifier` null. Tests change single fields to build invalid variants.
+fn anon_text_paste_metadata(paste_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "paste_id": paste_id,
+        "encrypted_metadata": general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
+        "paste_type": "text",
+        "ttl_secs": 3600,
+        "burn_after_reading": false,
+        "has_pin": false,
+        "pin_verifier": null
+    })
+}
+
+/// POST /api/paste without auth, sending `metadata` as the raw body of the
+/// "metadata" part and a small "file" part.
+async fn post_paste_with_raw_metadata(
+    client: &reqwest::Client,
+    base_url: &str,
+    metadata: String,
+) -> reqwest::Response {
+    let form = multipart::Form::new()
+        .part(
+            "metadata",
+            multipart::Part::text(metadata)
+                .mime_str("application/json")
+                .unwrap(),
+        )
+        .part(
+            "file",
+            multipart::Part::bytes(b"encrypted data".to_vec())
+                .file_name("encrypted")
+                .mime_str("application/octet-stream")
+                .unwrap(),
+        );
+
+    client
+        .post(format!("{}/api/paste", base_url))
+        .multipart(form)
+        .send()
+        .await
+        .expect("Failed to send request")
+}
+
+/// Assert that no `paste:{id}` key exists in Valkey for a rejected paste.
+async fn assert_paste_not_stored(con: &mut redis::aio::ConnectionManager, paste_id: &str) {
+    use redis::AsyncCommands;
+    let key = format!("paste:{}", paste_id);
+    let exists: bool = con.exists(&key).await.unwrap();
+    assert!(
+        !exists,
+        "Rejected paste must not be stored in Valkey, but key {} exists",
+        key
+    );
+}
+
+/// A 1 MB pin_verifier with has_pin false must be rejected, not stored.
+async fn test_pin_verifier_rejected_when_has_pin_false() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let paste_id = nanoid::nanoid!(12);
+    let mut metadata = anon_text_paste_metadata(&paste_id);
+    metadata["pin_verifier"] = serde_json::Value::String("A".repeat(1024 * 1024));
+
+    let resp = post_paste_with_raw_metadata(&client, &base_url, metadata.to_string()).await;
+    assert_eq!(resp.status(), 400);
+
+    assert_paste_not_stored(&mut con, &paste_id).await;
+}
+
+/// A small, well-formed pin_verifier with has_pin false must also be rejected.
+/// The metadata field stays far below the size cap, so only the has_pin rule
+/// can cause the 400.
+async fn test_small_pin_verifier_rejected_when_has_pin_false() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let paste_id = nanoid::nanoid!(12);
+    let mut metadata = anon_text_paste_metadata(&paste_id);
+    metadata["pin_verifier"] =
+        serde_json::Value::String(general_purpose::STANDARD.encode([7u8; 32]));
+    let body = metadata.to_string();
+    assert!(body.len() < 1024, "metadata must stay well under the cap");
+
+    let resp = post_paste_with_raw_metadata(&client, &base_url, body).await;
+    assert_eq!(resp.status(), 400);
+
+    assert_paste_not_stored(&mut con, &paste_id).await;
+}
+
+/// A 'metadata' field larger than 16 KB must be rejected before parsing.
+async fn test_metadata_field_size_capped() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let paste_id = nanoid::nanoid!(12);
+    let mut metadata = anon_text_paste_metadata(&paste_id);
+    // Unknown fields are ignored by serde, so only the size cap can reject this.
+    metadata["padding"] = serde_json::Value::String("A".repeat(17 * 1024));
+    let body = metadata.to_string();
+    assert!(body.len() > 16 * 1024);
+
+    let resp = post_paste_with_raw_metadata(&client, &base_url, body).await;
+    assert_eq!(resp.status(), 400);
+
+    assert_paste_not_stored(&mut con, &paste_id).await;
 }
 
 /// Unauthenticated requests to /admin.html and /trusted.html must return 401.
