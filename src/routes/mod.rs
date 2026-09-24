@@ -18,7 +18,7 @@ use axum::{
 
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 
 /// Paths to protected files served via auth-gated route handlers.
 /// These files must NOT be placed under `static/` where ServeDir could serve them directly.
@@ -141,13 +141,17 @@ pub fn client_ip(headers: &HeaderMap, addr: &SocketAddr, trusted_proxy_count: us
 
 /// Normalize IPv4-mapped IPv6 addresses to their IPv4 equivalent.
 /// Prevents rate limit bypass via `::ffff:1.2.3.4` vs `1.2.3.4`.
+///
+/// Also groups native IPv6 addresses by /64: keeps the first 64 bits and zeroes the rest.
+/// ISPs assign a whole /64 to one customer, so without this a client could rotate
+/// addresses inside its /64 and get a new rate-limit bucket per request.
 fn normalize_ip(ip: IpAddr) -> IpAddr {
     match ip {
         IpAddr::V6(v6) => {
             if let Some(v4) = v6.to_ipv4_mapped() {
                 IpAddr::V4(v4)
             } else {
-                IpAddr::V6(v6)
+                IpAddr::V6(Ipv6Addr::from_bits(v6.to_bits() & (u128::MAX << 64)))
             }
         }
         v4 => v4,
@@ -460,11 +464,54 @@ mod tests {
     #[test]
     fn test_client_ip_ipv6() {
         // IPv6: proxy appends "fe80::1", client sent "::1". target = index 1.
+        // Result is masked to its /64 prefix.
         let headers = make_headers_with_xff("::1, fe80::1");
         let addr = make_addr("10.0.0.1");
         assert_eq!(
             client_ip(&headers, &addr, 1),
-            "fe80::1".parse::<IpAddr>().unwrap()
+            "fe80::".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_client_ip_groups_ipv6_by_64() {
+        // Two addresses in the same /64 must map to the same rate-limit identity.
+        let addr = make_addr("10.0.0.1");
+        let expected = "2001:db8:1:2::".parse::<IpAddr>().unwrap();
+        let low = make_headers_with_xff("2001:db8:1:2::1");
+        let high = make_headers_with_xff("2001:db8:1:2:ffff:ffff:ffff:ffff");
+        assert_eq!(client_ip(&low, &addr, 1), expected);
+        assert_eq!(client_ip(&high, &addr, 1), expected);
+    }
+
+    #[test]
+    fn test_client_ip_separates_ipv6_64s() {
+        // Addresses in different /64s must stay separate.
+        let addr = make_addr("10.0.0.1");
+        let a = make_headers_with_xff("2001:db8:1:2::1");
+        let b = make_headers_with_xff("2001:db8:1:3::1");
+        assert_ne!(client_ip(&a, &addr, 1), client_ip(&b, &addr, 1));
+    }
+
+    #[test]
+    fn test_client_ip_ipv6_socket_addr_masked() {
+        // No proxy trust: the direct IPv6 connection address is masked to /64 too.
+        let headers = HeaderMap::new();
+        let addr = make_addr("[2001:db8:1:2::5]");
+        assert_eq!(
+            client_ip(&headers, &addr, 0),
+            "2001:db8:1:2::".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_client_ip_ipv4_mapped_still_ipv4() {
+        // IPv4-mapped IPv6 still becomes plain IPv4, not a masked IPv6 prefix.
+        let headers = make_headers_with_xff("::ffff:192.0.2.1");
+        let addr = make_addr("10.0.0.1");
+        assert_eq!(
+            client_ip(&headers, &addr, 1),
+            "192.0.2.1".parse::<IpAddr>().unwrap()
         );
     }
 
