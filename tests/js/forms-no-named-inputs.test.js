@@ -66,9 +66,14 @@ function collectForms() {
   const forms = [];
   for (const file of listHtmlFiles()) {
     // A commented-out form is never rendered, so it cannot be submitted.
-    const html = fs
-      .readFileSync(path.join(REPO_ROOT, file), 'utf8')
-      .replace(/<!--[\s\S]*?-->/g, '');
+    // Repeat until nothing changes, so removing one comment cannot leave a
+    // new `<!--` behind.
+    let html = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+    let previous;
+    do {
+      previous = html;
+      html = html.replace(/<!--[\s\S]*?-->/g, '');
+    } while (html !== previous);
     for (const open of html.matchAll(FORM_OPEN_RE)) {
       const bodyStart = open.index + open[0].length;
       FORM_CLOSE_RE.lastIndex = bodyStart;
