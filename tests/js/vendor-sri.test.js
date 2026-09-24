@@ -325,6 +325,85 @@ test('verify-vendor.sh (VENDOR_VERIFY_UPSTREAM=1) fails before any network call 
   });
 });
 
+// tarball_path is passed to `tar`, so a value starting with '-' would be read
+// as a tar option (e.g. --to-command runs a command). The other fields stay
+// at real registry values so every earlier check passes; only tarball_path
+// is bad, and it must be rejected before any curl call.
+const REGISTRY_TARBALL = 'https://registry.npmjs.org/dompurify/-/dompurify-1.0.0.tgz';
+
+function runUpstreamVerifyWithFakeCurl(tree, binDir) {
+  try {
+    const stdout = execFileSync('bash', [path.join(tree, VERIFY_SCRIPT)], {
+      cwd: tree,
+      stdio: 'pipe',
+      env: {
+        ...process.env,
+        PATH: `${binDir}:${process.env.PATH}`,
+        VENDOR_VERIFY_UPSTREAM: '1'
+      }
+    }).toString();
+    return { status: 0, stdout };
+  } catch (err) {
+    return { status: err.status, stdout: String(err.stdout) };
+  }
+}
+
+test("verify-vendor.sh (VENDOR_VERIFY_UPSTREAM=1) rejects a tarball_path that starts with '-' before any network call", () => {
+  withScratchTree((tree) => {
+    const marker = path.join(tree, 'tar-to-command-ran');
+    writeFullFixtureTree(tree, {
+      tarball: REGISTRY_TARBALL,
+      tarball_path: `--to-command=touch ${marker}`
+    });
+    const { binDir, logPath } = writeFakeCurlThatFails(tree);
+
+    const { status, stdout } = runUpstreamVerifyWithFakeCurl(tree, binDir);
+
+    assert.equal(status, 1, `unexpected exit status; stdout: ${stdout}`);
+    assert.ok(
+      !fs.existsSync(logPath),
+      "expected zero curl invocations for a tarball_path starting with '-', but fake curl was called"
+    );
+    assert.ok(!fs.existsSync(marker), 'tar --to-command ran: marker file exists');
+  });
+});
+
+test('verify-vendor.sh (VENDOR_VERIFY_UPSTREAM=1) rejects an absolute tarball_path before any network call', () => {
+  withScratchTree((tree) => {
+    writeFullFixtureTree(tree, {
+      tarball: REGISTRY_TARBALL,
+      tarball_path: `/package/${PINNED_FILE}`
+    });
+    const { binDir, logPath } = writeFakeCurlThatFails(tree);
+
+    const { status, stdout } = runUpstreamVerifyWithFakeCurl(tree, binDir);
+
+    assert.equal(status, 1, `unexpected exit status; stdout: ${stdout}`);
+    assert.ok(
+      !fs.existsSync(logPath),
+      'expected zero curl invocations for an absolute tarball_path, but fake curl was called'
+    );
+  });
+});
+
+test("verify-vendor.sh (VENDOR_VERIFY_UPSTREAM=1) rejects a tarball_path containing '..' before any network call", () => {
+  withScratchTree((tree) => {
+    writeFullFixtureTree(tree, {
+      tarball: REGISTRY_TARBALL,
+      tarball_path: `package/../../${PINNED_FILE}`
+    });
+    const { binDir, logPath } = writeFakeCurlThatFails(tree);
+
+    const { status, stdout } = runUpstreamVerifyWithFakeCurl(tree, binDir);
+
+    assert.equal(status, 1, `unexpected exit status; stdout: ${stdout}`);
+    assert.ok(
+      !fs.existsSync(logPath),
+      "expected zero curl invocations for a tarball_path containing '..', but fake curl was called"
+    );
+  });
+});
+
 // --- Attribute values containing '>' (grammar-correct tag parsing) ---
 
 test("verify rejects a /js/ tag with no integrity when an earlier attribute value contains '>'", () => {

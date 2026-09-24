@@ -299,6 +299,18 @@ if [ "${VENDOR_VERIFY_UPSTREAM:-0}" = "1" ]; then
       continue
     fi
 
+    # tarball_path comes from the attacker-editable versions.json and is
+    # passed to tar, then joined onto the temp dir for cmp. A value starting
+    # with '-' would be read by tar as an option (--to-command runs a
+    # command); '/' or '..' would point outside the temp dir. Reject these
+    # before any network call.
+    case "$tarball_path" in
+      -* | /* | *..*)
+        fail "$key: versions.json tarball_path '$tarball_path' must be a relative path inside the tarball (no leading '-' or '/', no '..')"
+        continue
+        ;;
+    esac
+
     # Refuse an entry whose registry_package does not match the hard-coded
     # pin before ever contacting the network. This is the primary defense
     # against a PR that swaps registry_package to a typosquat/compromised
@@ -406,13 +418,13 @@ if [ "${VENDOR_VERIFY_UPSTREAM:-0}" = "1" ]; then
       continue
     fi
 
-    if ! tar_err=$(tar -xzf "$tarfile" -C "$tmpdir" "$tarball_path" 2>&1 >/dev/null); then
+    if ! tar_err=$(tar -xzf "$tarfile" -C "$tmpdir" -- "$tarball_path" 2>&1 >/dev/null); then
       fail "$key: tar failed extracting $tarball_path: $tar_err"
       rm -rf "$tmpdir"
       continue
     fi
 
-    if cmp -s "$tmpdir/$tarball_path" "$file"; then
+    if cmp -s -- "$tmpdir/$tarball_path" "$file"; then
       echo "  OK: $key matches upstream $tarball_path (verified against $NPM_REGISTRY_URL)"
     else
       fail "$key: in-tree file does not byte-match upstream $tarball_path"
