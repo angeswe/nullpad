@@ -33,10 +33,10 @@
       </div>
       <div class="panel-body">
         <p>This paste is protected with a PIN. Enter it to decrypt:</p>
-        <form id="pin-form">
+        <form id="pin-form" method="post">
           <div class="form-group">
             <label for="pin">PIN</label>
-            <input type="password" id="pin" name="pin" placeholder="Enter PIN" autofocus required>
+            <input type="password" id="pin" placeholder="Enter PIN" autofocus required>
           </div>
           <button type="submit" class="btn btn-primary btn-block">Decrypt</button>
         </form>

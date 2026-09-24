@@ -15,19 +15,19 @@
       <p>Login with your credentials</p>
     </div>
 
-    <form id="login-form" class="panel">
+    <form id="login-form" method="post" class="panel">
       <div class="panel-header">
         <h2>Trusted User Login</h2>
       </div>
       <div class="panel-body">
         <div class="form-group">
           <label for="alias">Alias</label>
-          <input type="text" id="alias" name="alias" placeholder="Enter your alias" required autofocus>
+          <input type="text" id="alias" placeholder="Enter your alias" required autofocus>
         </div>
 
         <div class="form-group">
           <label for="secret">Secret</label>
-          <input type="password" id="secret" name="secret" placeholder="Enter your secret" required>
+          <input type="password" id="secret" placeholder="Enter your secret" required>
           <div class="form-help">
             Your secret phrase derives your login credentials. It never leaves your browser.
           </div>

@@ -102,7 +102,7 @@ pub async fn security_headers(request: Request, next: Next) -> Response {
              object-src 'none'; \
              frame-ancestors 'none'; \
              base-uri 'self'; \
-             form-action 'self'",
+             form-action 'none'",
         ),
     );
 
@@ -179,7 +179,8 @@ mod tests {
         assert!(csp.contains("object-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("base-uri 'self'"));
-        assert!(csp.contains("form-action 'self'"));
+        assert!(csp.contains("form-action 'none'"));
+        assert!(!csp.contains("form-action 'self'"));
     }
 
     #[tokio::test]

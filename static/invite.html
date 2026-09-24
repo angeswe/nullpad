@@ -27,7 +27,7 @@
       </div>
     </div>
 
-    <form id="register-form" class="panel">
+    <form id="register-form" method="post" class="panel">
       <div class="panel-header">
         <h2>Create Your Account</h2>
       </div>
@@ -38,7 +38,7 @@
 
         <div class="form-group">
           <label for="alias">Alias</label>
-          <input type="text" id="alias" name="alias" placeholder="Choose a unique alias" required autofocus>
+          <input type="text" id="alias" placeholder="Choose a unique alias" required autofocus>
           <div class="form-help">
             Your alias is public and used for login. Choose something memorable.
           </div>
@@ -46,7 +46,7 @@
 
         <div class="form-group">
           <label for="secret">Secret</label>
-          <input type="password" id="secret" name="secret" placeholder="Choose a strong secret" required>
+          <input type="password" id="secret" placeholder="Choose a strong secret" required>
           <div class="form-help">
             Your secret phrase derives your login credentials. Keep it secure and never share it.
           </div>
@@ -54,7 +54,7 @@
 
         <div class="form-group">
           <label for="secret-confirm">Confirm Secret</label>
-          <input type="password" id="secret-confirm" name="secret-confirm" placeholder="Re-enter your secret" required>
+          <input type="password" id="secret-confirm" placeholder="Re-enter your secret" required>
         </div>
 
         <div id="error-message" class="alert alert-error hidden" role="alert"></div>
