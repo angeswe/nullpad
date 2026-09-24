@@ -9,14 +9,30 @@
 
 use crate::models::{StoredPaste, StoredPasteMeta};
 use crate::storage::blob;
-use redis::AsyncCommands;
+use redis::{AsyncCommands, FromRedisValue};
+use sha2::{Digest, Sha256};
 use std::path::Path;
+
+/// Lowercase hex SHA-256 of blob bytes, the format of
+/// `StoredPasteMeta::content_sha256`.
+fn content_sha256_hex(content: &[u8]) -> String {
+    Sha256::digest(content)
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+            s
+        })
+}
 
 /// Store a paste: claim ID in Valkey first (SETNX), then write content to disk.
 ///
 /// Uses SET NX (set-if-not-exists) to atomically claim the paste ID, preventing
 /// overwrites of existing pastes. If the ID already exists, returns an error
 /// that maps to 409 Conflict.
+///
+/// The stored metadata always records the SHA-256 of the content
+/// (`content_sha256`), whatever `paste.meta.content_sha256` holds.
 ///
 /// If the paste has an owner_id, also add the paste ID to the user's paste set.
 /// `max_ttl_secs` is used for the user_pastes SET expiry (from config.max_ttl_secs).
@@ -31,7 +47,13 @@ where
     C: AsyncCommands,
 {
     let key = format!("paste:{}", paste.meta.id);
-    let json = serde_json::to_string(&paste.meta).map_err(super::json_serialize_err)?;
+    // Tie the record to this blob. A blob left on disk by an expired paste
+    // with the same ID then fails the check in get_paste_atomic.
+    let meta = StoredPasteMeta {
+        content_sha256: Some(content_sha256_hex(&paste.encrypted_content)),
+        ..paste.meta.clone()
+    };
+    let json = serde_json::to_string(&meta).map_err(super::json_serialize_err)?;
 
     // Step 1: Atomically claim the paste ID with SET NX (set-if-not-exists).
     // This prevents overwriting existing pastes when clients control the ID.
@@ -199,7 +221,22 @@ where
         Err(e) => return classify_blob_read_error(id, e),
     };
 
-    // Step 2: Lua script — GET metadata, DEL if burn + SREM from user_pastes
+    // Step 2: Lua script — GET metadata, check the blob hash, then DEL if
+    // burn + SREM from user_pastes.
+    //
+    // The blob must be the one the record was stored with. Paste IDs are
+    // client-chosen: after a paste expires, a new paste can claim its ID
+    // before its blob replaces the old one on disk. Serving the old blob under
+    // the new record would skip the old paste's PIN check. The check runs
+    // before any DEL, so a mismatched read never consumes a burn paste.
+    //
+    // A record with no content_sha256 field was written before the field
+    // existed and is not checked. Any other value that is not the blob's hash
+    // is a mismatch, including JSON null (cjson.null is not nil).
+    //
+    // Replies: nil = no record; integer 0 = mismatch, nothing deleted;
+    // string = the record JSON.
+    let blob_sha256 = content_sha256_hex(&encrypted_content);
     let script = redis::Script::new(
         r#"
         local val = redis.call('GET', KEYS[1])
@@ -207,6 +244,10 @@ where
             return nil
         end
         local obj = cjson.decode(val)
+        local h = obj.content_sha256
+        if h ~= nil and h ~= ARGV[3] then
+            return 0
+        end
         if obj.burn_after_reading == true then
             redis.call('DEL', KEYS[1])
             if type(obj.owner_id) == 'string' then
@@ -217,32 +258,40 @@ where
         "#,
     );
 
-    let json: Option<String> = script
+    let reply: redis::Value = script
         .key(&key)
         .arg(id)
         .arg("user_pastes:")
+        .arg(&blob_sha256)
         .invoke_async(con)
         .await?;
 
-    match json {
-        Some(data) => {
-            let meta: StoredPasteMeta =
-                serde_json::from_str(&data).map_err(super::json_deserialize_err)?;
-
-            // Step 3: For burn-after-reading, delete the blob now
-            if meta.burn_after_reading {
-                if let Err(e) = blob::delete_blob(storage_path, id).await {
-                    tracing::error!(paste_id = %id, error = %e, "Failed to delete burn blob");
-                }
-            }
-
-            Ok(Some(StoredPaste {
-                meta,
-                encrypted_content,
-            }))
+    let data = match reply {
+        redis::Value::Nil => return Ok(None),
+        redis::Value::Int(0) => {
+            // The paste ID is deliberately not logged for this event.
+            tracing::warn!(
+                "Blob does not match paste metadata hash; record left in place, \
+                 treating paste as not found"
+            );
+            return Ok(None);
         }
-        None => Ok(None),
+        other => String::from_redis_value(other)?,
+    };
+
+    let meta: StoredPasteMeta = serde_json::from_str(&data).map_err(super::json_deserialize_err)?;
+
+    // Step 3: For burn-after-reading, delete the blob now
+    if meta.burn_after_reading {
+        if let Err(e) = blob::delete_blob(storage_path, id).await {
+            tracing::error!(paste_id = %id, error = %e, "Failed to delete burn blob");
+        }
     }
+
+    Ok(Some(StoredPaste {
+        meta,
+        encrypted_content,
+    }))
 }
 
 /// Delete a paste from Valkey and disk, cleaning up the owner's user_pastes SET.
@@ -496,6 +545,15 @@ mod tests {
             matches!(result, Ok(None)),
             "expected an InvalidId blob read failure to yield Ok(None), got {:?}",
             result
+        );
+    }
+
+    /// FIPS 180-2 test vector: SHA-256("abc").
+    #[test]
+    fn content_sha256_hex_matches_known_vector() {
+        assert_eq!(
+            content_sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
 }

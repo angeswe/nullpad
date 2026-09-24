@@ -95,6 +95,17 @@ pub struct StoredPasteMeta {
     /// HMAC-SHA256(derived_key, paste_id) — server-side PIN verifier (base64).
     #[serde(default)]
     pub pin_verifier: Option<String>,
+    /// Lowercase hex SHA-256 of the stored blob bytes. `store_paste` always
+    /// sets it. The Lua script in `get_paste_atomic` compares it with the blob
+    /// on disk before serving or burning, so a blob left over from an earlier
+    /// paste with the same ID is never served under this record.
+    ///
+    /// A record without this field was written before the field existed and
+    /// is served unchecked. A record with JSON null here is refused. Serde
+    /// reads both as `None`, so the check works on the raw JSON, not on this
+    /// struct.
+    #[serde(default)]
+    pub content_sha256: Option<String>,
 }
 
 /// Full paste data (metadata + content) for API operations.

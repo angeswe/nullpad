@@ -235,6 +235,8 @@ pub async fn create_paste(
             } else {
                 None
             },
+            // store_paste computes and records the blob hash.
+            content_sha256: None,
         },
         encrypted_content,
     };
