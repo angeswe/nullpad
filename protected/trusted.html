@@ -23,10 +23,10 @@
       <span id="user-info" class="text-muted"></span>
     </div>
 
-    <form id="paste-form" class="panel">
+    <form id="paste-form" method="post" class="panel">
       <div class="form-group">
         <label for="content">Content or drag & drop any file</label>
-        <textarea id="content" name="content" placeholder="Paste your text or markdown here..." rows="10"></textarea>
+        <textarea id="content" placeholder="Paste your text or markdown here..." rows="10"></textarea>
         <div class="file-upload-area" id="file-upload-area">
           <input type="file" id="file-input">
           <div class="file-upload-icon" aria-hidden="true">📄</div>
@@ -40,7 +40,7 @@
 
       <div class="form-group">
         <label for="render-mode">Display as</label>
-        <select id="render-mode" name="render-mode">
+        <select id="render-mode">
           <option value="markdown" selected>Rendered Markdown</option>
           <option value="raw">Raw text</option>
         </select>
@@ -51,7 +51,7 @@
 
       <div class="form-group">
         <label for="pin">PIN (recommended for extra security)</label>
-        <input type="password" id="pin" name="pin" placeholder="Enter a PIN to protect this paste" minlength="4">
+        <input type="password" id="pin" placeholder="Enter a PIN to protect this paste" minlength="4">
         <div class="form-help">
           PIN adds a second layer of protection. Required to decrypt even if someone intercepts the URL.
           Use at least 4 characters. Longer passphrases (e.g. multiple words) are stronger.
@@ -70,7 +70,7 @@
 
       <div class="form-group">
         <label for="ttl">Expires in</label>
-        <select id="ttl" name="ttl">
+        <select id="ttl">
           <option value="60">1 minute</option>
           <option value="3600">1 hour</option>
           <option value="86400" selected>1 day</option>
