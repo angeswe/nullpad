@@ -375,18 +375,27 @@
 
     /**
      * Decrypt AES-256-GCM ciphertext
-     * @param {string} encryptedBase64 - Base64-encoded (IV + ciphertext)
+     * @param {string|Uint8Array} data - IV + ciphertext, as a base64 string or raw bytes
      * @param {string|Uint8Array} key - Decryption key as base64url string or raw bytes
      * @param {string} [aad] - Optional Additional Authenticated Data (e.g. paste ID)
      * @returns {Promise<Uint8Array>} Decrypted data (caller decides text vs binary)
      */
-    async function decrypt(encryptedBase64, key, aad) {
-        // Decode the combined IV + ciphertext
-        const combined = base64Decode(encryptedBase64);
+    async function decrypt(data, key, aad) {
+        // The combined IV + ciphertext. Raw bytes are used as they are (paste
+        // bodies arrive as bytes); strings are base64 (e.g. encrypted metadata).
+        let combined;
+        if (data instanceof Uint8Array) {
+            combined = data;
+        } else if (typeof data === 'string') {
+            combined = base64Decode(data);
+        } else {
+            throw new TypeError('decrypt: data must be a base64 string or a Uint8Array');
+        }
 
-        // Extract IV (first 12 bytes) and ciphertext (rest)
+        // Extract IV (first 12 bytes) and ciphertext (rest). subarray, not
+        // slice: the ciphertext can be large and does not need a copy.
         const iv = combined.slice(0, 12);
-        const ciphertext = combined.slice(12);
+        const ciphertext = combined.subarray(12);
 
         // Decode key if string, copy if Uint8Array (caller retains original)
         const keyBytes = key instanceof Uint8Array ? new Uint8Array(key) : base64urlDecode(key);

@@ -86,6 +86,8 @@ See `.env.example` for all available options. Key environment variables:
 - `PASTE_STORAGE_PATH` — Directory for encrypted paste content (default: "/data/pastes")
 - `VALKEY_PASSWORD` — Valkey authentication password (required in Docker)
 - `MAX_UPLOAD_BYTES` — Max file size (default: 52428800 / 50MB)
+- `MAX_CONCURRENT_BLOB_READS` — Paste bodies streamed at once; further reads get 503 until a slot frees (default: 32, min 1)
+- `WRITE_TIMEOUT_SECS` — Seconds a socket write may stay blocked before the connection is dropped (default: 60, min 1)
 - `DEFAULT_TTL_SECS` — Default paste expiration (default: 86400 / 24h)
 - `MAX_TTL_SECS` — Maximum paste lifetime (default: 604800 / 7d)
 - `MAX_PASTES_PER_USER` — Per-user paste limit, 0 = unlimited (default: 50)

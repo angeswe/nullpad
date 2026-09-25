@@ -10,9 +10,10 @@
 //!
 //! Also supports `keygen` subcommand for generating admin keypairs.
 
+use axum::serve::ListenerExt;
 use nullpad::{
-    auth::middleware::AppState, cleanup, config::Config, middleware::security_headers, routes,
-    storage,
+    auth::middleware::AppState, cleanup, config::Config, listener::WriteTimeoutListener,
+    middleware::security_headers, routes, storage,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -225,6 +226,9 @@ async fn main() {
         redis: valkey_manager,
         config: Arc::new(config.clone()),
         ip_hmac_salt: Arc::new(ip_hmac_salt),
+        blob_read_permits: Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_blob_reads,
+        )),
     };
 
     // Build router:
@@ -258,6 +262,13 @@ async fn main() {
         .await
         .expect("Failed to bind");
     tracing::info!("Listening on {}", config.bind_addr);
+
+    // Blocked socket writes time out so a client that stops reading a paste
+    // body releases its blob read permit. The no-op tap_io is what gives this
+    // listener axum's `Connected` impl for `SocketAddr` (see nullpad::listener).
+    let listener =
+        WriteTimeoutListener::new(listener, Duration::from_secs(config.write_timeout_secs))
+            .tap_io(|_| {});
 
     // Start server (with_connect_info required for ConnectInfo<SocketAddr> extractors)
     axum::serve(
