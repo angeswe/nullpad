@@ -135,6 +135,11 @@ async fn main() {
         test_pin_verifier_rejected_when_has_pin_false,
         test_small_pin_verifier_rejected_when_has_pin_false,
         test_metadata_field_size_capped,
+        test_reclaimed_id_does_not_serve_stale_blob,
+        test_blob_metadata_mismatch_returns_not_found,
+        test_legacy_meta_without_content_hash_is_still_served,
+        test_mismatched_burn_paste_is_not_consumed,
+        test_meta_with_null_content_hash_is_not_served,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -2780,6 +2785,284 @@ async fn test_unreadable_blob_returns_500_not_404() {
         resp.status(),
         500,
         "an unreadable blob must surface as a server error, not a 404 'not found'"
+    );
+}
+
+/// Lowercase hex SHA-256, the same encoding the server records in
+/// `content_sha256`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    <Sha256 as sha2::Digest>::digest(bytes)
+        .iter()
+        .fold(String::with_capacity(64), |mut s, b| {
+            use std::fmt::Write;
+            let _ = write!(s, "{:02x}", b);
+            s
+        })
+}
+
+/// Read the stored `paste:{id}` record from Valkey as a JSON object.
+async fn read_paste_record(
+    con: &mut redis::aio::ConnectionManager,
+    id: &str,
+) -> serde_json::Map<String, serde_json::Value> {
+    use redis::AsyncCommands;
+    let json: String = con
+        .get(format!("paste:{}", id))
+        .await
+        .expect("paste record missing from Valkey");
+    match serde_json::from_str(&json).expect("paste record is not JSON") {
+        serde_json::Value::Object(obj) => obj,
+        other => panic!("paste record is not a JSON object: {}", other),
+    }
+}
+
+/// Paste IDs are client-chosen. When a PIN paste's Valkey record expires, its
+/// blob stays on disk until the cleanup job runs. Anyone can then claim the
+/// same ID with a new paste that has no PIN. store_paste claims the key before
+/// the new blob replaces the old one, so a GET in that window sees the new
+/// record (no PIN) next to the OLD blob.
+///
+/// This test builds that window directly: it replaces the record with what
+/// store_paste writes for the attacker's paste (no PIN, hash of the
+/// attacker's bytes) and leaves the old blob on disk. The old ciphertext must
+/// not be served.
+async fn test_reclaimed_id_does_not_serve_stale_blob() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let old_content = b"old pin-protected ciphertext";
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        old_content,
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // The record an attacker's reclaiming paste would get: no PIN, and the
+    // hash of the attacker's (not yet written) blob.
+    let mut record = read_paste_record(&mut con, &id).await;
+    record.insert("has_pin".to_string(), serde_json::Value::Bool(false));
+    record.insert("pin_verifier".to_string(), serde_json::Value::Null);
+    record.insert(
+        "content_sha256".to_string(),
+        serde_json::Value::String(sha256_hex(b"attacker ciphertext")),
+    );
+    let key = format!("paste:{}", id);
+    let _: () = con.del(&key).await.unwrap();
+    let _: () = con
+        .set_ex(&key, serde_json::Value::Object(record).to_string(), 3600)
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "a blob that does not match the record's hash must not be served"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains(&general_purpose::STANDARD.encode(old_content)),
+        "response leaked the old PIN-protected ciphertext"
+    );
+}
+
+/// A blob on disk whose bytes differ from the hash recorded at create time
+/// must not be served.
+async fn test_blob_metadata_mismatch_returns_not_found() {
+    let (base_url, _con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::new();
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"encrypted data",
+        false,
+        3600,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // Blobs are stored at {storage_path}/{id[0..2]}/{id}.
+    let blob_path = storage_path.join(&id[..2]).join(&id);
+    assert!(blob_path.exists(), "blob not found at {:?}", blob_path);
+    let other_bytes = b"some other paste's ciphertext";
+    std::fs::write(&blob_path, other_bytes).expect("failed to overwrite blob");
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "a blob that does not match the record's hash must not be served"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains(&general_purpose::STANDARD.encode(other_bytes)),
+        "response served the mismatched blob"
+    );
+}
+
+/// Records written before `content_sha256` existed have no hash. They must
+/// still be served, or old pastes (including admin forever pastes) become
+/// unreadable.
+async fn test_legacy_meta_without_content_hash_is_still_served() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let content = b"legacy encrypted data";
+    let resp = create_paste(
+        &client, &base_url, "text", content, false, 3600, None, false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // Drop the hash field, keeping the key's TTL (KEEPTTL).
+    let mut record = read_paste_record(&mut con, &id).await;
+    assert!(
+        record.remove("content_sha256").is_some(),
+        "stored record should carry content_sha256"
+    );
+    let key = format!("paste:{}", id);
+    let _: () = redis::cmd("SET")
+        .arg(&key)
+        .arg(serde_json::Value::Object(record).to_string())
+        .arg("KEEPTTL")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(&key)
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(ttl > 0, "TTL was not kept (got {})", ttl);
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "legacy record must still be served");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let served = general_purpose::STANDARD
+        .decode(body["encrypted_content"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(served, content);
+}
+
+/// A GET that finds a blob not matching the record's hash must not consume a
+/// burn-after-reading paste. This happens, for example, when a GET lands after
+/// a new paste claims the ID but before its blob replaces a stale one. The
+/// record must stay in place, so the paste can be read once its real blob is
+/// on disk.
+async fn test_mismatched_burn_paste_is_not_consumed() {
+    let (base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::new();
+
+    let content = b"burn after reading ciphertext";
+    let resp = create_paste(&client, &base_url, "text", content, true, 3600, None, false).await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // Blobs are stored at {storage_path}/{id[0..2]}/{id}.
+    let blob_path = storage_path.join(&id[..2]).join(&id);
+    let original = std::fs::read(&blob_path).expect("failed to read blob");
+    std::fs::write(&blob_path, b"stale blob from an earlier paste")
+        .expect("failed to overwrite blob");
+
+    let url = format!("{}/api/paste/{}", base_url, id);
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 404, "a mismatched blob must not be served");
+
+    let exists: bool = redis::cmd("EXISTS")
+        .arg(format!("paste:{}", id))
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert!(exists, "a mismatched read must not consume the burn paste");
+
+    std::fs::write(&blob_path, &original).expect("failed to restore blob");
+
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 200, "restored paste must be served once");
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let served = general_purpose::STANDARD
+        .decode(body["encrypted_content"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(served, content);
+
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 404, "burn paste must be gone after one read");
+}
+
+/// A record whose `content_sha256` is JSON null is not a legacy record (those
+/// have no field at all). The check must fail closed and not serve it.
+async fn test_meta_with_null_content_hash_is_not_served() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"encrypted data",
+        false,
+        3600,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    // Set the hash field to JSON null, keeping the key's TTL (KEEPTTL).
+    let mut record = read_paste_record(&mut con, &id).await;
+    record.insert("content_sha256".to_string(), serde_json::Value::Null);
+    let _: () = redis::cmd("SET")
+        .arg(format!("paste:{}", id))
+        .arg(serde_json::Value::Object(record).to_string())
+        .arg("KEEPTTL")
+        .query_async(&mut con)
+        .await
+        .unwrap();
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "a record with a null content hash must not be served"
     );
 }
 
