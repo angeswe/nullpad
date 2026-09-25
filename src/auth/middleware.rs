@@ -18,6 +18,10 @@ pub struct AppState {
     pub config: Arc<Config>,
     /// Random 32-byte salt for HMAC-SHA256 hashing of client IPs in Valkey keys.
     pub ip_hmac_salt: Arc<[u8; 32]>,
+    /// One permit per paste body being streamed (`config.max_concurrent_blob_reads`).
+    /// A read that finds none free gets 503; the permit is released when the
+    /// response body is dropped.
+    pub blob_read_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// Authenticated session extractor.

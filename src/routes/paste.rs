@@ -6,15 +6,26 @@ use crate::models::{
     CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPaste, StoredPasteMeta,
 };
 use crate::storage;
+use crate::storage::blob::{BlobReadGuard, OpenedBlob};
 use axum::{
+    body::Body,
     extract::{ConnectInfo, Multipart, Path, State},
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{header, HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
 use base64::{engine::general_purpose, Engine as _};
+use std::io::Cursor;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use subtle::ConstantTimeEq;
+use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
+use tokio::sync::OwnedSemaphorePermit;
+use tokio_util::io::ReaderStream;
+
+/// Read size for streaming a paste frame to the client.
+const FRAME_STREAM_CHUNK_BYTES: usize = 64 * 1024;
 
 /// Request body for PIN-gated paste retrieval.
 #[derive(Debug, serde::Deserialize)]
@@ -286,15 +297,130 @@ pub async fn create_paste(
     Ok(Json(CreatePasteResponse { id: paste_id, url }))
 }
 
+/// Encode the part of a paste frame that comes before the content:
+/// a big-endian `u32` length `N`, then `N` bytes of JSON metadata.
+pub fn encode_frame_prefix(meta: &GetPasteResponse) -> Result<Vec<u8>, AppError> {
+    let json = serde_json::to_vec(meta).map_err(|e| {
+        tracing::error!(error = %e, "Failed to serialize paste metadata");
+        AppError::Internal("Failed to encode response".to_string())
+    })?;
+    let json_len = u32::try_from(json.len()).map_err(|_| {
+        tracing::error!("Paste metadata too large to frame");
+        AppError::Internal("Failed to encode response".to_string())
+    })?;
+    let mut prefix = Vec::with_capacity(4 + json.len());
+    prefix.extend_from_slice(&json_len.to_be_bytes());
+    prefix.extend_from_slice(&json);
+    Ok(prefix)
+}
+
+/// An `AsyncRead` that holds a blob read permit and the blob's read guard for
+/// as long as it lives.
+///
+/// Both are released when the response body is dropped: after the last byte
+/// is sent, or when the connection fails or times out. Until then, a delete
+/// of the blob does not overwrite the bytes being streamed.
+struct PermitReader<R> {
+    inner: R,
+    _permit: OwnedSemaphorePermit,
+    _blob_guard: BlobReadGuard,
+}
+
+impl<R: AsyncRead + Unpin> AsyncRead for PermitReader<R> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
+        // The status line and headers are already sent, so the client only
+        // sees a cut-off body. Log the cause here.
+        if let Poll::Ready(Err(e)) = &poll {
+            tracing::error!(error = %e, "Failed to read blob while streaming paste body");
+        }
+        poll
+    }
+}
+
+/// Build the 200 response for a paste GET or PIN attempt.
+///
+/// Wire format (`application/octet-stream`): a big-endian `u32` length `N`,
+/// then `N` bytes of JSON metadata, then the raw ciphertext. With no blob
+/// (the `needs_pin` probe) the frame has zero content bytes.
+///
+/// The blob is streamed from its open file handle in fixed-size chunks, so
+/// memory use does not depend on the paste size.
+pub fn paste_frame_response(
+    meta: &GetPasteResponse,
+    blob: Option<(OpenedBlob, OwnedSemaphorePermit)>,
+) -> Result<Response, AppError> {
+    let prefix = encode_frame_prefix(meta)?;
+    let content_len = blob.as_ref().map_or(0, |(opened, _)| opened.len);
+    let total_len = prefix.len() as u64 + content_len;
+
+    let body = match blob {
+        Some((opened, permit)) => {
+            let reader = PermitReader {
+                inner: Cursor::new(prefix).chain(opened.file.take(opened.len)),
+                _permit: permit,
+                _blob_guard: opened.guard,
+            };
+            Body::from_stream(ReaderStream::with_capacity(
+                reader,
+                FRAME_STREAM_CHUNK_BYTES,
+            ))
+        }
+        None => Body::from(prefix),
+    };
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header(header::CONTENT_LENGTH, total_len)
+        .body(body)
+        .map_err(|e| AppError::Internal(format!("Failed to build paste response: {}", e)))
+}
+
+/// Metadata part of the frame for a paste that is served with its content.
+fn served_paste_meta(meta: StoredPasteMeta) -> GetPasteResponse {
+    // Return encrypted_metadata for new pastes, legacy fields for old pastes
+    let encrypted_metadata = if meta.encrypted_metadata.is_empty() {
+        None
+    } else {
+        Some(meta.encrypted_metadata)
+    };
+    GetPasteResponse {
+        encrypted_metadata,
+        filename: meta.filename,
+        content_type: meta.content_type,
+        burn_after_reading: meta.burn_after_reading,
+        created_at: Some(meta.created_at),
+        needs_pin: None,
+    }
+}
+
+/// Take a blob read permit without waiting.
+///
+/// Returns 503 when every permit is in use. The permit travels with the
+/// response body and is released when the body is dropped.
+fn acquire_blob_read_permit(state: &AppState) -> Result<OwnedSemaphorePermit, AppError> {
+    state
+        .blob_read_permits
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| AppError::ServiceUnavailable("No blob read permit free".to_string()))
+}
+
 /// GET /api/paste/:id — Get paste
 ///
 /// Fetches encrypted paste. If burn_after_reading, deletes atomically.
+/// A 200 body is a paste frame (see [`paste_frame_response`]).
 pub async fn get_paste(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
 
     let mut con = state.redis.clone();
@@ -318,17 +444,20 @@ pub async fn get_paste(
         .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
     if meta.has_pin {
-        // PIN-gated: return probe response without content
-        return Ok(Json(GetPasteResponse {
-            encrypted_content: None,
+        // PIN-gated: probe frame without content. No blob is read, so no
+        // permit is taken.
+        let probe = GetPasteResponse {
             encrypted_metadata: None,
             filename: None,
             content_type: None,
             burn_after_reading: meta.burn_after_reading,
             created_at: None,
             needs_pin: Some(true),
-        }));
+        };
+        return paste_frame_response(&probe, None);
     }
+
+    let permit = acquire_blob_read_permit(&state)?;
 
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.
@@ -341,22 +470,7 @@ pub async fn get_paste(
     .await?
     .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
-    // Return encrypted_metadata for new pastes, legacy fields for old pastes
-    let encrypted_metadata = if paste.meta.encrypted_metadata.is_empty() {
-        None
-    } else {
-        Some(paste.meta.encrypted_metadata)
-    };
-
-    Ok(Json(GetPasteResponse {
-        encrypted_content: Some(general_purpose::STANDARD.encode(&paste.encrypted_content)),
-        encrypted_metadata,
-        filename: paste.meta.filename,
-        content_type: paste.meta.content_type,
-        burn_after_reading: paste.meta.burn_after_reading,
-        created_at: Some(paste.meta.created_at),
-        needs_pin: None,
-    }))
+    paste_frame_response(&served_paste_meta(paste.meta), Some((paste.blob, permit)))
 }
 
 /// POST /api/paste/:id — Attempt to retrieve a PIN-gated paste
@@ -364,14 +478,19 @@ pub async fn get_paste(
 /// Rate limited per IP per paste. Returns full content for PIN-gated pastes.
 /// Returns 404 if paste doesn't exist or isn't PIN-gated.
 /// Burns paste on first attempt if burn_after_reading is true.
+/// A 200 body is a paste frame (see [`paste_frame_response`]).
 pub async fn attempt_paste(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Path(id): Path<String>,
     Json(body): Json<PinAttemptRequest>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     super::validate_id(&id, "paste ID", 12)?;
+
+    // Take the blob read permit before any PIN attempt counter is touched, so
+    // a busy server (503) never uses up a caller's PIN attempts.
+    let permit = acquire_blob_read_permit(&state)?;
 
     let mut con = state.redis.clone();
 
@@ -455,21 +574,7 @@ pub async fn attempt_paste(
     .await?
     .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
-    let encrypted_metadata = if paste.meta.encrypted_metadata.is_empty() {
-        None
-    } else {
-        Some(paste.meta.encrypted_metadata)
-    };
-
-    Ok(Json(GetPasteResponse {
-        encrypted_content: Some(general_purpose::STANDARD.encode(&paste.encrypted_content)),
-        encrypted_metadata,
-        filename: paste.meta.filename,
-        content_type: paste.meta.content_type,
-        burn_after_reading: paste.meta.burn_after_reading,
-        created_at: Some(paste.meta.created_at),
-        needs_pin: None,
-    }))
+    paste_frame_response(&served_paste_meta(paste.meta), Some((paste.blob, permit)))
 }
 
 /// DELETE /api/paste/:id — Delete paste (admin only)
@@ -492,4 +597,29 @@ pub async fn delete_paste(
     tracing::info!(action = "paste_deleted", paste_id = %id, "Admin deleted paste");
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_prefix_layout() {
+        let meta = GetPasteResponse {
+            encrypted_metadata: Some("bWV0YQ==".to_string()),
+            filename: None,
+            content_type: None,
+            burn_after_reading: true,
+            created_at: Some(1_700_000_000),
+            needs_pin: None,
+        };
+
+        let prefix = encode_frame_prefix(&meta).unwrap();
+
+        let json_len = u32::from_be_bytes(prefix[..4].try_into().unwrap()) as usize;
+        assert_eq!(json_len, prefix.len() - 4);
+        let json: serde_json::Value = serde_json::from_slice(&prefix[4..]).unwrap();
+        assert!(json.get("burn_after_reading").is_some());
+        assert!(json.get("encrypted_content").is_none());
+    }
 }
