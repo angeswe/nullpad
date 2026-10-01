@@ -124,6 +124,33 @@
     }
   }
 
+  /**
+   * Split a paste response body into its metadata and ciphertext.
+   * Layout: 4-byte big-endian length N, then N bytes of UTF-8 JSON metadata,
+   * then the raw ciphertext (may be empty, e.g. for a needs_pin response).
+   * @param {ArrayBuffer} buffer - the full response body
+   * @returns {{meta: Object, content: Uint8Array}}
+   * @throws {Error} if the frame is truncated or the metadata is not JSON
+   */
+  function parsePasteFrame(buffer) {
+    if (buffer.byteLength < 4) {
+      throw new Error('Invalid paste frame: shorter than its length prefix');
+    }
+    const metaLen = new DataView(buffer).getUint32(0, false);
+    if (metaLen > buffer.byteLength - 4) {
+      throw new Error('Invalid paste frame: metadata is truncated');
+    }
+    const metaBytes = new Uint8Array(buffer, 4, metaLen);
+    let meta;
+    try {
+      meta = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(metaBytes));
+    } catch (err) {
+      throw new Error('Invalid paste frame: metadata is not valid JSON: ' + err.message, { cause: err });
+    }
+    const content = new Uint8Array(buffer, 4 + metaLen);
+    return { meta, content };
+  }
+
   const NullpadUtils = Object.freeze({
     sanitizeFilename,
     shouldRenderMarkdown,
@@ -132,7 +159,8 @@
     canOfferShare,
     shareUrl,
     pasteViewUrl,
-    hasBurnHint
+    hasBurnHint,
+    parsePasteFrame
   });
 
   Object.defineProperty(window, 'NullpadUtils', {

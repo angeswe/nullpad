@@ -49,6 +49,10 @@ jobs:
         run: cargo test --locked --test integration -- --test-threads=1
         env:
           VALKEY_URL: redis://:ci-test-pass@127.0.0.1:6379
+      - name: Paste GET memory regression test
+        run: cargo test --locked --test get_paste_response_memory
+        env:
+          VALKEY_URL: redis://:ci-test-pass@127.0.0.1:6379
 
   lint:
     name: Lint

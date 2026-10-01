@@ -49,11 +49,13 @@ pub struct CreatePasteResponse {
     pub url: String,
 }
 
-/// Response when fetching a paste.
+/// Metadata returned when fetching a paste.
+///
+/// The paste GET and PIN attempt endpoints send this as the JSON part of a
+/// binary frame; the raw ciphertext follows it in the same body (see
+/// `routes::paste::paste_frame_response`). It never carries the content.
 #[derive(Debug, Serialize)]
 pub struct GetPasteResponse {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub encrypted_content: Option<String>, // base64
     /// Encrypted metadata blob (new pastes). Empty for legacy pastes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub encrypted_metadata: Option<String>,

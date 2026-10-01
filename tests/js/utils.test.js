@@ -20,7 +20,8 @@ function loadNullpadUtils() {
   // URLSearchParams is a WHATWG global, not part of the ECMAScript globals a
   // fresh vm context gets by default, but hasBurnHint (like view.js's own
   // parseUrl) relies on it — pass Node's implementation through.
-  vm.runInNewContext(src, { window, URLSearchParams });
+  // TextDecoder is also a WHATWG global; parsePasteFrame uses it.
+  vm.runInNewContext(src, { window, URLSearchParams, TextDecoder });
   return window.NullpadUtils;
 }
 
@@ -31,7 +32,8 @@ const {
   canOfferShare,
   shareUrl,
   pasteViewUrl,
-  hasBurnHint
+  hasBurnHint,
+  parsePasteFrame
 } = loadNullpadUtils();
 
 test('shouldRenderMarkdown returns true for text/markdown', () => {
@@ -222,4 +224,67 @@ test('shareUrl rejects an empty URL without calling share', async () => {
   // Name check, not instanceof: the error is the vm realm's TypeError.
   await assert.rejects(shareUrl(nav, ''), (err) => err.name === 'TypeError');
   assert.equal(calls, 0);
+});
+
+// ============================================================================
+// parsePasteFrame: u32 big-endian JSON length, JSON meta, then ciphertext
+// ============================================================================
+
+// Build a paste frame the way the server does.
+function buildPasteFrame(meta, content) {
+  const json = new TextEncoder().encode(JSON.stringify(meta));
+  const buf = new ArrayBuffer(4 + json.length + content.length);
+  new DataView(buf).setUint32(0, json.length, false);
+  new Uint8Array(buf, 4, json.length).set(json);
+  new Uint8Array(buf, 4 + json.length).set(content);
+  return buf;
+}
+
+test('parsePasteFrame returns meta and content', () => {
+  const content = new Uint8Array([1, 2, 3, 250, 0, 255]);
+  const frame = buildPasteFrame(
+    { encrypted_metadata: 'bWV0YQ', burn_after_reading: true, created_at: 1700000000 },
+    content
+  );
+  const parsed = parsePasteFrame(frame);
+  assert.equal(parsed.meta.encrypted_metadata, 'bWV0YQ');
+  assert.equal(parsed.meta.burn_after_reading, true);
+  assert.equal(parsed.meta.created_at, 1700000000);
+  // Compare as plain arrays: the Uint8Array comes from the vm realm.
+  assert.deepEqual(Array.from(parsed.content), Array.from(content));
+});
+
+test('parsePasteFrame throws on truncated frame', () => {
+  const frame = buildPasteFrame({ needs_pin: true }, new Uint8Array(0));
+  // Cut the JSON short: the length prefix now claims more bytes than exist.
+  const truncated = frame.slice(0, frame.byteLength - 2);
+  assert.throws(() => parsePasteFrame(truncated), (err) => /paste frame/i.test(err.message));
+});
+
+test('parsePasteFrame throws on buffer shorter than 4 bytes', () => {
+  assert.throws(() => parsePasteFrame(new ArrayBuffer(3)), (err) => /paste frame/i.test(err.message));
+});
+
+test('parsePasteFrame keeps the JSON parse error', () => {
+  const badJson = '{"needs_pin": tru';
+  let syntaxError;
+  try {
+    JSON.parse(badJson);
+  } catch (err) {
+    syntaxError = err;
+  }
+  const json = new TextEncoder().encode(badJson);
+  const frame = new ArrayBuffer(4 + json.length);
+  new DataView(frame).setUint32(0, json.length, false);
+  new Uint8Array(frame, 4).set(json);
+
+  assert.throws(() => parsePasteFrame(frame), (err) => {
+    assert.ok(
+      err.message.includes(syntaxError.message),
+      `message should contain "${syntaxError.message}", got "${err.message}"`
+    );
+    // The cause comes from the vm realm, so check its name, not instanceof.
+    assert.equal(err.cause && err.cause.name, 'SyntaxError');
+    return true;
+  });
 });

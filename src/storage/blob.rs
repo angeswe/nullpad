@@ -10,9 +10,190 @@
 //! Uses directory sharding (first 2 chars of ID) to avoid too many files in one directory.
 
 use crate::util::NANOID_CHARSET;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::os::unix::fs::{FileExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 use tokio::fs;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+
+/// Chunk size for hashing a blob without loading it into memory.
+const HASH_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Chunk size for overwriting a deleted blob.
+const WIPE_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Identity of a blob file: `(device, inode)`. It stays the same while any
+/// handle to the file is open, even after the path is unlinked.
+type InodeKey = (u64, u64);
+
+fn inode_key(meta: &std::fs::Metadata) -> InodeKey {
+    (meta.dev(), meta.ino())
+}
+
+/// Open readers of one blob file, and the overwrite that waits for them.
+struct ReaderEntry {
+    readers: usize,
+    /// Set by [`delete_blob`] when it unlinked the file while readers were
+    /// open: the write handle and the number of bytes to overwrite.
+    pending_wipe: Option<(std::fs::File, u64)>,
+}
+
+/// Blob files that GET responses are streaming, keyed by inode.
+///
+/// [`delete_blob`] overwrites a blob in place. A response streaming the same
+/// file would then send the overwritten bytes, so the overwrite waits until
+/// the last reader of that file is dropped. An entry exists only while its
+/// reader count is above zero. The lock is never held across an `.await` or
+/// across file I/O.
+static BLOB_READERS: LazyLock<Mutex<HashMap<InodeKey, ReaderEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Lock the reader registry. A poisoned lock is used anyway: nothing panics
+/// while holding it, and losing a reader count would skip or misplace a wipe.
+fn blob_readers() -> MutexGuard<'static, HashMap<InodeKey, ReaderEntry>> {
+    BLOB_READERS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Registers one open reader of a blob file.
+///
+/// While it lives, [`delete_blob`] unlinks the file but does not overwrite
+/// it. Dropping the last guard of a deleted file runs the overwrite.
+#[derive(Debug)]
+pub struct BlobReadGuard {
+    key: InodeKey,
+}
+
+impl BlobReadGuard {
+    fn register(key: InodeKey) -> Self {
+        blob_readers()
+            .entry(key)
+            .or_insert(ReaderEntry {
+                readers: 0,
+                pending_wipe: None,
+            })
+            .readers += 1;
+        Self { key }
+    }
+}
+
+impl Drop for BlobReadGuard {
+    fn drop(&mut self) {
+        let pending = {
+            let mut readers = blob_readers();
+            let Some(entry) = readers.get_mut(&self.key) else {
+                return;
+            };
+            entry.readers -= 1;
+            if entry.readers > 0 {
+                return;
+            }
+            readers
+                .remove(&self.key)
+                .and_then(|entry| entry.pending_wipe)
+        };
+        let Some((file, len)) = pending else {
+            return;
+        };
+
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                // A Drop cannot await. The watcher task logs how the wipe ended.
+                drop(spawn_deferred_wipe(&handle, move || wipe_file(file, len)));
+            }
+            Err(_) => {
+                if let Err(e) = wipe_file(file, len) {
+                    tracing::error!(error = %e, "Failed to overwrite deleted blob");
+                }
+            }
+        }
+    }
+}
+
+/// Run a deferred wipe on the blocking pool, and log how it ended.
+///
+/// A watcher task on the same runtime waits for the wipe. It logs an I/O
+/// error, a panic, or a cancelled wipe. It does not log the panic message.
+/// The watcher never fails, and it keeps running if the caller drops the
+/// returned handle.
+fn spawn_deferred_wipe(
+    handle: &tokio::runtime::Handle,
+    wipe: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+) -> tokio::task::JoinHandle<()> {
+    let blocking = handle.spawn_blocking(wipe);
+    handle.spawn(async move {
+        match blocking.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::error!(error = %e, "Failed to overwrite deleted blob"),
+            Err(e) if e.is_panic() => tracing::error!("Overwrite of deleted blob panicked"),
+            Err(_) => tracing::error!("Overwrite of deleted blob was cancelled"),
+        }
+    })
+}
+
+/// Overwrite the first `len` bytes of `file` with random bytes, then sync it.
+///
+/// Random bytes, not zeros: a filesystem that compresses or detects zero
+/// blocks can store zeros as holes without writing over the old data.
+/// Writes are positional, so the handle's offset does not matter. Memory use
+/// is one fixed-size chunk, whatever the blob size.
+fn wipe_file(file: std::fs::File, len: u64) -> std::io::Result<()> {
+    let mut buf = vec![0u8; WIPE_CHUNK_BYTES];
+    let mut offset = 0u64;
+    while offset < len {
+        let n = (len - offset).min(WIPE_CHUNK_BYTES as u64) as usize;
+        rand::fill(&mut buf[..n]);
+        file.write_all_at(&buf[..n], offset)?;
+        offset += n as u64;
+    }
+    file.sync_all()
+}
+
+/// Whether `path` still names the file identified by `key`.
+///
+/// False if the path is gone or names another file (a delete unlinked it, or
+/// a new blob was renamed onto it). The path itself is checked; a symlink is
+/// not followed.
+async fn path_names_inode(path: &Path, key: InodeKey) -> Result<bool, BlobError> {
+    match fs::symlink_metadata(path).await {
+        Ok(meta) => Ok(inode_key(&meta) == key),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// Lowercase hex of a SHA-256 digest, the format of
+/// `StoredPasteMeta::content_sha256`.
+fn sha256_hex(digest: &[u8]) -> String {
+    digest.iter().fold(String::with_capacity(64), |mut s, b| {
+        use std::fmt::Write;
+        let _ = write!(s, "{:02x}", b);
+        s
+    })
+}
+
+/// Lowercase hex SHA-256 of blob bytes, the format of
+/// `StoredPasteMeta::content_sha256`.
+pub(crate) fn content_sha256_hex(content: &[u8]) -> String {
+    sha256_hex(&Sha256::digest(content))
+}
+
+/// A blob opened for streaming.
+///
+/// `file` is positioned at the start. `sha256_hex` is the hash of the whole
+/// file, computed when it was opened. The open file handle keeps the content
+/// readable even if the path is unlinked or replaced by rename afterwards.
+///
+/// `guard` keeps a [`delete_blob`] of this file from overwriting it. Keep it
+/// alive until `file` has been streamed, then drop it.
+#[derive(Debug)]
+pub struct OpenedBlob {
+    pub file: fs::File,
+    pub len: u64,
+    pub sha256_hex: String,
+    pub guard: BlobReadGuard,
+}
 
 /// Error type for blob operations.
 #[derive(Debug, thiserror::Error)]
@@ -189,43 +370,90 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
     Ok(())
 }
 
-/// Read a blob from disk with a size limit.
+/// Open a blob for streaming, with a size limit.
 ///
-/// Returns None if the blob doesn't exist.
-/// `max_bytes` caps how large a blob we'll read (prevents OOM from corrupt files).
-pub async fn read_blob(
+/// Returns `Ok(None)` if the blob doesn't exist. `max_bytes` caps how large a
+/// blob we'll serve (a corrupt or oversized file is `BlobError::TooLarge`).
+///
+/// The file is hashed in fixed-size chunks, so memory use does not depend on
+/// the blob size, then rewound to the start.
+///
+/// The handle is registered as a reader (see [`BlobReadGuard`]) before it is
+/// hashed. If the path no longer names the opened file once registered, the
+/// blob is treated as missing.
+pub async fn open_blob(
     storage_path: &Path,
     id: &str,
     max_bytes: u64,
-) -> Result<Option<Vec<u8>>, BlobError> {
+) -> Result<Option<OpenedBlob>, BlobError> {
     let canonical_storage = canonicalize_storage_root(storage_path)?;
     let verified_path = match resolve_blob_path(&canonical_storage, id)? {
         Some(p) => p,
         None => return Ok(None),
     };
 
-    let file = fs::File::open(&verified_path).await?;
+    let mut file = match fs::File::open(&verified_path).await {
+        Ok(f) => f,
+        // Unlinked between resolve and open (burn or delete by another request).
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
     let metadata = file.metadata().await?;
-    let file_size = metadata.len();
+    let len = metadata.len();
 
-    if file_size > max_bytes {
+    if len > max_bytes {
         return Err(BlobError::TooLarge(format!(
             "Blob too large: {} bytes exceeds {}",
-            file_size, max_bytes
+            len, max_bytes
         )));
     }
 
-    let mut content = Vec::with_capacity(file_size as usize);
-    let mut reader = file;
-    reader.read_to_end(&mut content).await?;
-    Ok(Some(content))
+    let key = inode_key(&metadata);
+    let guard = BlobReadGuard::register(key);
+
+    // delete_blob unlinks the path before it checks the registry. If it
+    // checked before this reader registered, the path is already gone (or
+    // names a newer blob) here, and its overwrite may be running: back out.
+    if !path_names_inode(&verified_path, key).await? {
+        return Ok(None);
+    }
+
+    // Hash exactly `len` bytes: those are the bytes the caller will stream.
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; HASH_CHUNK_BYTES];
+    let mut remaining = len;
+    while remaining > 0 {
+        let want = (remaining as usize).min(HASH_CHUNK_BYTES);
+        let n = file.read(&mut buf[..want]).await?;
+        if n == 0 {
+            return Err(BlobError::Io(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Blob shorter than its reported size",
+            )));
+        }
+        hasher.update(&buf[..n]);
+        remaining -= n as u64;
+    }
+    file.rewind().await?;
+
+    Ok(Some(OpenedBlob {
+        file,
+        len,
+        sha256_hex: sha256_hex(&hasher.finalize()),
+        guard,
+    }))
 }
 
 /// Delete a blob from disk.
 ///
-/// Overwrites the file content with random bytes before unlinking to prevent
-/// recovery via disk forensics. While the content is AES-256-GCM ciphertext
+/// Unlinks the path, then overwrites the file content with random bytes to
+/// prevent recovery via disk forensics. While the content is AES-256-GCM ciphertext
 /// (unusable without the key), secure deletion strengthens the zero-knowledge posture.
+///
+/// If a response is still streaming the file (it holds a [`BlobReadGuard`]),
+/// the overwrite waits until the last such reader is dropped, so the reader
+/// sends the original bytes. Otherwise the overwrite finishes before this
+/// function returns.
 ///
 /// Returns true if the blob was deleted, false if it didn't exist.
 pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobError> {
@@ -235,28 +463,38 @@ pub async fn delete_blob(storage_path: &Path, id: &str) -> Result<bool, BlobErro
         None => return Ok(false),
     };
 
-    // Overwrite with random bytes in fixed-size chunks before unlinking.
-    // Chunked approach bounds memory usage regardless of file size.
-    let metadata = fs::metadata(&verified_path).await?;
-    let file_size = metadata.len();
-    if file_size > 0 {
-        let mut file = fs::OpenOptions::new()
-            .write(true)
-            .open(&verified_path)
-            .await?;
-        const CHUNK: usize = 64 * 1024;
-        let mut buf = vec![0u8; CHUNK];
-        let mut remaining = file_size;
-        while remaining > 0 {
-            let n = (remaining as usize).min(CHUNK);
-            rand::fill(&mut buf[..n]);
-            file.write_all(&buf[..n]).await?;
-            remaining -= n as u64;
-        }
-        file.sync_all().await?;
-    }
+    // The overwrite goes through this handle, so it reaches the file even
+    // after the path is unlinked.
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&verified_path)
+        .await?;
+    let metadata = file.metadata().await?;
+    let key = inode_key(&metadata);
+    let len = metadata.len();
+    let file = file.into_std().await;
 
+    // Unlink before checking for readers. A reader that registers after the
+    // check finds the path gone in open_blob and does not stream the file.
     fs::remove_file(&verified_path).await?;
+
+    let wipe_now = {
+        let mut readers = blob_readers();
+        match readers.get_mut(&key) {
+            Some(entry) => {
+                // The last reader to be dropped runs the overwrite.
+                entry.pending_wipe = Some((file, len));
+                None
+            }
+            None => Some(file),
+        }
+    };
+
+    if let Some(file) = wipe_now {
+        tokio::task::spawn_blocking(move || wipe_file(file, len))
+            .await
+            .map_err(std::io::Error::other)??;
+    }
     Ok(true)
 }
 
@@ -279,20 +517,79 @@ mod tests {
         write_blob(storage_path, id, content).await.unwrap();
 
         // Read
-        let read_content = read_blob(storage_path, id, 1024 * 1024).await.unwrap();
-        assert_eq!(read_content, Some(content.to_vec()));
+        let mut opened = open_blob(storage_path, id, 1024 * 1024)
+            .await
+            .unwrap()
+            .expect("blob should exist");
+        let mut read_content = Vec::new();
+        opened.file.read_to_end(&mut read_content).await.unwrap();
+        assert_eq!(read_content, content.to_vec());
 
         // Delete
         let deleted = delete_blob(storage_path, id).await.unwrap();
         assert!(deleted);
 
         // Read after delete
-        let read_content = read_blob(storage_path, id, 1024 * 1024).await.unwrap();
-        assert_eq!(read_content, None);
+        let opened = open_blob(storage_path, id, 1024 * 1024).await.unwrap();
+        assert!(opened.is_none());
 
         // Delete again (should return false)
         let deleted = delete_blob(storage_path, id).await.unwrap();
         assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn open_blob_hash_matches_content_sha256_hex() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        // Larger than one 64 KiB hash chunk and not a multiple of it.
+        let content: Vec<u8> = (0..200_003u32).map(|i| (i % 251) as u8).collect();
+        let id = "oh123456789012";
+        write_blob(storage_path, id, &content).await.unwrap();
+
+        let mut opened = open_blob(storage_path, id, 1024 * 1024)
+            .await
+            .unwrap()
+            .expect("blob should exist");
+        assert_eq!(opened.len, content.len() as u64);
+        assert_eq!(opened.sha256_hex, content_sha256_hex(&content));
+
+        let mut read_back = Vec::new();
+        opened.file.read_to_end(&mut read_back).await.unwrap();
+        assert_eq!(read_back, content);
+    }
+
+    #[tokio::test]
+    async fn open_blob_rejects_oversize() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let id = "os123456789012";
+        write_blob(storage_path, id, &[7u8; 100]).await.unwrap();
+
+        let result = open_blob(storage_path, id, 99).await;
+        assert!(
+            matches!(result, Err(BlobError::TooLarge(_))),
+            "Expected TooLarge, got {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn open_blob_missing_returns_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let result = open_blob(storage_path, "nx123456789012", 1024).await;
+        assert!(
+            matches!(result, Ok(None)),
+            "Expected Ok(None), got {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -506,7 +803,7 @@ mod tests {
 
         // Attempt to read via the symlink - should fail because resolved path
         // is outside storage directory
-        let result = read_blob(storage_path, "symlink_attack", 1024 * 1024).await;
+        let result = open_blob(storage_path, "symlink_attack", 1024 * 1024).await;
         assert!(
             matches!(result, Err(BlobError::InvalidId(_))),
             "Expected InvalidId for symlink attack, got {:?}",
@@ -577,6 +874,168 @@ mod tests {
 
         // File should be gone
         assert!(!blob_path.exists());
+    }
+
+    /// Read a whole file from the start through a handle the test holds.
+    fn read_from_start(file: &mut std::fs::File) -> Vec<u8> {
+        use std::io::{Read, Seek};
+        file.rewind().unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        bytes
+    }
+
+    /// Blob content with a repeating byte pattern. No byte is zero.
+    fn patterned_content(len: u32) -> Vec<u8> {
+        (0..len).map(|i| (i % 251) as u8 + 1).collect()
+    }
+
+    /// Check that `read_back` is a full overwrite of `original`.
+    ///
+    /// Holds when the lengths match, every 4 KiB block differs from the
+    /// original block at the same offset (the last block may be shorter), and
+    /// the bytes are not all zeros. Otherwise returns the first condition that
+    /// failed.
+    fn check_overwritten(original: &[u8], read_back: &[u8]) -> Result<(), String> {
+        const BLOCK_BYTES: usize = 4096;
+        if read_back.len() != original.len() {
+            return Err(format!(
+                "read-back length {} differs from original length {}",
+                read_back.len(),
+                original.len()
+            ));
+        }
+        if let Some(i) = original
+            .chunks(BLOCK_BYTES)
+            .zip(read_back.chunks(BLOCK_BYTES))
+            .position(|(before, after)| before == after)
+        {
+            return Err(format!(
+                "block {i} at offset {} still matches the original",
+                i * BLOCK_BYTES
+            ));
+        }
+        if read_back.iter().all(|&b| b == 0) {
+            return Err("read-back is all zeros".to_string());
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_blob_defers_wipe_while_reader_open() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let id = "dw123456789012";
+        let content = patterned_content(200_003);
+        write_blob(storage_path, id, &content).await.unwrap();
+        let blob_path = storage_path.join(&id[..2]).join(id);
+
+        let mut opened = open_blob(storage_path, id, 1024 * 1024)
+            .await
+            .unwrap()
+            .expect("blob should exist");
+        let mut observer = std::fs::File::open(&blob_path).unwrap();
+
+        assert!(delete_blob(storage_path, id).await.unwrap());
+        assert!(!blob_path.exists(), "delete must unlink the path at once");
+
+        let mut streamed = Vec::new();
+        opened.file.read_to_end(&mut streamed).await.unwrap();
+        assert!(
+            streamed == content,
+            "a delete must not change the bytes a reader is still streaming"
+        );
+
+        drop(opened);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let bytes = read_from_start(&mut observer);
+            let Err(why) = check_overwritten(&content, &bytes) else {
+                break;
+            };
+            assert!(
+                std::time::Instant::now() < deadline,
+                "blob was not fully overwritten within 5 s of the last reader closing: {why}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_blob_wipes_now_without_readers() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let id = "dn123456789012";
+        let content = patterned_content(200_003);
+        write_blob(storage_path, id, &content).await.unwrap();
+        let blob_path = storage_path.join(&id[..2]).join(id);
+
+        // A plain handle, not open_blob: no reader is registered.
+        let mut observer = std::fs::File::open(&blob_path).unwrap();
+
+        assert!(delete_blob(storage_path, id).await.unwrap());
+        assert!(!blob_path.exists(), "delete must unlink the path");
+
+        let bytes = read_from_start(&mut observer);
+        if let Err(why) = check_overwritten(&content, &bytes) {
+            panic!(
+                "with no reader open, delete must overwrite the whole blob before returning: {why}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_wipe_panic_is_contained() {
+        let handle = tokio::runtime::Handle::current();
+
+        let watcher = spawn_deferred_wipe(&handle, || panic!("deferred wipe test panic"));
+        assert!(
+            watcher.await.is_ok(),
+            "a panic in the deferred wipe must be caught and logged, not propagated"
+        );
+
+        let watcher = spawn_deferred_wipe(&handle, || Ok(()));
+        assert!(
+            watcher.await.is_ok(),
+            "a deferred wipe that succeeds must leave the watcher finished cleanly"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_blob_returns_none_when_path_no_longer_matches_fd() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let id = "rc123456789012";
+        write_blob(storage_path, id, b"first blob").await.unwrap();
+        let blob_path = storage_path.join(&id[..2]).join(id);
+
+        // Held open for the whole test, so its inode number cannot be reused.
+        let held = std::fs::File::open(&blob_path).unwrap();
+        let key = inode_key(&held.metadata().unwrap());
+
+        assert!(
+            path_names_inode(&blob_path, key).await.unwrap(),
+            "the path still names the open file"
+        );
+
+        std::fs::remove_file(&blob_path).unwrap();
+        assert!(
+            !path_names_inode(&blob_path, key).await.unwrap(),
+            "an unlinked path no longer names the open file"
+        );
+
+        // write_blob renames a new file onto the path.
+        write_blob(storage_path, id, b"second blob").await.unwrap();
+        assert!(
+            !path_names_inode(&blob_path, key).await.unwrap(),
+            "a path renamed onto names a different file"
+        );
     }
 
     #[tokio::test]

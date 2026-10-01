@@ -150,8 +150,10 @@
         throw new Error(errorMessage);
       }
 
-      const data = await response.json();
-      encryptedData = data.encrypted_content;
+      // A 200 body is a paste frame: JSON metadata, then raw ciphertext bytes
+      // (none when the paste needs a PIN).
+      const { meta: data, content } = NullpadUtils.parsePasteFrame(await response.arrayBuffer());
+      encryptedData = content;
       metadata = {
         burn: data.burn_after_reading || false,
         filename: data.filename || null,
@@ -189,11 +191,11 @@
       throw new Error(msg || 'Failed to fetch paste');
     }
 
-    const data = await response.json();
-    if (!data.encrypted_content) {
+    const { meta: data, content } = NullpadUtils.parsePasteFrame(await response.arrayBuffer());
+    if (content.byteLength === 0) {
       throw new Error('Server returned incomplete response');
     }
-    encryptedData = data.encrypted_content;
+    encryptedData = content;
     metadata = {
       burn: data.burn_after_reading || false,
       filename: data.filename || null,
@@ -214,8 +216,7 @@
   async function decryptPaste(pin = null) {
     try {
       // Validate encrypted data minimum length before attempting decryption
-      const decoded = NullpadCrypto.base64Decode(encryptedData);
-      if (decoded.length < MIN_ENCRYPTED_BYTES) {
+      if (!encryptedData || encryptedData.byteLength < MIN_ENCRYPTED_BYTES) {
         throw new Error('Encrypted data too short');
       }
 

@@ -8,21 +8,16 @@
 //! - `{storage_path}/{id[0..2]}/{id}` — encrypted content
 
 use crate::models::{StoredPaste, StoredPasteMeta};
-use crate::storage::blob;
+use crate::storage::blob::{self, content_sha256_hex, OpenedBlob};
 use redis::{AsyncCommands, FromRedisValue};
-use sha2::{Digest, Sha256};
 use std::path::Path;
 
-/// Lowercase hex SHA-256 of blob bytes, the format of
-/// `StoredPasteMeta::content_sha256`.
-fn content_sha256_hex(content: &[u8]) -> String {
-    Sha256::digest(content)
-        .iter()
-        .fold(String::with_capacity(64), |mut s, b| {
-            use std::fmt::Write;
-            let _ = write!(s, "{:02x}", b);
-            s
-        })
+/// A paste whose record was read (and, for burn-after-reading, consumed) and
+/// whose blob is open for streaming.
+#[derive(Debug)]
+pub struct OpenedPaste {
+    pub meta: StoredPasteMeta,
+    pub blob: OpenedBlob,
 }
 
 /// Store a paste: claim ID in Valkey first (SETNX), then write content to disk.
@@ -174,7 +169,7 @@ where
 fn classify_blob_read_error(
     id: &str,
     err: blob::BlobError,
-) -> Result<Option<StoredPaste>, redis::RedisError> {
+) -> Result<Option<OpenedPaste>, redis::RedisError> {
     match err {
         blob::BlobError::InvalidId(_) => {
             tracing::warn!(
@@ -200,17 +195,18 @@ pub async fn get_paste_atomic<C>(
     storage_path: &Path,
     id: &str,
     max_blob_bytes: u64,
-) -> Result<Option<StoredPaste>, redis::RedisError>
+) -> Result<Option<OpenedPaste>, redis::RedisError>
 where
     C: AsyncCommands,
 {
     let key = format!("paste:{}", id);
 
-    // Step 1: Read blob from disk BEFORE touching metadata.
+    // Step 1: Open and hash the blob BEFORE touching metadata.
     // This ensures content is available before we atomically delete
-    // metadata for burn-after-reading pastes.
-    let encrypted_content = match blob::read_blob(storage_path, id, max_blob_bytes).await {
-        Ok(Some(content)) => content,
+    // metadata for burn-after-reading pastes. The open file handle is what
+    // gets streamed, so the bytes sent are the bytes hashed here.
+    let opened = match blob::open_blob(storage_path, id, max_blob_bytes).await {
+        Ok(Some(opened)) => opened,
         Ok(None) => {
             let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(con).await?;
             if exists {
@@ -236,7 +232,6 @@ where
     //
     // Replies: nil = no record; integer 0 = mismatch, nothing deleted;
     // string = the record JSON.
-    let blob_sha256 = content_sha256_hex(&encrypted_content);
     let script = redis::Script::new(
         r#"
         local val = redis.call('GET', KEYS[1])
@@ -262,7 +257,7 @@ where
         .key(&key)
         .arg(id)
         .arg("user_pastes:")
-        .arg(&blob_sha256)
+        .arg(&opened.sha256_hex)
         .invoke_async(con)
         .await?;
 
@@ -281,17 +276,16 @@ where
 
     let meta: StoredPasteMeta = serde_json::from_str(&data).map_err(super::json_deserialize_err)?;
 
-    // Step 3: For burn-after-reading, delete the blob now
+    // Step 3: For burn-after-reading, delete the blob now. The read guard in
+    // `opened` is registered, so the path is unlinked now and the content is
+    // overwritten only after the response has finished streaming it.
     if meta.burn_after_reading {
         if let Err(e) = blob::delete_blob(storage_path, id).await {
             tracing::error!(paste_id = %id, error = %e, "Failed to delete burn blob");
         }
     }
 
-    Ok(Some(StoredPaste {
-        meta,
-        encrypted_content,
-    }))
+    Ok(Some(OpenedPaste { meta, blob: opened }))
 }
 
 /// Delete a paste from Valkey and disk, cleaning up the owner's user_pastes SET.

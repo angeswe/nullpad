@@ -8,13 +8,15 @@
 //! container leaks — `static` containers never drop, so previous versions leaked
 //! one Docker container per test process.
 
+use axum::serve::ListenerExt;
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 #[allow(unused_imports)]
 use futures::FutureExt;
 use hmac::{Hmac, KeyInit, Mac};
 use nullpad::{
-    auth::middleware::AppState, config::Config, middleware::security_headers, routes, storage,
+    auth::middleware::AppState, config::Config, listener::WriteTimeoutListener,
+    middleware::security_headers, routes, storage,
 };
 use reqwest::multipart;
 use sha2::Sha256;
@@ -86,6 +88,7 @@ async fn main() {
 
     let (passed, failed) = run_tests![
         test_create_and_get_paste,
+        test_get_paste_returns_framed_octet_stream,
         test_burn_after_reading,
         test_paste_not_found,
         test_public_paste_type_restriction,
@@ -140,6 +143,10 @@ async fn main() {
         test_legacy_meta_without_content_hash_is_still_served,
         test_mismatched_burn_paste_is_not_consumed,
         test_meta_with_null_content_hash_is_not_served,
+        test_concurrent_blob_reads_bounded,
+        test_stalled_blob_reader_released_by_write_timeout,
+        test_pin_attempt_503_does_not_consume_pin_attempt,
+        test_admin_delete_during_stream_keeps_streamed_bytes,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -182,6 +189,10 @@ struct TestServerOverrides {
     rate_limit_pin_attempt_global: u32,
     /// Number of trusted proxies (affects which XFF entry is used as client IP).
     trusted_proxy_count: usize,
+    /// Paste bodies the server streams at once before answering 503.
+    max_concurrent_blob_reads: usize,
+    /// Seconds a blocked socket write may last before the connection drops.
+    write_timeout_secs: u64,
 }
 
 impl Default for TestServerOverrides {
@@ -191,6 +202,8 @@ impl Default for TestServerOverrides {
             rate_limit_pin_attempt: 10000,
             rate_limit_pin_attempt_global: 10000,
             trusted_proxy_count: 0,
+            max_concurrent_blob_reads: 32,
+            write_timeout_secs: 60,
         }
     }
 }
@@ -238,6 +251,8 @@ async fn spawn_test_server_configured(
         valkey_url: test_valkey_url.clone(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         max_upload_bytes: 52_428_800,
+        max_concurrent_blob_reads: overrides.max_concurrent_blob_reads,
+        write_timeout_secs: overrides.write_timeout_secs,
         default_ttl_secs: 86400,
         max_ttl_secs: 604800,
         invite_ttl_secs: 43200,
@@ -257,6 +272,9 @@ async fn spawn_test_server_configured(
 
     let state = AppState {
         redis: valkey_manager,
+        blob_read_permits: Arc::new(tokio::sync::Semaphore::new(
+            config.max_concurrent_blob_reads,
+        )),
         config: Arc::new(config),
         ip_hmac_salt: Arc::new(rand::random()),
     };
@@ -270,6 +288,12 @@ async fn spawn_test_server_configured(
         .await
         .expect("Failed to bind");
     let addr = listener.local_addr().unwrap();
+    // Same listener as main.rs. The no-op tap_io keeps ConnectInfo working.
+    let listener = WriteTimeoutListener::new(
+        listener,
+        std::time::Duration::from_secs(overrides.write_timeout_secs),
+    )
+    .tap_io(|_| {});
 
     tokio::spawn(async move {
         axum::serve(
@@ -378,6 +402,21 @@ fn test_pin_verifier(key: &[u8], paste_id: &str) -> String {
     general_purpose::STANDARD.encode(mac.finalize().into_bytes())
 }
 
+/// Split a paste GET / PIN attempt 200 body into its JSON metadata and its
+/// raw content bytes. The frame is a big-endian u32 length N, then N bytes of
+/// JSON, then the content. Panics on a malformed frame.
+fn parse_paste_frame(bytes: &[u8]) -> (serde_json::Value, Vec<u8>) {
+    assert!(bytes.len() >= 4, "frame shorter than its length prefix");
+    let json_len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    assert!(
+        json_len <= bytes.len() - 4,
+        "frame metadata length exceeds the body"
+    );
+    let meta: serde_json::Value =
+        serde_json::from_slice(&bytes[4..4 + json_len]).expect("frame metadata is not JSON");
+    (meta, bytes[4 + json_len..].to_vec())
+}
+
 /// `paste_type` should be "text" or "file".
 #[allow(clippy::too_many_arguments)]
 async fn create_paste(
@@ -472,15 +511,49 @@ async fn test_create_and_get_paste() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let (body, content) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert!(body["encrypted_metadata"].as_str().is_some());
     assert!(!body["burn_after_reading"].as_bool().unwrap());
-
-    // Decode content
-    let content = general_purpose::STANDARD
-        .decode(body["encrypted_content"].as_str().unwrap())
-        .unwrap();
     assert_eq!(content, b"encrypted data");
+}
+
+async fn test_get_paste_returns_framed_octet_stream() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let uploaded: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
+    let resp = create_paste(
+        &client, &base_url, "text", &uploaded, false, 3600, None, false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap();
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()[reqwest::header::CONTENT_TYPE],
+        "application/octet-stream"
+    );
+    let content_length: usize = resp.headers()[reqwest::header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let bytes = resp.bytes().await.unwrap();
+    let json_len = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    assert_eq!(content_length, 4 + json_len + uploaded.len());
+
+    let (meta, content) = parse_paste_frame(&bytes);
+    assert!(meta.get("burn_after_reading").is_some());
+    assert!(meta.get("encrypted_content").is_none());
+    assert_eq!(content, uploaded);
 }
 
 async fn test_burn_after_reading() {
@@ -505,8 +578,9 @@ async fn test_burn_after_reading() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let (body, content) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert!(body["burn_after_reading"].as_bool().unwrap());
+    assert_eq!(content, b"burn me");
 
     // Second read should fail (already burned)
     let resp = client
@@ -2112,9 +2186,13 @@ async fn test_pin_gated_get_returns_needs_pin() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let (body, content) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert_eq!(body["needs_pin"], true);
     assert!(body.get("encrypted_content").is_none());
+    assert!(
+        content.is_empty(),
+        "needs_pin response must carry no content"
+    );
     assert!(body.get("created_at").is_none());
     assert!(body.get("burn_after_reading").is_some());
 }
@@ -2150,8 +2228,8 @@ async fn test_pin_gated_attempt_returns_content() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["encrypted_content"].is_string());
+    let (body, content) = parse_paste_frame(&resp.bytes().await.unwrap());
+    assert_eq!(content, b"secret data");
     assert!(body["created_at"].is_number());
     assert!(body.get("needs_pin").is_none());
 }
@@ -2359,7 +2437,7 @@ async fn test_pin_gated_burn_consumed_on_attempt() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let (body, _content) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert_eq!(body["needs_pin"], true);
     assert_eq!(body["burn_after_reading"], true);
 
@@ -2374,8 +2452,8 @@ async fn test_pin_gated_burn_consumed_on_attempt() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["encrypted_content"].is_string());
+    let (_body, content) = parse_paste_frame(&resp.bytes().await.unwrap());
+    assert_eq!(content, b"burn secret");
 
     // Second GET should return 404 (burned)
     let resp = client
@@ -2447,8 +2525,8 @@ async fn test_non_pin_get_unchanged() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert!(body["encrypted_content"].is_string());
+    let (body, content) = parse_paste_frame(&resp.bytes().await.unwrap());
+    assert_eq!(content, b"normal data");
     assert!(body["created_at"].is_number());
     assert!(body.get("needs_pin").is_none());
 }
@@ -2873,9 +2951,9 @@ async fn test_reclaimed_id_does_not_serve_stale_blob() {
         404,
         "a blob that does not match the record's hash must not be served"
     );
-    let body = resp.text().await.unwrap();
+    let body = resp.bytes().await.unwrap();
     assert!(
-        !body.contains(&general_purpose::STANDARD.encode(old_content)),
+        !body.windows(old_content.len()).any(|w| w == old_content),
         "response leaked the old PIN-protected ciphertext"
     );
 }
@@ -2918,9 +2996,9 @@ async fn test_blob_metadata_mismatch_returns_not_found() {
         404,
         "a blob that does not match the record's hash must not be served"
     );
-    let body = resp.text().await.unwrap();
+    let body = resp.bytes().await.unwrap();
     assert!(
-        !body.contains(&general_purpose::STANDARD.encode(other_bytes)),
+        !body.windows(other_bytes.len()).any(|w| w == other_bytes),
         "response served the mismatched blob"
     );
 }
@@ -2968,10 +3046,7 @@ async fn test_legacy_meta_without_content_hash_is_still_served() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "legacy record must still be served");
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let served = general_purpose::STANDARD
-        .decode(body["encrypted_content"].as_str().unwrap())
-        .unwrap();
+    let (_meta, served) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert_eq!(served, content);
 }
 
@@ -3012,10 +3087,7 @@ async fn test_mismatched_burn_paste_is_not_consumed() {
 
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), 200, "restored paste must be served once");
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let served = general_purpose::STANDARD
-        .decode(body["encrypted_content"].as_str().unwrap())
-        .unwrap();
+    let (_meta, served) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert_eq!(served, content);
 
     let resp = client.get(&url).send().await.unwrap();
@@ -3123,4 +3195,246 @@ async fn test_verify_sets_np_session_cookie() {
         cookie.contains("SameSite=Strict"),
         "cookie should be SameSite=Strict"
     );
+}
+
+// ============================================================================
+// Blob Read Concurrency Tests
+// ============================================================================
+
+/// Size of the paste used to hold a blob read permit. Much larger than the
+/// socket buffers, so a response whose body is not read stays in progress.
+const LARGE_PASTE_BYTES: usize = 40 * 1024 * 1024;
+
+/// Store a non-PIN paste of `len` bytes straight through the storage layer
+/// and return its ID. The test router keeps axum's default 2 MB request body
+/// limit, so a paste this large cannot be created over HTTP here.
+async fn store_large_paste(
+    con: &mut redis::aio::ConnectionManager,
+    storage_path: &std::path::Path,
+    len: usize,
+) -> String {
+    let id = nanoid::nanoid!(12);
+    let paste = nullpad::models::StoredPaste {
+        meta: nullpad::models::StoredPasteMeta {
+            id: id.clone(),
+            encrypted_metadata: general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
+            paste_type: nullpad::models::PasteType::default(),
+            filename: None,
+            content_type: None,
+            burn_after_reading: false,
+            created_at: 0,
+            owner_id: None,
+            has_pin: false,
+            pin_verifier: None,
+            content_sha256: None,
+        },
+        encrypted_content: vec![0x5a; len],
+    };
+    storage::paste::store_paste(con, storage_path, &paste, 3600, 604800)
+        .await
+        .expect("Failed to store large paste");
+    id
+}
+
+/// Send a request until the response is not 503, and return that response.
+/// Panics if every response within `limit` is 503.
+async fn retry_while_503<F, Fut>(limit: std::time::Duration, mut send: F) -> reqwest::Response
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = reqwest::Result<reqwest::Response>>,
+{
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let resp = send().await.unwrap();
+        if resp.status() != 503 {
+            return resp;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "request still got 503 after {:?}",
+            limit
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+/// GET `url` until it returns 200. Panics if that takes longer than `limit`.
+async fn wait_for_get_200(
+    client: &reqwest::Client,
+    url: &str,
+    limit: std::time::Duration,
+) -> reqwest::Response {
+    let resp = retry_while_503(limit, || client.get(url).send()).await;
+    assert_eq!(resp.status(), 200, "GET did not return 200");
+    resp
+}
+
+async fn test_concurrent_blob_reads_bounded() {
+    let (base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_concurrent_blob_reads: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let id = store_large_paste(&mut con, &storage_path, LARGE_PASTE_BYTES).await;
+    let url = format!("{}/api/paste/{}", base_url, id);
+
+    // Takes the only permit: headers received, body left unread.
+    let held = client.get(&url).send().await.unwrap();
+    assert_eq!(held.status(), 200);
+
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        503,
+        "a read with no free permit must get 503"
+    );
+
+    drop(held);
+    let resp = wait_for_get_200(&client, &url, std::time::Duration::from_secs(10)).await;
+    drop(resp);
+}
+
+async fn test_stalled_blob_reader_released_by_write_timeout() {
+    let (base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_concurrent_blob_reads: 1,
+            write_timeout_secs: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    let id = store_large_paste(&mut con, &storage_path, LARGE_PASTE_BYTES).await;
+    let url = format!("{}/api/paste/{}", base_url, id);
+
+    // Kept alive and never read: the server's writes to it stall.
+    let held = client.get(&url).send().await.unwrap();
+    assert_eq!(held.status(), 200);
+
+    let resp = wait_for_get_200(&client, &url, std::time::Duration::from_secs(10)).await;
+    drop(resp);
+    drop(held);
+}
+
+async fn test_pin_attempt_503_does_not_consume_pin_attempt() {
+    let (base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_concurrent_blob_reads: 1,
+            rate_limit_pin_attempt: 1,
+            rate_limit_pin_attempt_global: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+
+    let pin_content = b"pin protected ciphertext";
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        pin_content,
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let pin_id = body["id"].as_str().unwrap().to_string();
+    let verifier = test_pin_verifier(&test_dummy_key(), &pin_id);
+    let attempt_url = format!("{}/api/paste/{}", base_url, pin_id);
+    let attempt = || {
+        client
+            .post(&attempt_url)
+            .header("Content-Type", "application/json")
+            .body(serde_json::json!({ "pin_verifier": verifier }).to_string())
+            .send()
+    };
+
+    // Hold the only permit with an unread GET of a large paste.
+    let large_id = store_large_paste(&mut con, &storage_path, LARGE_PASTE_BYTES).await;
+    let held = client
+        .get(format!("{}/api/paste/{}", base_url, large_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(held.status(), 200);
+
+    let resp = attempt().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        503,
+        "a PIN attempt with no free permit must get 503"
+    );
+
+    drop(held);
+
+    // The permit is freed once the server sees the dropped connection. A 503
+    // while that happens is retried: it must not count as a PIN attempt.
+    let resp = retry_while_503(std::time::Duration::from_secs(10), attempt).await;
+    assert_eq!(
+        resp.status(),
+        200,
+        "the 503 attempt must not have used up the PIN attempt limit"
+    );
+    let (_meta, content) = parse_paste_frame(&resp.bytes().await.unwrap());
+    assert_eq!(content, pin_content);
+}
+
+async fn test_admin_delete_during_stream_keeps_streamed_bytes() {
+    let (base_url, mut con, admin_key, admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    // Stored through the storage layer: see store_large_paste.
+    let len = 8 * 1024 * 1024;
+    let id = store_large_paste(&mut con, &storage_path, len).await;
+    let url = format!("{}/api/paste/{}", base_url, id);
+
+    // Start the stream: headers and the first chunk only.
+    let mut resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let mut body = resp
+        .chunk()
+        .await
+        .unwrap()
+        .expect("body should have a first chunk")
+        .to_vec();
+
+    let del = client
+        .delete(&url)
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(del.status(), 204, "admin delete should succeed mid-stream");
+
+    while let Some(chunk) = resp.chunk().await.unwrap() {
+        body.extend_from_slice(&chunk);
+    }
+    let (_meta, content) = parse_paste_frame(&body);
+    assert_eq!(content.len(), len);
+    let changed = content.iter().filter(|&&b| b != 0x5a).count();
+    assert_eq!(
+        changed, 0,
+        "a delete must not change the bytes of a paste that is still streaming"
+    );
+
+    let resp = client.get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 404);
 }

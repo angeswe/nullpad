@@ -16,6 +16,12 @@ pub struct Config {
 
     // Limits
     pub max_upload_bytes: usize,
+    /// How many paste bodies can be streamed at once. A paste GET or PIN
+    /// attempt that finds no free slot gets 503.
+    pub max_concurrent_blob_reads: usize,
+    /// Seconds a socket write may stay blocked before the connection is
+    /// dropped. Frees the blob read slot held by a client that stops reading.
+    pub write_timeout_secs: u64,
 
     // TTLs (in seconds)
     pub default_ttl_secs: u64,
@@ -53,6 +59,8 @@ impl std::fmt::Debug for Config {
             .field("valkey_url", &"[REDACTED]")
             .field("bind_addr", &self.bind_addr)
             .field("max_upload_bytes", &self.max_upload_bytes)
+            .field("max_concurrent_blob_reads", &self.max_concurrent_blob_reads)
+            .field("write_timeout_secs", &self.write_timeout_secs)
             .field("default_ttl_secs", &self.default_ttl_secs)
             .field("max_ttl_secs", &self.max_ttl_secs)
             .field("invite_ttl_secs", &self.invite_ttl_secs)
@@ -155,6 +163,20 @@ impl Config {
 
         // Limits
         let max_upload_bytes = parse_env_or_default("MAX_UPLOAD_BYTES", 52_428_800)?;
+        let max_concurrent_blob_reads = parse_env_or_default("MAX_CONCURRENT_BLOB_READS", 32)?;
+        if max_concurrent_blob_reads == 0 {
+            return Err(ConfigError::InvalidValue(
+                "MAX_CONCURRENT_BLOB_READS".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+        let write_timeout_secs = parse_env_or_default("WRITE_TIMEOUT_SECS", 60)?;
+        if write_timeout_secs == 0 {
+            return Err(ConfigError::InvalidValue(
+                "WRITE_TIMEOUT_SECS".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
 
         // TTLs
         let default_ttl_secs = parse_env_or_default("DEFAULT_TTL_SECS", 86_400)?;
@@ -206,6 +228,8 @@ impl Config {
             valkey_url,
             bind_addr,
             max_upload_bytes,
+            max_concurrent_blob_reads,
+            write_timeout_secs,
             default_ttl_secs,
             max_ttl_secs,
             invite_ttl_secs,
@@ -273,6 +297,8 @@ mod tests {
         env::remove_var("MAX_SESSIONS_PER_USER");
         env::remove_var("MAX_PASTES_PER_USER");
         env::remove_var("PASTE_STORAGE_PATH");
+        env::remove_var("MAX_CONCURRENT_BLOB_READS");
+        env::remove_var("WRITE_TIMEOUT_SECS");
     }
 
     #[test]
@@ -533,6 +559,46 @@ mod tests {
         assert_eq!(
             config.paste_storage_path,
             std::path::PathBuf::from("/data/pastes")
+        );
+        clear_test_env();
+    }
+
+    #[test]
+    fn max_concurrent_blob_reads_default_and_zero_rejected() {
+        let _guard = lock_test();
+        clear_test_env();
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.max_concurrent_blob_reads, 32);
+
+        env::set_var("MAX_CONCURRENT_BLOB_READS", "0");
+        let err = Config::from_env().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidValue(ref s, _) if s == "MAX_CONCURRENT_BLOB_READS"),
+            "expected InvalidValue for MAX_CONCURRENT_BLOB_READS, got {:?}",
+            err
+        );
+        clear_test_env();
+    }
+
+    #[test]
+    fn write_timeout_secs_default_and_zero_rejected() {
+        let _guard = lock_test();
+        clear_test_env();
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+
+        let config = Config::from_env().unwrap();
+        assert_eq!(config.write_timeout_secs, 60);
+
+        env::set_var("WRITE_TIMEOUT_SECS", "0");
+        let err = Config::from_env().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidValue(ref s, _) if s == "WRITE_TIMEOUT_SECS"),
+            "expected InvalidValue for WRITE_TIMEOUT_SECS, got {:?}",
+            err
         );
         clear_test_env();
     }

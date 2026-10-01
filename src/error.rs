@@ -28,6 +28,11 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    /// The server has no capacity for this request right now (for example,
+    /// every blob read permit is in use). The message is not sent to the client.
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
+
     #[error("Rate limited")]
     RateLimited {
         /// Seconds until the rate limit window resets (for Retry-After header).
@@ -51,6 +56,14 @@ impl IntoResponse for AppError {
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            AppError::ServiceUnavailable(msg) => {
+                // Log the reason server-side, return generic message to client
+                tracing::warn!(error = %msg, "Service unavailable");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Server busy, try again".to_string(),
+                )
+            }
             AppError::RateLimited { .. } => (
                 StatusCode::TOO_MANY_REQUESTS,
                 "Rate limit exceeded".to_string(),
