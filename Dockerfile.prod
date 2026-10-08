@@ -33,25 +33,17 @@ RUN mkdir -p src tests && \
 COPY src ./src
 RUN cargo build --release --locked --target aarch64-unknown-linux-gnu
 
-# Stage 2: Runtime (arm64 — platform set by buildx)
-# To update: docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
-FROM debian:bookworm-slim@sha256:74d56e3931e0d5a1dd51f8c8a2466d21de84a271cd3b5a733b803aa91abf4421
+# Stage 2: Assets — regenerate SRI hashes and stamp the build version.
+# Needs bash, perl and openssl, so it runs on a full Debian image. Nothing from
+# this stage ships except /app and /data.
+# To update: docker buildx imagetools inspect debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS assets
 
-# Install runtime dependencies and apply security updates
 RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends ca-certificates && \
+    apt-get install -y --no-install-recommends openssl && \
     rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -r nullpad && \
-    useradd -r -g nullpad -s /bin/false nullpad
-
-# Create app directory
 WORKDIR /app
-
-# Copy binary from builder (cross-compiled)
-COPY --from=builder /build/target/aarch64-unknown-linux-gnu/release/nullpad /app/nullpad
 
 # Copy static files, protected pages, and build-time scripts
 COPY static /app/static
@@ -68,24 +60,30 @@ COPY tools/lib/script-tags.pl /app/tools/lib/script-tags.pl
 # fails the build.
 ARG BUILD_VERSION=dev
 
-# Regenerate SRI hashes and stamp build version, then remove openssl
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends openssl && \
-    bash /app/tools/update-sri.sh && \
+RUN bash /app/tools/update-sri.sh && \
     bash /app/tools/stamp-build-version.sh "${BUILD_VERSION}" && \
     rm -rf /app/tools && \
-    apt-get purge -y openssl && \
-    apt-get autoremove -y && \
-    rm -rf /var/lib/apt/lists/*
+    chmod -R a+rX /app/static /app/protected && \
+    mkdir -p /data/pastes
 
-# Create paste storage directory
-RUN mkdir -p /data/pastes
+# Stage 3: Runtime (arm64 — platform set by buildx)
+# Distroless: glibc, libgcc, CA certificates and nothing else. No shell, no
+# package manager, no perl/util-linux/ncurses, so the OS packages that trivy
+# flags in a debian-slim base are not present at all.
+# The binary is linked against bookworm's glibc 2.36; trixie's 2.41 is
+# backward compatible.
+# To update: docker buildx imagetools inspect gcr.io/distroless/cc-debian13:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:e792ab3d241a468a4fd7519ddbbebe66b49b5f365771716ea688ad40b6c6f1c2
 
-# Ensure static and protected files are world-readable and change ownership
-RUN chmod -R a+rX /app/static /app/protected && chown -R nullpad:nullpad /app /data
+WORKDIR /app
 
-# Switch to non-root user
-USER nullpad
+COPY --from=builder /build/target/aarch64-unknown-linux-gnu/release/nullpad /app/nullpad
+COPY --from=assets --chown=nonroot:nonroot /app/static /app/static
+COPY --from=assets --chown=nonroot:nonroot /app/protected /app/protected
+COPY --from=assets --chown=nonroot:nonroot /data /data
+
+# Non-root user built into the distroless image (uid/gid 65532)
+USER nonroot
 
 # Expose port
 EXPOSE 3000
