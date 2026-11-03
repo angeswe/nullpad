@@ -196,13 +196,17 @@ CI runs `tools/verify-vendor.sh` twice: once offline (the same check anyone runs
 > allowlisting a large SVG surface in DOMPurify, which conflicts with the
 > zero-knowledge/strict-CSP security posture.
 
-## API Endpoints
+## HTTP Routes
+
+These routes serve the web client. Paste and auth requests expect payloads that are already encrypted or signed in the browser, so they are not a general-purpose API for curl.
 
 ### Public
 
 - `GET /healthz` — Health check (returns Valkey connectivity status)
+- `GET /api/config` — Server limits for the client (max upload size)
 - `POST /api/paste` — Create encrypted paste
 - `GET /api/paste/{id}` — Retrieve paste (deletes if burn-after-reading)
+- `POST /api/paste/{id}` — Submit PIN verifier for a PIN-protected paste (rate limited)
 - `POST /api/auth/challenge` — Request authentication nonce
 - `POST /api/auth/verify` — Submit signed challenge
 - `POST /api/auth/logout` — Invalidate current session
