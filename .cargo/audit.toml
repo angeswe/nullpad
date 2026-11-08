@@ -2,6 +2,10 @@
 # See: https://rustsec.org/
 
 [advisories]
-# No ignores. RUSTSEC-2025-0134 (rustls-pemfile, dev-only via testcontainers)
-# was ignored here until the crate left the dependency tree; re-justify from
-# scratch if an ignore is ever needed again.
+# RUSTSEC-2026-0440: astral-tokio-tar is unmaintained. It is not a reported
+# vulnerability. It reaches the tree only as a dev-dependency, through
+# testcontainers, which the integration tests use to start Valkey. No release
+# drops it: testcontainers 0.28.0 still requires astral-tokio-tar ^0.6.1, and
+# testcontainers-modules 0.15.0 is the latest. Remove this ignore when
+# `cargo tree -i astral-tokio-tar` prints nothing.
+ignore = ["RUSTSEC-2026-0440"]
