@@ -92,7 +92,6 @@ pub struct StoredPasteMeta {
     pub burn_after_reading: bool,
     pub created_at: u64,
     pub owner_id: Option<String>,
-    #[serde(default)]
     pub has_pin: Option<bool>,
     /// HMAC-SHA256(derived_key, paste_id) — server-side PIN verifier (base64).
     #[serde(default)]

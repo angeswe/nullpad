@@ -1287,10 +1287,7 @@ async fn test_register_rejects_small_order_pubkey() {
     let invite_token = nanoid::nanoid!(16);
     let invite = nullpad::models::StoredInvite {
         token: invite_token.clone(),
-        created_at: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
+        created_at: nullpad::util::now_secs(),
     };
     nullpad::storage::user::store_invite(&mut con, &invite, 3600)
         .await

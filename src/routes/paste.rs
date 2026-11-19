@@ -564,8 +564,16 @@ pub async fn attempt_paste(
         .await?
         .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
-    if meta.has_pin != Some(true) {
-        return Err(AppError::NotFound("Paste not found".to_string()));
+    match meta.has_pin {
+        Some(true) => {}
+        Some(false) => return Err(AppError::NotFound("Paste not found".to_string())),
+        None => {
+            tracing::warn!(
+                action = "legacy_paste_refused",
+                "Paste record has no has_pin field"
+            );
+            return Err(AppError::NotFound("Paste not found".to_string()));
+        }
     }
 
     // Verify PIN: constant-time compare submitted verifier against stored verifier

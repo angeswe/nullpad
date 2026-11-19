@@ -8,6 +8,15 @@ const vm = require('node:vm');
 
 const ROOT = path.join(__dirname, '..', '..');
 
+function loadRealCrypto() {
+  const sandbox = { window: {}, crypto: globalThis.crypto, TextEncoder, TextDecoder, Uint8Array, btoa, atob };
+  sandbox.window = sandbox;
+  for (const file of ['base64.js', 'crypto.js']) {
+    vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'static', 'js', file), 'utf8'), sandbox);
+  }
+  return sandbox.NullpadCrypto;
+}
+
 function loadNullpadUtils() {
   const src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'utils.js'), 'utf8');
   const sandbox = { window: {}, URLSearchParams };
@@ -145,4 +154,4 @@ function loadViewJs(locationOverrides, sandboxOverrides) {
   return { elements, createdElements, fetchCalls, consoleCalls, historyCalls, windowListeners, reloadCalls };
 }
 
-module.exports = { loadNullpadUtils, loadViewJs };
+module.exports = { loadNullpadUtils, loadRealCrypto, loadViewJs };

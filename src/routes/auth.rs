@@ -2,7 +2,7 @@
 
 use crate::auth::middleware::{AppState, AuthSession};
 use crate::auth::session::{generate_challenge_nonce, generate_session_token};
-use crate::auth::verify::verify_signature;
+use crate::auth::verify::{parse_pubkey, verify_signature};
 use crate::error::AppError;
 use crate::models::{
     ChallengeRequest, ChallengeResponse, RegisterRequest, Role, StoredChallenge, StoredSession,
@@ -18,19 +18,23 @@ use axum::{
 use base64::{engine::general_purpose, Engine as _};
 use std::net::SocketAddr;
 
+fn unauthorized() -> AppError {
+    AppError::Unauthorized("Authentication failed".to_string())
+}
+
 fn auth_failed(log_message: &str) -> AppError {
     tracing::warn!(action = "auth_failed", "{log_message}");
-    AppError::Unauthorized("Authentication failed".to_string())
+    unauthorized()
 }
 
 fn signature_verdict(result: Result<bool, AppError>) -> Result<(), AppError> {
     match result {
         Ok(true) => Ok(()),
         Ok(false) => Err(auth_failed("Invalid signature")),
-        Err(AppError::BadRequest(_)) => Err(auth_failed("Stored pubkey rejected")),
+        Err(AppError::BadRequest(_)) => Err(auth_failed("Signature verification rejected input")),
         Err(e) => {
             tracing::error!(action = "auth_failed", error = %e, "Signature verification error");
-            Err(AppError::Unauthorized("Authentication failed".to_string()))
+            Err(unauthorized())
         }
     }
 }
@@ -148,7 +152,7 @@ pub async fn verify_challenge(
         .decode(&req.signature)
         .is_ok_and(|bytes| bytes.len() == 64);
     if !signature_well_formed {
-        return Err(auth_failed("Invalid signature"));
+        return Err(auth_failed("Malformed signature"));
     }
 
     // Get and delete challenge (single-use)
@@ -239,8 +243,8 @@ pub async fn register(
     // Validate invite token format
     super::validate_id(&req.token, "invite token", 16)?;
 
-    // Validate pubkey FIRST (before touching Valkey): must be valid base64, 32 bytes, a valid Ed25519 public key, and not small-order
-    crate::auth::verify::parse_pubkey(&req.pubkey)?;
+    // Validate pubkey before touching Valkey
+    parse_pubkey(&req.pubkey)?;
 
     // Create user ID upfront (needed for Lua script)
     let user_id = nanoid::nanoid!(12);

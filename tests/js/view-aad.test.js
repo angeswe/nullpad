@@ -6,22 +6,9 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
-const vm = require('node:vm');
-const { loadNullpadUtils, loadViewJs } = require('./view-harness.js');
+const { loadNullpadUtils, loadRealCrypto, loadViewJs } = require('./view-harness.js');
 
-const ROOT = path.join(__dirname, '..', '..');
 const PASTE_ID = 'abcdefghijkl';
-
-function loadRealCrypto() {
-  const sandbox = { window: {}, crypto: globalThis.crypto, TextEncoder, TextDecoder, Uint8Array, btoa, atob };
-  sandbox.window = sandbox;
-  for (const file of ['base64.js', 'crypto.js']) {
-    vm.runInNewContext(fs.readFileSync(path.join(ROOT, 'static', 'js', file), 'utf8'), sandbox);
-  }
-  return sandbox.NullpadCrypto;
-}
 
 async function viewPasteEncryptedWith(aad) {
   const NullpadCrypto = loadRealCrypto();
