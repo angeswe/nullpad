@@ -107,6 +107,9 @@ pub struct StoredPasteMeta {
     /// struct.
     #[serde(default)]
     pub content_sha256: Option<String>,
+    /// Wrong PIN attempts over the paste's life. Written only by the PIN attempt scripts.
+    #[serde(default)]
+    pub pin_failures: u32,
 }
 
 // ============================================================================

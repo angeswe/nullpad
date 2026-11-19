@@ -40,7 +40,8 @@ pub struct Config {
     pub rate_limit_paste_per_min: u32,
     pub rate_limit_auth_per_min: u32,
     pub rate_limit_pin_attempt: u32,
-    pub rate_limit_pin_attempt_global: u32,
+    pub pin_max_failures: u32,
+    pub pin_max_failures_per_ip: u32,
 
     // Proxy
     pub trusted_proxy_count: usize,
@@ -80,10 +81,8 @@ impl std::fmt::Debug for Config {
             .field("rate_limit_paste_per_min", &self.rate_limit_paste_per_min)
             .field("rate_limit_auth_per_min", &self.rate_limit_auth_per_min)
             .field("rate_limit_pin_attempt", &self.rate_limit_pin_attempt)
-            .field(
-                "rate_limit_pin_attempt_global",
-                &self.rate_limit_pin_attempt_global,
-            )
+            .field("pin_max_failures", &self.pin_max_failures)
+            .field("pin_max_failures_per_ip", &self.pin_max_failures_per_ip)
             .field("trusted_proxy_count", &self.trusted_proxy_count)
             .field("max_sessions_per_user", &self.max_sessions_per_user)
             .field("max_pastes_per_user", &self.max_pastes_per_user)
@@ -210,8 +209,20 @@ impl Config {
         let rate_limit_paste_per_min = parse_env_or_default("RATE_LIMIT_PASTE_PER_MIN", 10)?;
         let rate_limit_auth_per_min = parse_env_or_default("RATE_LIMIT_AUTH_PER_MIN", 5)?;
         let rate_limit_pin_attempt = parse_env_or_default("RATE_LIMIT_PIN_ATTEMPT", 5)?;
-        let rate_limit_pin_attempt_global =
-            parse_env_or_default("RATE_LIMIT_PIN_ATTEMPT_GLOBAL", 30)?;
+        let pin_max_failures = parse_env_or_default("PIN_MAX_FAILURES", 30)?;
+        if pin_max_failures == 0 {
+            return Err(ConfigError::InvalidValue(
+                "PIN_MAX_FAILURES".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
+        let pin_max_failures_per_ip = parse_env_or_default("PIN_MAX_FAILURES_PER_IP", 5)?;
+        if pin_max_failures_per_ip == 0 {
+            return Err(ConfigError::InvalidValue(
+                "PIN_MAX_FAILURES_PER_IP".to_string(),
+                "must be at least 1".to_string(),
+            ));
+        }
 
         // Proxy configuration
         let trusted_proxy_count = parse_env_or_default("TRUSTED_PROXY_COUNT", 0)?;
@@ -261,7 +272,8 @@ impl Config {
             rate_limit_paste_per_min,
             rate_limit_auth_per_min,
             rate_limit_pin_attempt,
-            rate_limit_pin_attempt_global,
+            pin_max_failures,
+            pin_max_failures_per_ip,
             trusted_proxy_count,
             max_sessions_per_user,
             max_pastes_per_user,
@@ -313,7 +325,8 @@ mod tests {
         env::remove_var("RATE_LIMIT_PASTE_PER_MIN");
         env::remove_var("RATE_LIMIT_AUTH_PER_MIN");
         env::remove_var("RATE_LIMIT_PIN_ATTEMPT");
-        env::remove_var("RATE_LIMIT_PIN_ATTEMPT_GLOBAL");
+        env::remove_var("PIN_MAX_FAILURES");
+        env::remove_var("PIN_MAX_FAILURES_PER_IP");
         env::remove_var("TRUSTED_PROXY_COUNT");
         env::remove_var("MAX_SESSIONS_PER_USER");
         env::remove_var("MAX_PASTES_PER_USER");
@@ -573,7 +586,6 @@ mod tests {
         env::set_var("RATE_LIMIT_PASTE_PER_MIN", "10");
         env::set_var("RATE_LIMIT_AUTH_PER_MIN", "5");
         env::set_var("RATE_LIMIT_PIN_ATTEMPT", "5");
-        env::set_var("RATE_LIMIT_PIN_ATTEMPT_GLOBAL", "30");
         env::set_var("MAX_SESSIONS_PER_USER", "5");
         env::set_var("MAX_PASTES_PER_USER", "50");
 
@@ -594,7 +606,8 @@ mod tests {
         assert_eq!(config.rate_limit_paste_per_min, 10);
         assert_eq!(config.rate_limit_auth_per_min, 5);
         assert_eq!(config.rate_limit_pin_attempt, 5);
-        assert_eq!(config.rate_limit_pin_attempt_global, 30);
+        assert_eq!(config.pin_max_failures, 30);
+        assert_eq!(config.pin_max_failures_per_ip, 5);
         assert_eq!(config.max_sessions_per_user, 5);
         assert_eq!(config.max_pastes_per_user, 50);
         assert_eq!(config.anon_max_bytes, 262_172);
@@ -641,6 +654,38 @@ mod tests {
         assert!(
             matches!(err, ConfigError::InvalidValue(ref s, _) if s == "WRITE_TIMEOUT_SECS"),
             "expected InvalidValue for WRITE_TIMEOUT_SECS, got {:?}",
+            err
+        );
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_pin_max_failures_zero_rejected() {
+        let _guard = lock_test();
+        clear_test_env();
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+        env::set_var("PIN_MAX_FAILURES", "0");
+        let err = Config::from_env().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidValue(ref s, _) if s == "PIN_MAX_FAILURES"),
+            "expected InvalidValue for PIN_MAX_FAILURES, got {:?}",
+            err
+        );
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_pin_max_failures_per_ip_zero_rejected() {
+        let _guard = lock_test();
+        clear_test_env();
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+        env::set_var("PIN_MAX_FAILURES_PER_IP", "0");
+        let err = Config::from_env().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidValue(ref s, _) if s == "PIN_MAX_FAILURES_PER_IP"),
+            "expected InvalidValue for PIN_MAX_FAILURES_PER_IP, got {:?}",
             err
         );
         clear_test_env();
