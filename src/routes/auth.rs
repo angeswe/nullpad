@@ -193,7 +193,7 @@ pub async fn verify_challenge(
         created_at: crate::util::now_secs(),
     };
 
-    storage::session::store_session(
+    let stored = storage::session::store_session(
         &mut con,
         &token,
         &session,
@@ -201,6 +201,9 @@ pub async fn verify_challenge(
         state.config.max_sessions_per_user,
     )
     .await?;
+    if !stored {
+        return Err(AppError::Unauthorized("Authentication failed".to_string()));
+    }
 
     tracing::info!(action = "auth_success", user_id = %user.id, role = %user.role, "User authenticated");
 
