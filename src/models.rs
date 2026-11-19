@@ -122,6 +122,7 @@ pub struct ChallengeRequest {
 /// Response containing nonce for signing.
 #[derive(Debug, Serialize)]
 pub struct ChallengeResponse {
+    pub challenge_id: String,
     pub nonce: String, // base64
 }
 
@@ -129,6 +130,7 @@ pub struct ChallengeResponse {
 #[derive(Debug, Deserialize)]
 pub struct VerifyRequest {
     pub alias: String,
+    pub challenge_id: String,
     pub signature: String, // base64
 }
 

@@ -209,7 +209,7 @@
   /**
    * Request authentication challenge from server
    * @param {string} alias - User alias
-   * @returns {Promise<{nonce: string}>}
+   * @returns {Promise<{challenge_id: string, nonce: string}>}
    */
   async function requestChallenge(alias) {
     const response = await fetch('/api/auth/challenge', {
@@ -233,14 +233,15 @@
   /**
    * Submit signed challenge for verification
    * @param {string} alias - User alias
+   * @param {string} challengeId - Challenge ID from requestChallenge
    * @param {string} signature - Base64-encoded signature
    * @returns {Promise<{token: string, role: string}>}
    */
-  async function submitVerification(alias, signature) {
+  async function submitVerification(alias, challengeId, signature) {
     const response = await fetch('/api/auth/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ alias, signature })
+      body: JSON.stringify({ alias, challenge_id: challengeId, signature })
     });
 
     if (!response.ok) {
@@ -292,7 +293,8 @@
     const challengeData = await requestChallenge(alias);
 
     // Validate challenge nonce format before signing
-    if (!challengeData || typeof challengeData.nonce !== 'string' || challengeData.nonce.length === 0) {
+    if (!challengeData || typeof challengeData.nonce !== 'string' || challengeData.nonce.length === 0
+        || typeof challengeData.challenge_id !== 'string') {
       throw new Error('Invalid challenge response from server');
     }
     // Server nonce should be 32 bytes base64-encoded (44 chars with padding, 43 without)
@@ -301,7 +303,7 @@
     }
 
     const signature = await signChallenge(challengeData.nonce, privateKey);
-    const { token, role } = await submitVerification(alias, signature);
+    const { token, role } = await submitVerification(alias, challengeData.challenge_id, signature);
     saveSession(token, role);
     return { token, role };
   }
