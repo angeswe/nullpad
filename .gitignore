@@ -4,6 +4,7 @@
 # Environment
 .env
 .env.production
+/secrets/
 
 # OS
 .DS_Store

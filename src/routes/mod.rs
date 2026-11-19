@@ -180,6 +180,7 @@ fn normalize_ip(ip: IpAddr) -> IpAddr {
 async fn server_config(State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "max_upload_bytes": state.config.max_upload_bytes,
+        "anon_max_bytes": state.config.anon_max_bytes,
     }))
 }
 

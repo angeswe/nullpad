@@ -20,17 +20,32 @@ pub struct OpenedPaste {
     pub blob: OpenedBlob,
 }
 
+/// Why `store_paste` did not store a paste.
+#[derive(Debug, thiserror::Error)]
+pub enum StorePasteError {
+    #[error("Paste ID already exists")]
+    Conflict,
+    #[error("Paste limit reached")]
+    QuotaExceeded,
+    #[error(transparent)]
+    Redis(#[from] redis::RedisError),
+}
+
 /// Store a paste: claim ID in Valkey first (SETNX), then write content to disk.
 ///
 /// Uses SET NX (set-if-not-exists) to atomically claim the paste ID, preventing
-/// overwrites of existing pastes. If the ID already exists, returns an error
-/// that maps to 409 Conflict.
+/// overwrites of existing pastes. If the ID already exists, returns
+/// `StorePasteError::Conflict`.
 ///
 /// The stored metadata always records the SHA-256 of the uploaded content
 /// (`content_sha256`), whatever `meta.content_sha256` holds.
 ///
-/// If the paste has an owner_id, also add the paste ID to the user's paste set.
+/// If the paste has an owner_id, one Lua script checks the owner's paste count
+/// against `max_pastes_per_user` (0 = unlimited), claims the ID, and adds it to
+/// the owner's paste set. At the limit it returns `StorePasteError::QuotaExceeded`.
 /// `max_ttl_secs` is used for the user_pastes SET expiry (from config.max_ttl_secs).
+///
+/// If the blob commit fails, the record and the user_pastes entry are removed.
 pub async fn store_paste<C>(
     con: &mut C,
     storage_path: &Path,
@@ -38,7 +53,8 @@ pub async fn store_paste<C>(
     upload: BlobUpload,
     ttl_secs: u64,
     max_ttl_secs: u64,
-) -> Result<(), redis::RedisError>
+    max_pastes_per_user: usize,
+) -> Result<(), StorePasteError>
 where
     C: AsyncCommands,
 {
@@ -50,67 +66,99 @@ where
         ..meta.clone()
     };
     let json = serde_json::to_string(&stored_meta).map_err(super::json_serialize_err)?;
+    let user_pastes_key = meta
+        .owner_id
+        .as_ref()
+        .map(|owner_id| format!("user_pastes:{}", owner_id));
 
-    // Step 1: Atomically claim the paste ID with SET NX (set-if-not-exists).
-    // This prevents overwriting existing pastes when clients control the ID.
-    // Valkey SET NX returns "OK" on success or nil when key exists.
-    let mut cmd = redis::cmd("SET");
-    cmd.arg(&key).arg(&json);
-    if ttl_secs > 0 {
-        cmd.arg("EX").arg(ttl_secs);
+    match &user_pastes_key {
+        Some(user_pastes_key) => {
+            // KEYS[1] = paste key, KEYS[2] = user_pastes key
+            // ARGV[1] = json, ARGV[2] = ttl (0 = forever), ARGV[3] = max pastes
+            // (0 = unlimited), ARGV[4] = paste id, ARGV[5] = max_ttl_secs
+            let script = redis::Script::new(
+                r"
+                local max = tonumber(ARGV[3])
+                if max > 0 and redis.call('SCARD', KEYS[2]) >= max then
+                    return 'quota'
+                end
+                local ttl = tonumber(ARGV[2])
+                local claimed
+                if ttl > 0 then
+                    claimed = redis.call('SET', KEYS[1], ARGV[1], 'EX', ttl, 'NX')
+                else
+                    claimed = redis.call('SET', KEYS[1], ARGV[1], 'NX')
+                end
+                if not claimed then
+                    return 'conflict'
+                end
+                redis.call('SADD', KEYS[2], ARGV[4])
+                if ttl == 0 then
+                    redis.call('PERSIST', KEYS[2])
+                elseif redis.call('TTL', KEYS[2]) ~= -1 then
+                    redis.call('EXPIRE', KEYS[2], ARGV[5])
+                end
+                return 'ok'
+                ",
+            );
+            let outcome: String = script
+                .key(&key)
+                .key(user_pastes_key)
+                .arg(&json)
+                .arg(ttl_secs)
+                .arg(max_pastes_per_user)
+                .arg(&meta.id)
+                .arg(max_ttl_secs)
+                .invoke_async(con)
+                .await?;
+            match outcome.as_str() {
+                "ok" => {}
+                "conflict" => return Err(StorePasteError::Conflict),
+                "quota" => return Err(StorePasteError::QuotaExceeded),
+                other => {
+                    return Err(redis::RedisError::from((
+                        redis::ErrorKind::UnexpectedReturnType,
+                        "Unexpected store_paste script result",
+                        other.to_string(),
+                    ))
+                    .into())
+                }
+            }
+        }
+        None => {
+            let mut cmd = redis::cmd("SET");
+            cmd.arg(&key).arg(&json);
+            if ttl_secs > 0 {
+                cmd.arg("EX").arg(ttl_secs);
+            }
+            cmd.arg("NX");
+            // "OK" on success, nil when the key exists.
+            let result: Option<String> = cmd.query_async(con).await?;
+            if result.is_none() {
+                return Err(StorePasteError::Conflict);
+            }
+        }
     }
-    cmd.arg("NX");
 
-    // Valkey SET NX returns "OK" (Some) on success, nil (None) when key exists.
-    // Using Option<String> correctly maps nil to None without type errors.
-    // Real Valkey errors (connection, auth, OOM) propagate via `?`.
-    let result: Option<String> = cmd.query_async(con).await?;
-    let claimed = result.is_some();
-
-    if !claimed {
-        return Err(redis::RedisError::from((
-            redis::ErrorKind::UnexpectedReturnType,
-            "Paste ID already exists",
-            "conflict".to_string(),
-        )));
-    }
-
-    // Step 2: Write content to disk (only after Valkey confirms the ID is ours).
+    // Write content to disk (only after Valkey confirms the ID is ours).
     if let Err(e) = upload.commit(storage_path, &meta.id).await {
-        // Cleanup: delete Valkey key if blob write fails
-        if let Err(cleanup_err) = con.del::<_, ()>(&key).await {
+        let mut cleanup = redis::pipe();
+        cleanup.atomic().del(&key).ignore();
+        if let Some(user_pastes_key) = &user_pastes_key {
+            cleanup.srem(user_pastes_key, &meta.id).ignore();
+        }
+        if let Err(cleanup_err) = cleanup.query_async::<()>(con).await {
             tracing::error!(
-                paste_id = %meta.id,
                 error = %cleanup_err,
-                "Failed to clean up Valkey key after blob write failure"
+                "Failed to clean up Valkey keys after blob write failure"
             );
         }
         return Err(redis::RedisError::from((
             redis::ErrorKind::UnexpectedReturnType,
             "Blob write failed",
             e.to_string(),
-        )));
-    }
-
-    // Step 3: If paste has an owner, add to user's paste set
-    if let Some(ref owner_id) = meta.owner_id {
-        let user_pastes_key = format!("user_pastes:{}", owner_id);
-        con.sadd::<_, _, ()>(&user_pastes_key, &meta.id).await?;
-        if ttl_secs == 0 {
-            // Forever paste: persist the user_pastes set (remove any TTL)
-            con.persist::<_, ()>(&user_pastes_key).await?;
-        } else {
-            // Only set TTL if the key isn't already persistent (TTL != -1)
-            // This prevents overwriting persistent state from forever pastes
-            let current_ttl: i64 = redis::cmd("TTL")
-                .arg(&user_pastes_key)
-                .query_async(con)
-                .await?;
-            if current_ttl != -1 {
-                con.expire::<_, ()>(&user_pastes_key, max_ttl_secs as i64)
-                    .await?;
-            }
-        }
+        ))
+        .into());
     }
 
     Ok(())
@@ -336,19 +384,6 @@ where
     }
 
     Ok(deleted > 0)
-}
-
-/// Get all paste IDs owned by a user.
-pub async fn get_user_paste_ids<C>(
-    con: &mut C,
-    user_id: &str,
-) -> Result<Vec<String>, redis::RedisError>
-where
-    C: AsyncCommands,
-{
-    let key = format!("user_pastes:{}", user_id);
-    let ids: Vec<String> = con.smembers(&key).await?;
-    Ok(ids)
 }
 
 /// Atomically activate a user's TTL on their first upload.

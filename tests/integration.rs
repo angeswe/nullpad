@@ -90,7 +90,12 @@ async fn main() {
         test_get_paste_returns_framed_octet_stream,
         test_burn_after_reading,
         test_paste_not_found,
-        test_public_paste_type_restriction,
+        test_anon_paste_type_is_not_an_authz_input,
+        test_anon_upload_over_anon_max_bytes_returns_413,
+        test_anon_daily_paste_quota_per_ip,
+        test_concurrent_creates_respect_max_pastes_per_user,
+        test_failed_commit_leaves_no_record_or_owner_entry,
+        test_store_paste_returns_typed_rejections,
         test_duplicate_paste_id_returns_409,
         test_auth_challenge_response_flow,
         test_auth_challenge_unknown_user,
@@ -209,6 +214,9 @@ struct TestServerOverrides {
     /// Time a client may take to send the request headers.
     header_read_timeout: std::time::Duration,
     max_upload_bytes: usize,
+    anon_max_bytes: usize,
+    anon_max_pastes_per_ip_per_day: u32,
+    max_pastes_per_user: usize,
     /// Longest time a request may take to be handled.
     request_timeout: std::time::Duration,
     /// Requests handled at once; further requests wait for a slot.
@@ -226,6 +234,9 @@ impl Default for TestServerOverrides {
             write_timeout_secs: 60,
             header_read_timeout: std::time::Duration::from_secs(30),
             max_upload_bytes: 52_428_800,
+            anon_max_bytes: 262_172,
+            anon_max_pastes_per_ip_per_day: 10000,
+            max_pastes_per_user: 50,
             request_timeout: std::time::Duration::from_secs(120),
             max_concurrent_requests: 256,
         }
@@ -275,6 +286,8 @@ async fn spawn_test_server_configured(
         valkey_url: test_valkey_url.clone(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
         max_upload_bytes: overrides.max_upload_bytes,
+        anon_max_bytes: overrides.anon_max_bytes,
+        anon_max_pastes_per_ip_per_day: overrides.anon_max_pastes_per_ip_per_day,
         max_concurrent_blob_reads: overrides.max_concurrent_blob_reads,
         write_timeout_secs: overrides.write_timeout_secs,
         default_ttl_secs: 86400,
@@ -290,7 +303,7 @@ async fn spawn_test_server_configured(
         rate_limit_pin_attempt_global: overrides.rate_limit_pin_attempt_global,
         trusted_proxy_count: overrides.trusted_proxy_count,
         max_sessions_per_user: 5,
-        max_pastes_per_user: 50,
+        max_pastes_per_user: overrides.max_pastes_per_user,
         paste_storage_path: paste_storage_path.clone(),
     };
 
@@ -636,23 +649,187 @@ async fn test_paste_not_found() {
     assert_eq!(resp.status(), 400);
 }
 
-async fn test_public_paste_type_restriction() {
+async fn test_anon_paste_type_is_not_an_authz_input() {
     let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // "file" type should be rejected for public uploads
     let resp = create_paste(
         &client, &base_url, "file", b"data", false, 3600, None, false,
     )
     .await;
-    assert_eq!(resp.status(), 403);
+    assert_eq!(resp.status(), 200);
+}
 
-    // "text" type should be allowed for public uploads
+async fn test_anon_upload_over_anon_max_bytes_returns_413() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let (_key, _alias, user_token) = create_trusted_user(&client, &base_url, &admin_token).await;
+
+    let anon_max_bytes = TestServerOverrides::default().anon_max_bytes;
+    let at_cap = vec![0u8; anon_max_bytes];
+    let over_cap = vec![0u8; anon_max_bytes + 1];
+    let resp = create_paste(
+        &client, &base_url, "text", &at_cap, false, 3600, None, false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let resp = create_paste(
+        &client, &base_url, "text", &over_cap, false, 3600, None, false,
+    )
+    .await;
+    assert_eq!(resp.status(), 413);
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        &over_cap,
+        false,
+        3600,
+        Some(&user_token),
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_anon_daily_paste_quota_per_ip() {
+    let (base_url, _con, admin_key, admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            anon_max_pastes_per_ip_per_day: 3,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+
+    for _ in 0..3 {
+        let resp = create_paste(
+            &client, &base_url, "text", b"data", false, 3600, None, false,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+    }
     let resp = create_paste(
         &client, &base_url, "text", b"data", false, 3600, None, false,
     )
     .await;
+    assert_eq!(resp.status(), 429);
+
+    let token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"data",
+        false,
+        3600,
+        Some(&token),
+        false,
+    )
+    .await;
     assert_eq!(resp.status(), 200);
+}
+
+async fn test_failed_commit_leaves_no_record_or_owner_entry() {
+    use redis::AsyncCommands;
+
+    let (_base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    // The blob path check rejects this ID, so the commit fails after the
+    // record and the user_pastes entry were written.
+    let id = format!("../{}", nanoid::nanoid!(12));
+    let owner = format!("owner_{}", nanoid::nanoid!(8));
+    let meta = nullpad::models::StoredPasteMeta {
+        id: id.clone(),
+        encrypted_metadata: general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
+        paste_type: nullpad::models::PasteType::default(),
+        filename: None,
+        content_type: None,
+        burn_after_reading: false,
+        created_at: 0,
+        owner_id: Some(owner.clone()),
+        has_pin: false,
+        pin_verifier: None,
+        content_sha256: None,
+    };
+    let upload = storage::blob::BlobUpload::create(&storage_path)
+        .await
+        .expect("Failed to create upload");
+    let result =
+        storage::paste::store_paste(&mut con, &storage_path, &meta, upload, 3600, 604800, 50).await;
+    assert!(result.is_err(), "commit to an invalid blob ID must fail");
+
+    let stored: bool = con.exists(format!("paste:{}", id)).await.unwrap();
+    assert!(!stored, "paste record left after failed commit");
+    let listed: bool = con
+        .sismember(format!("user_pastes:{}", owner), &id)
+        .await
+        .unwrap();
+    assert!(!listed, "user_pastes entry left after failed commit");
+}
+
+/// Store an empty paste through `store_paste` with a 1 h TTL.
+async fn store_test_paste<C: redis::AsyncCommands>(
+    con: &mut C,
+    storage_path: &std::path::Path,
+    id: &str,
+    owner_id: Option<&str>,
+    max_pastes_per_user: usize,
+) -> Result<(), storage::paste::StorePasteError> {
+    let meta = nullpad::models::StoredPasteMeta {
+        id: id.to_string(),
+        encrypted_metadata: general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
+        paste_type: nullpad::models::PasteType::default(),
+        filename: None,
+        content_type: None,
+        burn_after_reading: false,
+        created_at: 0,
+        owner_id: owner_id.map(str::to_string),
+        has_pin: false,
+        pin_verifier: None,
+        content_sha256: None,
+    };
+    let upload = storage::blob::BlobUpload::create(storage_path)
+        .await
+        .expect("Failed to create upload");
+    storage::paste::store_paste(
+        con,
+        storage_path,
+        &meta,
+        upload,
+        3600,
+        604800,
+        max_pastes_per_user,
+    )
+    .await
+}
+
+async fn test_store_paste_returns_typed_rejections() {
+    use storage::paste::StorePasteError;
+
+    let (_base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let owner = format!("owner_{}", nanoid::nanoid!(8));
+    let first = nanoid::nanoid!(12);
+    let second = nanoid::nanoid!(12);
+
+    assert!(
+        store_test_paste(&mut con, &storage_path, &first, Some(&owner), 1)
+            .await
+            .is_ok()
+    );
+    assert!(matches!(
+        store_test_paste(&mut con, &storage_path, &second, Some(&owner), 1).await,
+        Err(StorePasteError::QuotaExceeded)
+    ));
+    assert!(matches!(
+        store_test_paste(&mut con, &storage_path, &first, Some(&owner), 0).await,
+        Err(StorePasteError::Conflict)
+    ));
+    assert!(matches!(
+        store_test_paste(&mut con, &storage_path, &first, None, 0).await,
+        Err(StorePasteError::Conflict)
+    ));
 }
 
 async fn test_duplicate_paste_id_returns_409() {
@@ -718,6 +895,78 @@ async fn test_duplicate_paste_id_returns_409() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 409);
+}
+
+// ============================================================================
+// Per-User Paste Quota Race Tests
+// ============================================================================
+
+async fn test_concurrent_creates_respect_max_pastes_per_user() {
+    use redis::AsyncCommands;
+    use storage::paste::StorePasteError;
+
+    let (base_url, mut con, admin_key, admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_pastes_per_user: 3,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let (_key, user_alias, user_token) =
+        create_trusted_user(&client, &base_url, &admin_token).await;
+    let user_id: String = con.get(format!("alias:{}", user_alias)).await.unwrap();
+
+    // Each task stores on its own connection, and all start together, so the
+    // stores reach Valkey concurrently. A count check apart from the SET NX
+    // would let more than three through.
+    let valkey = redis::Client::open(get_valkey_url()).unwrap();
+    let mut task_cons = Vec::new();
+    for _ in 0..10 {
+        task_cons.push(valkey.get_multiplexed_async_connection().await.unwrap());
+    }
+    let start = Arc::new(tokio::sync::Barrier::new(task_cons.len()));
+    let mut handles = Vec::new();
+    for mut task_con in task_cons {
+        let storage_path = storage_path.clone();
+        let user_id = user_id.clone();
+        let start = start.clone();
+        handles.push(tokio::spawn(async move {
+            start.wait().await;
+            store_test_paste(
+                &mut task_con,
+                &storage_path,
+                &nanoid::nanoid!(12),
+                Some(&user_id),
+                3,
+            )
+            .await
+        }));
+    }
+    let (mut stored, mut rejected) = (0, 0);
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(()) => stored += 1,
+            Err(StorePasteError::QuotaExceeded) => rejected += 1,
+            Err(e) => panic!("unexpected store_paste error: {}", e),
+        }
+    }
+    assert_eq!((stored, rejected), (3, 7));
+    let count: usize = con.scard(format!("user_pastes:{}", user_id)).await.unwrap();
+    assert_eq!(count, 3);
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"data",
+        false,
+        3600,
+        Some(&user_token),
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
 }
 
 // ============================================================================
@@ -3320,7 +3569,7 @@ async fn store_large_paste(
         .write(&vec![0x5a; len])
         .await
         .expect("Failed to write upload");
-    storage::paste::store_paste(con, storage_path, &meta, upload, 3600, 604800)
+    storage::paste::store_paste(con, storage_path, &meta, upload, 3600, 604800, 50)
         .await
         .expect("Failed to store large paste");
     id
@@ -3571,12 +3820,20 @@ async fn test_oversized_json_body_returns_413() {
 }
 
 async fn test_paste_over_default_body_limit_succeeds() {
-    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
+    let token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
     let content = vec![0x5a; OVER_DEFAULT_LIMIT_BYTES];
 
     let resp = create_paste(
-        &client, &base_url, "text", &content, false, 3600, None, false,
+        &client,
+        &base_url,
+        "text",
+        &content,
+        false,
+        3600,
+        Some(&token),
+        false,
     )
     .await;
     assert_eq!(resp.status(), 200);
