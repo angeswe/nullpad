@@ -59,8 +59,8 @@ pub fn parse_pubkey(pubkey_base64: &str) -> Result<VerifyingKey, AppError> {
 
     let pubkey_bytes = general_purpose::STANDARD
         .decode(pubkey_base64)
-        .map_err(|e| {
-            tracing::debug!(error = %e, "Invalid pubkey base64");
+        .map_err(|_| {
+            tracing::debug!("Invalid pubkey base64");
             invalid()
         })?;
 
