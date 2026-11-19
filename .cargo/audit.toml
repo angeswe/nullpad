@@ -8,4 +8,11 @@
 # drops it: testcontainers 0.28.0 still requires astral-tokio-tar ^0.6.1, and
 # testcontainers-modules 0.15.0 is the latest. Remove this ignore when
 # `cargo tree -i astral-tokio-tar` prints nothing.
-ignore = ["RUSTSEC-2026-0440"]
+#
+# RUSTSEC-2026-0543: chrono is unmaintained. It is not a reported
+# vulnerability, and no release fixes it. It is in Cargo.lock only as an
+# optional dependency of serde_with, which testcontainers (a dev-dependency)
+# pulls in. That feature is not enabled, so chrono is never compiled:
+# `cargo tree -i chrono --target all -e normal,build,dev` prints nothing.
+# Remove this ignore when chrono leaves Cargo.lock.
+ignore = ["RUSTSEC-2026-0440", "RUSTSEC-2026-0543"]
