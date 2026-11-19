@@ -29,10 +29,20 @@ fn auth_failed(log_message: &str) -> AppError {
     unauthorized()
 }
 
-fn signature_verdict(result: Result<bool, AppError>) -> Result<(), AppError> {
+fn signature_verdict(
+    result: Result<bool, AppError>,
+    expected_origin: &str,
+) -> Result<(), AppError> {
     match result {
         Ok(true) => Ok(()),
-        Ok(false) => Err(auth_failed("Invalid signature")),
+        Ok(false) => {
+            tracing::warn!(
+                action = "auth_failed",
+                expected_origin,
+                "Invalid signature. If every login fails, PUBLIC_ORIGIN may not match the origin in the browser address bar"
+            );
+            Err(unauthorized())
+        }
         Err(AppError::BadRequest(_)) => Err(auth_failed("Signature verification rejected input")),
         Err(e) => {
             tracing::error!(action = "auth_failed", error = %e, "Signature verification error");
@@ -145,10 +155,8 @@ pub async fn verify_challenge(
         .await?
         .ok_or_else(|| AppError::Unauthorized("Authentication failed".to_string()))?;
 
-    // Verify signature (nonce is base64-encoded bytes)
-    let nonce_bytes = general_purpose::STANDARD
-        .decode(&challenge.nonce)
-        .map_err(|e| AppError::Internal(format!("Invalid nonce encoding: {}", e)))?;
+    let origin = &state.config.public_origin;
+    let message = format!("nullpad-auth-v1|{origin}|{}|{}", req.alias, challenge.nonce);
 
     let pubkey = if user.role == Role::Admin {
         if user.id != "admin" {
@@ -165,7 +173,10 @@ pub async fn verify_challenge(
         &user.pubkey
     };
 
-    signature_verdict(verify_signature(pubkey, &nonce_bytes, &req.signature))?;
+    signature_verdict(
+        verify_signature(pubkey, message.as_bytes(), &req.signature),
+        origin,
+    )?;
 
     // Generate session token
     let token = generate_session_token();
@@ -325,9 +336,12 @@ mod tests {
     #[test]
     fn test_signature_verdict_rejected_pubkey_returns_uniform_401() {
         let (result, logs) = capture_logs(|| {
-            signature_verdict(Err(AppError::BadRequest(
-                "Invalid public key format".to_string(),
-            )))
+            signature_verdict(
+                Err(AppError::BadRequest(
+                    "Invalid public key format".to_string(),
+                )),
+                "https://paste.example",
+            )
         });
         assert!(
             matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
@@ -339,8 +353,12 @@ mod tests {
 
     #[test]
     fn test_signature_verdict_internal_error_returns_uniform_401() {
-        let (result, logs) =
-            capture_logs(|| signature_verdict(Err(AppError::Internal("boom".to_string()))));
+        let (result, logs) = capture_logs(|| {
+            signature_verdict(
+                Err(AppError::Internal("boom".to_string())),
+                "https://paste.example",
+            )
+        });
         assert!(
             matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
         );
@@ -351,15 +369,18 @@ mod tests {
 
     #[test]
     fn test_signature_verdict_wrong_signature_returns_uniform_401() {
-        let (result, logs) = capture_logs(|| signature_verdict(Ok(false)));
+        let (result, logs) = capture_logs(|| signature_verdict(Ok(false), "https://paste.example"));
         assert!(
             matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
         );
+        assert!(logs.contains("WARN"));
         assert!(logs.contains("auth_failed"));
+        assert!(logs.contains("https://paste.example"));
+        assert!(logs.contains("PUBLIC_ORIGIN"));
     }
 
     #[test]
     fn test_signature_verdict_valid_signature_is_ok() {
-        assert!(signature_verdict(Ok(true)).is_ok());
+        assert!(signature_verdict(Ok(true), "https://paste.example").is_ok());
     }
 }

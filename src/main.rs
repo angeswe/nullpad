@@ -79,9 +79,13 @@ fn print_keygen_usage() {
     eprintln!();
     eprintln!("Generate Ed25519 public key from alias + secret for ADMIN_PUBKEY.");
     eprintln!("Secret is read from stdin (not CLI args, to avoid process list exposure).");
+    eprintln!(
+        "The secret must be at least {} characters long.",
+        nullpad::auth::MIN_SECRET_LENGTH
+    );
     eprintln!();
     eprintln!("Example:");
-    eprintln!("  echo -n 'mysecretpassword' | nullpad keygen admin");
+    eprintln!("  echo -n 'my-long-secret-phrase' | nullpad keygen admin");
     eprintln!("  nullpad keygen admin  # prompts interactively");
     eprintln!();
     eprintln!("Then set in .env:");
@@ -144,8 +148,8 @@ async fn main() {
                 .read_line(&mut line)
                 .expect("Failed to read secret from stdin");
             let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
-            if trimmed.is_empty() {
-                eprintln!("Error: secret cannot be empty");
+            if let Err(e) = nullpad::auth::check_secret_length(trimmed) {
+                eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
             trimmed.to_string()

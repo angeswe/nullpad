@@ -159,6 +159,10 @@ async fn main() {
         test_delete_user_keeps_alias_owned_by_other,
         test_activate_user_keeps_alias_ttl_owned_by_other,
         test_challenge_nonce_single_use,
+        test_verify_rejects_bare_nonce_signature,
+        test_verify_accepts_bound_message_signature,
+        test_verify_rejects_bound_message_for_other_origin,
+        test_verify_rejects_relay_with_spoofed_host,
         test_concurrent_burn_after_reading_race,
         test_max_sessions_per_user,
         test_forever_paste_requires_auth,
@@ -333,11 +337,18 @@ async fn spawn_test_server_configured(
         .await
         .expect("Failed to init paste storage");
 
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind");
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
     let config = Config {
         admin_pubkey,
         admin_alias: admin_alias.clone(),
         valkey_url: test_valkey_url.clone(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        public_origin: base_url.clone(),
         max_upload_bytes: overrides.max_upload_bytes,
         anon_max_bytes: overrides.anon_max_bytes,
         anon_max_pastes_per_ip_per_day: overrides.anon_max_pastes_per_ip_per_day,
@@ -380,10 +391,6 @@ async fn spawn_test_server_configured(
     .layer(axum::middleware::from_fn(security_headers))
     .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind");
-    let addr = listener.local_addr().unwrap();
     // Same listener and serve loop as main.rs.
     let listener = WriteTimeoutListener::new(
         listener,
@@ -395,7 +402,6 @@ async fn spawn_test_server_configured(
         overrides.header_read_timeout,
     ));
 
-    let base_url = format!("http://{}", addr);
     (base_url, con, admin_key, admin_alias, paste_storage_path)
 }
 
@@ -482,7 +488,11 @@ async fn admin_login(
     signing_key: &SigningKey,
 ) -> String {
     let (challenge_id, nonce) = request_challenge(client, base_url, alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(signing_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        signing_key
+            .sign(&bound_message(base_url, alias, &nonce))
+            .to_bytes(),
+    );
     let (status, body) = post_verify(client, base_url, alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 200);
     let body: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1748,7 +1758,11 @@ async fn test_verify_malformed_signature_keeps_pending_challenge() {
     .await;
     assert_eq!(status, 401);
 
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 200);
 }
@@ -1759,7 +1773,11 @@ async fn test_verify_malformed_challenge_id_returns_401() {
     let expected = unknown_alias_verify_response(&client, &base_url).await;
 
     let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
     let suffixed = format!("{challenge_id}:x");
     let malformed = [
         "",
@@ -1808,7 +1826,11 @@ async fn test_other_requester_does_not_invalidate_pending_nonce() {
     let attacker = send_challenge(&client, &base_url, &admin_alias, Some("10.0.2.2")).await;
     assert_eq!(attacker.status(), 200);
 
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 200);
 }
@@ -1864,7 +1886,11 @@ async fn test_admin_login_rejects_stale_valkey_pubkey() {
         .unwrap();
 
     let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(old_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        old_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
     let (status, _body) =
         post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 401);
@@ -1908,7 +1934,11 @@ async fn test_admin_role_with_other_id_refused() {
     let _: () = con.set("alias:xadmin", "x-admin").await.unwrap();
 
     let (challenge_id, nonce) = request_challenge(&client, &base_url, "xadmin").await;
-    let sig_b64 = general_purpose::STANDARD.encode(other_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        other_key
+            .sign(&bound_message(&base_url, "xadmin", &nonce))
+            .to_bytes(),
+    );
     let (status, _body) = post_verify(&client, &base_url, "xadmin", &challenge_id, &sig_b64).await;
 
     let _: () = con.del(&["user:x-admin", "alias:xadmin"]).await.unwrap();
@@ -2689,7 +2719,11 @@ async fn test_challenge_nonce_single_use() {
     let client = reqwest::Client::new();
 
     let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
 
     // First verification should succeed
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
@@ -2698,6 +2732,68 @@ async fn test_challenge_nonce_single_use() {
     // Second verification with same signature should fail (nonce consumed)
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 401);
+}
+
+fn bound_message(origin: &str, alias: &str, nonce: &[u8]) -> Vec<u8> {
+    format!(
+        "nullpad-auth-v1|{}|{}|{}",
+        origin,
+        alias,
+        general_purpose::STANDARD.encode(nonce)
+    )
+    .into_bytes()
+}
+
+async fn test_verify_rejects_bare_nonce_signature() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
+}
+
+async fn test_verify_accepts_bound_message_signature() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let message = bound_message(&base_url, &admin_alias, &nonce);
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&message).to_bytes());
+    let (status, body) =
+        post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 200);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!body["token"].as_str().unwrap().is_empty());
+}
+
+async fn test_verify_rejects_bound_message_for_other_origin() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let message = bound_message("https://other.example", &admin_alias, &nonce);
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&message).to_bytes());
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
+}
+
+async fn test_verify_rejects_relay_with_spoofed_host() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let message = bound_message("http://relay.example", &admin_alias, &nonce);
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&message).to_bytes());
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .header(reqwest::header::HOST, "relay.example")
+        .json(&serde_json::json!({"alias": admin_alias, "challenge_id": challenge_id, "signature": sig_b64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
 }
 
 // ============================================================================
@@ -4322,7 +4418,8 @@ async fn login_set_cookie(
     key: &SigningKey,
 ) -> String {
     let (challenge_id, nonce) = request_challenge(client, base_url, alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD
+        .encode(key.sign(&bound_message(base_url, alias, &nonce)).to_bytes());
     let resp = send_verify(client, base_url, alias, &challenge_id, &sig_b64).await;
     assert_eq!(resp.status(), 200);
     resp.headers()

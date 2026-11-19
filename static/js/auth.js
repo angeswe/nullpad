@@ -12,7 +12,7 @@
   const SESSION_ROLE_KEY = 'nullpad_session_role';
 
   // Base64 helpers (shared module)
-  const { base64Encode: b64Encode, base64Decode: b64Decode,
+  const { base64Encode: b64Encode,
           base64urlEncode: b64urlEncode, base64urlDecode: b64urlDecode } = NullpadBase64;
 
   /**
@@ -135,18 +135,29 @@
   }
 
   /**
+   * Build the login message the server verifies: binds the signature to this
+   * purpose, origin and alias so another site cannot relay it.
+   * @param {string} origin - Site origin, e.g. window.location.origin
+   * @param {string} alias - User alias
+   * @param {string} nonce - Base64-encoded nonce exactly as the server sent it
+   * @returns {Uint8Array} UTF-8 message bytes
+   */
+  function authMessage(origin, alias, nonce) {
+    return new TextEncoder().encode(`nullpad-auth-v1|${origin}|${alias}|${nonce}`);
+  }
+
+  /**
    * Sign a challenge nonce with Ed25519 private key
    * @param {string} nonce - Base64-encoded nonce from server
+   * @param {string} alias - User alias
    * @param {CryptoKey} privateKey - Ed25519 private CryptoKey
    * @returns {Promise<string>} Base64-encoded signature
    */
-  async function signChallenge(nonce, privateKey) {
-    const nonceBytes = b64Decode(nonce);
-
+  async function signChallenge(nonce, alias, privateKey) {
     const signature = await crypto.subtle.sign(
       { name: 'Ed25519' },
       privateKey,
-      nonceBytes
+      authMessage(window.location.origin, alias, nonce)
     );
 
     return b64Encode(new Uint8Array(signature));
@@ -302,7 +313,7 @@
       throw new Error('Challenge nonce has unexpected length');
     }
 
-    const signature = await signChallenge(challengeData.nonce, privateKey);
+    const signature = await signChallenge(challengeData.nonce, alias, privateKey);
     const { token, role } = await submitVerification(alias, challengeData.challenge_id, signature);
     saveSession(token, role);
     return { token, role };
@@ -311,6 +322,7 @@
   // Export to global object (frozen + non-writable to prevent tampering)
   const NullpadAuth = Object.freeze({
     deriveKeypair,
+    authMessage,
     signChallenge,
     login,
     saveSession,
