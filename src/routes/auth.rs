@@ -18,6 +18,23 @@ use axum::{
 use base64::{engine::general_purpose, Engine as _};
 use std::net::SocketAddr;
 
+fn auth_failed(log_message: &str) -> AppError {
+    tracing::warn!(action = "auth_failed", "{log_message}");
+    AppError::Unauthorized("Authentication failed".to_string())
+}
+
+fn signature_verdict(result: Result<bool, AppError>) -> Result<(), AppError> {
+    match result {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(auth_failed("Invalid signature")),
+        Err(AppError::BadRequest(_)) => Err(auth_failed("Stored pubkey rejected")),
+        Err(e) => {
+            tracing::error!(action = "auth_failed", error = %e, "Signature verification error");
+            Err(AppError::Unauthorized("Authentication failed".to_string()))
+        }
+    }
+}
+
 /// Check if the incoming request arrived over HTTPS.
 ///
 /// Only trusts `X-Forwarded-Proto` / `Forwarded` headers when `trusted_proxy_count > 0`
@@ -127,6 +144,13 @@ pub async fn verify_challenge(
     // Validate alias
     super::validate_alias(&req.alias)?;
 
+    let signature_well_formed = general_purpose::STANDARD
+        .decode(&req.signature)
+        .is_ok_and(|bytes| bytes.len() == 64);
+    if !signature_well_formed {
+        return Err(auth_failed("Invalid signature"));
+    }
+
     // Get and delete challenge (single-use)
     let challenge = storage::session::get_and_delete_challenge(&mut con, &req.alias)
         .await?
@@ -142,12 +166,7 @@ pub async fn verify_challenge(
         .decode(&challenge.nonce)
         .map_err(|e| AppError::Internal(format!("Invalid nonce encoding: {}", e)))?;
 
-    let valid = verify_signature(&user.pubkey, &nonce_bytes, &req.signature)?;
-
-    if !valid {
-        tracing::warn!(action = "auth_failed", "Invalid signature");
-        return Err(AppError::Unauthorized("Authentication failed".to_string()));
-    }
+    signature_verdict(verify_signature(&user.pubkey, &nonce_bytes, &req.signature))?;
 
     // Generate session token
     let token = generate_session_token();
@@ -289,4 +308,76 @@ pub async fn logout(
         StatusCode::NO_CONTENT,
         [(axum::http::header::SET_COOKIE, clear_cookie)],
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture_logs<T>(f: impl FnOnce() -> T) -> (T, String) {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .finish();
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let logs = String::from_utf8(buffer.0.lock().unwrap().clone()).unwrap();
+        (result, logs)
+    }
+
+    #[test]
+    fn test_signature_verdict_rejected_pubkey_returns_uniform_401() {
+        let (result, logs) = capture_logs(|| {
+            signature_verdict(Err(AppError::BadRequest(
+                "Invalid public key format".to_string(),
+            )))
+        });
+        assert!(
+            matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
+        );
+        assert!(logs.contains("WARN"));
+        assert!(logs.contains("auth_failed"));
+        assert!(!logs.contains("Invalid public key format"));
+    }
+
+    #[test]
+    fn test_signature_verdict_internal_error_returns_uniform_401() {
+        let (result, logs) =
+            capture_logs(|| signature_verdict(Err(AppError::Internal("boom".to_string()))));
+        assert!(
+            matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
+        );
+        assert!(logs.contains("ERROR"));
+        assert!(logs.contains("boom"));
+        assert!(logs.contains("auth_failed"));
+    }
+
+    #[test]
+    fn test_signature_verdict_wrong_signature_returns_uniform_401() {
+        let (result, logs) = capture_logs(|| signature_verdict(Ok(false)));
+        assert!(
+            matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
+        );
+        assert!(logs.contains("auth_failed"));
+    }
+
+    #[test]
+    fn test_signature_verdict_valid_signature_is_ok() {
+        assert!(signature_verdict(Ok(true)).is_ok());
+    }
 }

@@ -126,6 +126,9 @@ async fn main() {
         test_register_invite_not_consumed_on_validation_failure,
         test_register_rejects_small_order_pubkey,
         test_verify_normalized_error_messages,
+        test_verify_malformed_signature_does_not_reveal_alias,
+        test_verify_malformed_signature_keeps_pending_challenge,
+        test_verify_weak_stored_pubkey_returns_401,
         test_rate_limiting_returns_429,
         test_admin_endpoints_require_auth,
         test_admin_create_and_list_invites,
@@ -1479,6 +1482,110 @@ async fn test_verify_normalized_error_messages() {
     assert_eq!(resp.status(), 401);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["error"], "Authentication failed");
+}
+
+async fn post_verify(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+    signature: &str,
+) -> (reqwest::StatusCode, String) {
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .json(&serde_json::json!({"alias": alias, "signature": signature}))
+        .send()
+        .await
+        .unwrap();
+    (resp.status(), resp.text().await.unwrap())
+}
+
+async fn request_challenge(client: &reqwest::Client, base_url: &str, alias: &str) -> Vec<u8> {
+    let resp = client
+        .post(format!("{}/api/auth/challenge", base_url))
+        .json(&serde_json::json!({"alias": alias}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    general_purpose::STANDARD
+        .decode(body["nonce"].as_str().unwrap())
+        .unwrap()
+}
+
+async fn unknown_alias_verify_response(
+    client: &reqwest::Client,
+    base_url: &str,
+) -> (reqwest::StatusCode, String) {
+    let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
+    let response = post_verify(client, base_url, "nobody_here", &fake_sig).await;
+    assert_eq!(response.0, 401);
+    response
+}
+
+async fn test_verify_malformed_signature_does_not_reveal_alias() {
+    let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let expected = unknown_alias_verify_response(&client, &base_url).await;
+    let short_sig = general_purpose::STANDARD.encode([0u8; 10]);
+
+    for signature in ["not-base64!", short_sig.as_str()] {
+        for alias in [admin_alias.as_str(), "nobody_here"] {
+            if alias == admin_alias {
+                request_challenge(&client, &base_url, alias).await;
+            }
+            let response = post_verify(&client, &base_url, alias, signature).await;
+            assert_eq!(response, expected, "alias={alias} signature={signature}");
+        }
+    }
+}
+
+async fn test_verify_malformed_signature_keeps_pending_challenge() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let nonce = request_challenge(&client, &base_url, &admin_alias).await;
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, "not-base64!").await;
+    assert_eq!(status, 401);
+
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &sig_b64).await;
+    assert_eq!(status, 200);
+}
+
+async fn test_verify_weak_stored_pubkey_returns_401() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let expected = unknown_alias_verify_response(&client, &base_url).await;
+
+    let invite_token = nanoid::nanoid!(16);
+    let invite = nullpad::models::StoredInvite {
+        token: invite_token.clone(),
+        created_at: nullpad::util::now_secs(),
+    };
+    nullpad::storage::user::store_invite(&mut con, &invite, 3600)
+        .await
+        .unwrap();
+    let weak_user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: "weak_key_user".to_string(),
+        pubkey: general_purpose::STANDARD.encode([0u8; 32]),
+        role: nullpad::models::Role::Trusted,
+        created_at: nullpad::util::now_secs(),
+    };
+    nullpad::storage::user::consume_invite_and_create_user(
+        &mut con,
+        &invite_token,
+        &weak_user,
+        86400,
+    )
+    .await
+    .unwrap();
+
+    request_challenge(&client, &base_url, "weak_key_user").await;
+    let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
+    let response = post_verify(&client, &base_url, "weak_key_user", &fake_sig).await;
+    assert_eq!(response, expected);
 }
 
 async fn test_rate_limiting_returns_429() {
