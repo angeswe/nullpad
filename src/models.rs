@@ -25,7 +25,8 @@ pub enum PasteType {
 /// Metadata for paste creation (sent as JSON in multipart form).
 #[derive(Debug, Deserialize)]
 pub struct PasteMetadata {
-    /// Client-generated paste ID (nanoid, 12 chars). Used as AES-GCM AAD.
+    /// Paste ID issued by `POST /api/paste/reserve` (nanoid, 12 chars). The
+    /// browser uses it as AES-GCM AAD.
     pub paste_id: String,
     /// Encrypted filename + content_type blob (base64). Server stores opaquely.
     pub encrypted_metadata: String,
@@ -40,6 +41,12 @@ pub struct PasteMetadata {
     /// HMAC-SHA256(derived_key, paste_id) — server-side PIN verifier (base64).
     /// Required when has_pin is true.
     pub pin_verifier: Option<String>,
+}
+
+/// Response to a paste ID reservation.
+#[derive(Debug, Serialize)]
+pub struct ReservePasteResponse {
+    pub id: String,
 }
 
 /// Response after creating a paste.

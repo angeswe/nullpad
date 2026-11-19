@@ -215,7 +215,8 @@ These routes serve the web client. Paste and auth requests expect payloads that 
 
 - `GET /healthz` — Health check (returns Valkey connectivity status)
 - `GET /api/config` — Server limits for the client (max upload size)
-- `POST /api/paste` — Create encrypted paste
+- `POST /api/paste/reserve` — Get a new paste ID, valid for one upload within 10 minutes (rate limited)
+- `POST /api/paste` — Create encrypted paste under a reserved ID
 - `GET /api/paste/{id}` — Retrieve paste (deletes if burn-after-reading)
 - `POST /api/paste/{id}` — Submit PIN verifier for a PIN-protected paste (rate limited)
 - `POST /api/auth/challenge` — Request authentication nonce

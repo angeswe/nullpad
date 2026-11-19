@@ -8,9 +8,10 @@
 /// let routes accept IDs blob storage rejects, and make cleanup skip live blobs
 /// it can no longer name.
 ///
-/// The browser keeps its own copies — `NANOID_ALPHABET` in `static/js/crypto.js`
-/// generates the IDs, and `view.js`/`admin.js` validate them by regex. Changing
-/// this table means changing those too.
+/// Paste IDs are issued by `storage::paste::reserve_paste_id` with
+/// `nanoid::nanoid!`, whose default alphabet is these 64 bytes. The browser
+/// keeps its own copies — `utils.js`, `view.js` and `admin.js` validate IDs by
+/// regex. Changing this table means changing those too.
 ///
 /// No byte here is a path separator, so an ID drawn from it cannot traverse.
 pub const NANOID_CHARSET: &[u8; 64] =

@@ -151,6 +151,31 @@
     return { meta, content };
   }
 
+  /**
+   * Ask the server for a new paste ID. The server stores a paste only under
+   * an ID it issued, so the browser never chooses one.
+   * The request carries no body, query or Authorization header.
+   * @param {(url: string, init: object) => Promise<Response>} fetchFn
+   * @returns {Promise<string>} a 12-character nanoid
+   * @throws {Error} with the server's error text on a non-2xx response, or if
+   *   the returned ID is not 12 nanoid characters
+   */
+  async function reservePasteId(fetchFn) {
+    const response = await fetchFn('/api/paste/reserve', { method: 'POST' });
+    if (!response.ok) {
+      let msg;
+      try {
+        msg = (await response.json()).error;
+      } catch { /* non-JSON response */ }
+      throw new Error(msg || 'Failed to reserve a paste ID');
+    }
+    const { id } = await response.json();
+    if (typeof id !== 'string' || !/^[A-Za-z0-9_-]{12}$/.test(id)) {
+      throw new Error('Server returned an invalid paste ID');
+    }
+    return id;
+  }
+
   const NullpadUtils = Object.freeze({
     sanitizeFilename,
     shouldRenderMarkdown,
@@ -160,7 +185,8 @@
     shareUrl,
     pasteViewUrl,
     hasBurnHint,
-    parsePasteFrame
+    parsePasteFrame,
+    reservePasteId
   });
 
   Object.defineProperty(window, 'NullpadUtils', {
