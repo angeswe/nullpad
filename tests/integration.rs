@@ -154,6 +154,10 @@ async fn main() {
         test_admin_cannot_delete_self,
         test_security_headers_on_api,
         test_activate_user_on_first_upload,
+        test_upsert_admin_fails_on_alias_owned_by_user,
+        test_upsert_admin_keeps_old_alias_owned_by_other,
+        test_delete_user_keeps_alias_owned_by_other,
+        test_activate_user_keeps_alias_ttl_owned_by_other,
         test_challenge_nonce_single_use,
         test_concurrent_burn_after_reading_race,
         test_max_sessions_per_user,
@@ -2417,6 +2421,129 @@ async fn test_security_headers_on_api() {
     assert_eq!(headers.get("x-frame-options").unwrap(), "DENY");
     assert!(headers.get("strict-transport-security").is_some());
     assert!(headers.get("content-security-policy").is_some());
+}
+
+async fn test_upsert_admin_fails_on_alias_owned_by_user() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let token = nanoid::nanoid!(16);
+    let invite = nullpad::models::StoredInvite {
+        token: token.clone(),
+        created_at: nullpad::util::now_secs(),
+    };
+    nullpad::storage::user::store_invite(&mut con, &invite, 3600)
+        .await
+        .unwrap();
+    let (_key, pubkey) = test_keypair();
+    let user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: format!("owned_{}", nanoid::nanoid!(8)),
+        pubkey: pubkey.clone(),
+        role: nullpad::models::Role::Trusted,
+        created_at: nullpad::util::now_secs(),
+    };
+    nullpad::storage::user::consume_invite_and_create_user(&mut con, &token, &user, 3600)
+        .await
+        .unwrap();
+    let alias_key = format!("alias:{}", user.alias);
+
+    let result = nullpad::storage::user::upsert_admin(&mut con, &pubkey, &user.alias).await;
+    let owner: Option<String> = con.get(&alias_key).await.unwrap();
+    let _: () = con
+        .del(&[alias_key.clone(), format!("user:{}", user.id)])
+        .await
+        .unwrap();
+
+    assert!(result.is_err(), "upsert_admin must refuse a user's alias");
+    assert_eq!(owner.as_deref(), Some(user.id.as_str()));
+}
+
+async fn test_upsert_admin_keeps_old_alias_owned_by_other() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, admin_alias) = spawn_test_server().await;
+    let (_key, pubkey) = test_keypair();
+    let old_alias_key = format!("alias:{}", admin_alias);
+    let other_id = nanoid::nanoid!(12);
+    let _: () = con.set(&old_alias_key, &other_id).await.unwrap();
+    let new_alias = format!("testadmin_{}", nanoid::nanoid!(6));
+
+    let result = nullpad::storage::user::upsert_admin(&mut con, &pubkey, &new_alias).await;
+    let owner: Option<String> = con.get(&old_alias_key).await.unwrap();
+    let _: () = con.del(&old_alias_key).await.unwrap();
+
+    assert!(result.is_ok(), "upsert_admin must succeed: {:?}", result);
+    assert_eq!(owner.as_deref(), Some(other_id.as_str()));
+}
+
+async fn test_delete_user_keeps_alias_owned_by_other() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let (_key, pubkey) = test_keypair();
+    let user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: format!("shared_{}", nanoid::nanoid!(8)),
+        pubkey,
+        role: nullpad::models::Role::Trusted,
+        created_at: nullpad::util::now_secs(),
+    };
+    let alias_key = format!("alias:{}", user.alias);
+    let _: () = con
+        .set(
+            format!("user:{}", user.id),
+            serde_json::to_string(&user).unwrap(),
+        )
+        .await
+        .unwrap();
+    let _: () = con.set(&alias_key, "admin").await.unwrap();
+
+    nullpad::storage::user::delete_user(&mut con, &user.id)
+        .await
+        .unwrap();
+    let owner: Option<String> = con.get(&alias_key).await.unwrap();
+    let _: () = con.del(&alias_key).await.unwrap();
+
+    assert_eq!(owner.as_deref(), Some("admin"));
+}
+
+async fn test_activate_user_keeps_alias_ttl_owned_by_other() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let idle_ttl: u64 = 172800;
+    let active_ttl: u64 = 86400;
+    let (_key, pubkey) = test_keypair();
+    let user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: format!("shared_{}", nanoid::nanoid!(8)),
+        pubkey,
+        role: nullpad::models::Role::Trusted,
+        created_at: nullpad::util::now_secs(),
+    };
+    let user_key = format!("user:{}", user.id);
+    let pastes_key = format!("user_pastes:{}", user.id);
+    let alias_key = format!("alias:{}", user.alias);
+    let _: () = con
+        .set_ex(
+            &user_key,
+            serde_json::to_string(&user).unwrap(),
+            idle_ttl - 30,
+        )
+        .await
+        .unwrap();
+    let _: () = con.sadd(&pastes_key, nanoid::nanoid!(12)).await.unwrap();
+    let _: () = con.set(&alias_key, "admin").await.unwrap();
+
+    nullpad::storage::paste::activate_user_on_first_upload(
+        &mut con, &user.id, idle_ttl, active_ttl,
+    )
+    .await
+    .unwrap();
+    let alias_ttl: i64 = con.ttl(&alias_key).await.unwrap();
+    let _: () = con
+        .del(&[alias_key.clone(), user_key.clone(), pastes_key.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(alias_ttl, -1);
 }
 
 // ============================================================================

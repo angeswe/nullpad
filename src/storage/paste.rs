@@ -448,7 +448,10 @@ where
             if user_json then
                 local user = cjson.decode(user_json)
                 if type(user.alias) == 'string' then
-                    redis.call('EXPIRE', ARGV[3] .. user.alias, active_ttl)
+                    local alias_key = ARGV[3] .. user.alias
+                    if redis.call('GET', alias_key) == ARGV[4] then
+                        redis.call('EXPIRE', alias_key, active_ttl)
+                    end
                 end
             end
             return 1
@@ -463,6 +466,7 @@ where
         .arg(idle_ttl_secs)
         .arg(active_ttl_secs)
         .arg(alias_key_prefix)
+        .arg(user_id)
         .invoke_async(con)
         .await?;
 
