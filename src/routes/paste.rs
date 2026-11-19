@@ -5,6 +5,7 @@ use crate::error::AppError;
 use crate::models::{CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPasteMeta};
 use crate::storage;
 use crate::storage::blob::{BlobReadGuard, OpenedBlob};
+use crate::storage::paste::StorePasteError;
 use axum::{
     body::Body,
     extract::{multipart::MultipartError, ConnectInfo, Multipart, Path, State},
@@ -38,8 +39,8 @@ pub struct PinAttemptRequest {
 /// - "metadata" field: JSON PasteMetadata (paste_id, encrypted_metadata, paste_type, ttl_secs, burn_after_reading)
 /// - "file" field: encrypted bytes
 ///
-/// Public users: text paste type only
-/// Authenticated users: text and file paste types
+/// Anonymous users: blobs up to `anon_max_bytes`, and a daily per-IP paste quota.
+/// Authenticated users: blobs up to `max_upload_bytes`.
 pub async fn create_paste(
     State(state): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
@@ -61,6 +62,21 @@ pub async fn create_paste(
         Some(("paste", &ip_hash)),
     )
     .await?;
+    if auth_session.is_none() {
+        super::enforce_rate_limit(
+            &mut con,
+            &format!("ratelimit:anon_paste_day:{}", ip_hash),
+            state.config.anon_max_pastes_per_ip_per_day,
+            86400,
+            Some(("anon_paste_day", &ip_hash)),
+        )
+        .await?;
+    }
+    let max_blob_bytes = if auth_session.is_some() {
+        state.config.max_upload_bytes
+    } else {
+        state.config.anon_max_bytes
+    };
 
     let mut metadata: Option<PasteMetadata> = None;
     let mut upload: Option<storage::blob::BlobUpload> = None;
@@ -74,7 +90,7 @@ pub async fn create_paste(
     let too_large = || {
         AppError::PayloadTooLarge(format!(
             "File too large: exceeds limit of {} bytes",
-            state.config.max_upload_bytes
+            max_blob_bytes
         ))
     };
     let multipart_error = |context: &str, e: MultipartError| {
@@ -132,9 +148,7 @@ pub async fn create_paste(
                     .await
                     .map_err(|e| multipart_error("Failed to read file", e))?
                 {
-                    if file.bytes_written() + chunk.len() as u64
-                        > state.config.max_upload_bytes as u64
-                    {
+                    if file.bytes_written() + chunk.len() as u64 > max_blob_bytes as u64 {
                         return Err(too_large());
                     }
                     file.write(&chunk).await.map_err(|e| {
@@ -202,13 +216,6 @@ pub async fn create_paste(
         ));
     }
 
-    // Public users can only create text pastes
-    if auth_session.is_none() && metadata.paste_type == crate::models::PasteType::File {
-        return Err(AppError::Forbidden(
-            "File uploads require authentication".to_string(),
-        ));
-    }
-
     // Use config default if client omitted ttl_secs.
     // ttl_secs=0 means "forever" (no expiration) — admin only to prevent Valkey memory exhaustion.
     let requested_ttl = metadata.ttl_secs.unwrap_or(state.config.default_ttl_secs);
@@ -224,19 +231,6 @@ pub async fn create_paste(
     } else {
         requested_ttl.clamp(60, state.config.max_ttl_secs)
     };
-
-    // Enforce per-user paste count limit (0 = unlimited)
-    if let Some(ref session) = auth_session {
-        if state.config.max_pastes_per_user > 0 {
-            let paste_ids = storage::paste::get_user_paste_ids(&mut con, &session.user_id).await?;
-            if paste_ids.len() >= state.config.max_pastes_per_user {
-                return Err(AppError::BadRequest(format!(
-                    "Paste limit reached ({} max)",
-                    state.config.max_pastes_per_user
-                )));
-            }
-        }
-    }
 
     // Use client-generated paste ID (validated above)
     let paste_id = metadata.paste_id;
@@ -275,19 +269,9 @@ pub async fn create_paste(
                 upload,
                 ttl_secs,
                 config.max_ttl_secs,
+                config.max_pastes_per_user,
             )
-            .await
-            .map_err(|e| {
-                // store_paste returns UnexpectedReturnType with detail "conflict"
-                // when the paste ID already exists (SETNX failed).
-                if e.kind() == redis::ErrorKind::UnexpectedReturnType
-                    && e.detail() == Some("conflict")
-                {
-                    AppError::Conflict("Paste ID already exists".to_string())
-                } else {
-                    AppError::from(e)
-                }
-            })?;
+            .await?;
 
             // On first upload, atomically update user TTL from idle to active.
             // Uses SCARD + TTL comparison to avoid race conditions between concurrent uploads.
@@ -300,17 +284,26 @@ pub async fn create_paste(
                 )
                 .await?;
             }
-            Ok::<(), AppError>(())
+            Ok::<(), StorePasteError>(())
         }
         .await;
-        match &result {
-            Err(AppError::Conflict(_)) => {
-                tracing::debug!("Paste store rejected: ID already exists")
+        result.map_err(|e| match e {
+            StorePasteError::Conflict => {
+                tracing::debug!("Paste store rejected: ID already exists");
+                AppError::Conflict("Paste ID already exists".to_string())
             }
-            Err(e) => tracing::error!(error = %e, "Paste store failed"),
-            Ok(()) => {}
-        }
-        result
+            StorePasteError::QuotaExceeded => {
+                tracing::debug!("Paste store rejected: paste limit reached");
+                AppError::BadRequest(format!(
+                    "Paste limit reached ({} max)",
+                    config.max_pastes_per_user
+                ))
+            }
+            StorePasteError::Redis(e) => {
+                tracing::error!(error = %e, "Paste store failed");
+                AppError::from(e)
+            }
+        })
     })
     .await
     .map_err(|e| {

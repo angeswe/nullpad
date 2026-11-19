@@ -33,6 +33,7 @@
   let currentFile = null;
   let clipboardDirty = false;
   let maxUploadBytes = null; // loaded from /api/config on init
+  let anonMaxBytes = null; // loaded from /api/config on init
 
   // ============================================================================
   // File Upload Handling (trusted users only - public page has no file upload)
@@ -177,11 +178,13 @@
       {
         const { AES_GCM_OVERHEAD, V1_HEADER_LEN, contentPadTarget } = NullpadCrypto;
         const framedLen = contentBytes.length + V1_HEADER_LEN;
-        const serverCap = (maxUploadBytes !== null ? maxUploadBytes : 52428800);
+        const isAnonymous = typeof NullpadAuth === 'undefined' || !NullpadAuth.getAuthHeader();
+        const userCap = isAnonymous ? anonMaxBytes : maxUploadBytes;
+        const serverCap = (userCap !== null ? userCap : 52428800);
         const topBucket = serverCap - AES_GCM_OVERHEAD;
         if (contentPadTarget(framedLen) === null || framedLen >= topBucket) {
-          const limitMB = ((serverCap - AES_GCM_OVERHEAD - V1_HEADER_LEN) / (1024 * 1024)).toFixed(0);
-          throw new Error(`Content too large: exceeds maximum supported upload size. Maximum is ${limitMB}MB.`);
+          const limit = formatFileSize(serverCap - AES_GCM_OVERHEAD - V1_HEADER_LEN);
+          throw new Error(`Content too large: exceeds maximum supported upload size. Maximum is ${limit}.`);
         }
       }
 
@@ -435,6 +438,9 @@
         const cfg = await res.json();
         if (typeof cfg.max_upload_bytes === 'number') {
           maxUploadBytes = cfg.max_upload_bytes;
+        }
+        if (typeof cfg.anon_max_bytes === 'number') {
+          anonMaxBytes = cfg.anon_max_bytes;
         }
       }
     } catch (e) { console.warn('Failed to fetch server config:', e.message); }

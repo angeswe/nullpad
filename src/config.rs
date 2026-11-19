@@ -16,6 +16,10 @@ pub struct Config {
 
     // Limits
     pub max_upload_bytes: usize,
+    /// Largest blob an anonymous (unauthenticated) upload may send.
+    pub anon_max_bytes: usize,
+    /// Anonymous pastes one IP may attempt per day.
+    pub anon_max_pastes_per_ip_per_day: u32,
     /// How many paste bodies can be streamed at once. A paste GET or PIN
     /// attempt that finds no free slot gets 503.
     pub max_concurrent_blob_reads: usize,
@@ -59,6 +63,11 @@ impl std::fmt::Debug for Config {
             .field("valkey_url", &"[REDACTED]")
             .field("bind_addr", &self.bind_addr)
             .field("max_upload_bytes", &self.max_upload_bytes)
+            .field("anon_max_bytes", &self.anon_max_bytes)
+            .field(
+                "anon_max_pastes_per_ip_per_day",
+                &self.anon_max_pastes_per_ip_per_day,
+            )
             .field("max_concurrent_blob_reads", &self.max_concurrent_blob_reads)
             .field("write_timeout_secs", &self.write_timeout_secs)
             .field("default_ttl_secs", &self.default_ttl_secs)
@@ -163,6 +172,10 @@ impl Config {
 
         // Limits
         let max_upload_bytes = parse_env_or_default("MAX_UPLOAD_BYTES", 52_428_800)?;
+        // The 256 KiB padding bucket plus 28 bytes of AES-GCM IV and tag.
+        let anon_max_bytes = parse_env_or_default("ANON_MAX_BYTES", 262_172)?;
+        let anon_max_pastes_per_ip_per_day =
+            parse_env_or_default("ANON_MAX_PASTES_PER_IP_PER_DAY", 100)?;
         let max_concurrent_blob_reads = parse_env_or_default("MAX_CONCURRENT_BLOB_READS", 32)?;
         if max_concurrent_blob_reads == 0 {
             return Err(ConfigError::InvalidValue(
@@ -228,6 +241,8 @@ impl Config {
             valkey_url,
             bind_addr,
             max_upload_bytes,
+            anon_max_bytes,
+            anon_max_pastes_per_ip_per_day,
             max_concurrent_blob_reads,
             write_timeout_secs,
             default_ttl_secs,
@@ -299,6 +314,8 @@ mod tests {
         env::remove_var("PASTE_STORAGE_PATH");
         env::remove_var("MAX_CONCURRENT_BLOB_READS");
         env::remove_var("WRITE_TIMEOUT_SECS");
+        env::remove_var("ANON_MAX_BYTES");
+        env::remove_var("ANON_MAX_PASTES_PER_IP_PER_DAY");
     }
 
     #[test]
@@ -556,6 +573,8 @@ mod tests {
         assert_eq!(config.rate_limit_pin_attempt_global, 30);
         assert_eq!(config.max_sessions_per_user, 5);
         assert_eq!(config.max_pastes_per_user, 50);
+        assert_eq!(config.anon_max_bytes, 262_172);
+        assert_eq!(config.anon_max_pastes_per_ip_per_day, 100);
         assert_eq!(
             config.paste_storage_path,
             std::path::PathBuf::from("/data/pastes")
@@ -600,6 +619,25 @@ mod tests {
             "expected InvalidValue for WRITE_TIMEOUT_SECS, got {:?}",
             err
         );
+        clear_test_env();
+    }
+
+    #[test]
+    fn anon_limits_reject_invalid_values() {
+        let _guard = lock_test();
+        for key in ["ANON_MAX_BYTES", "ANON_MAX_PASTES_PER_IP_PER_DAY"] {
+            clear_test_env();
+            env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+            env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+            env::set_var(key, "not-a-number");
+            let err = Config::from_env().unwrap_err();
+            assert!(
+                matches!(err, ConfigError::ParseError(ref s, _) if s == key),
+                "expected ParseError for {}, got {:?}",
+                key,
+                err
+            );
+        }
         clear_test_env();
     }
 }
