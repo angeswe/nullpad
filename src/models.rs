@@ -93,7 +93,7 @@ pub struct StoredPasteMeta {
     pub created_at: u64,
     pub owner_id: Option<String>,
     #[serde(default)]
-    pub has_pin: bool,
+    pub has_pin: Option<bool>,
     /// HMAC-SHA256(derived_key, paste_id) — server-side PIN verifier (base64).
     #[serde(default)]
     pub pin_verifier: Option<String>,
@@ -247,6 +247,41 @@ impl std::str::FromStr for Role {
             "admin" => Ok(Role::Admin),
             "trusted" => Ok(Role::Trusted),
             _ => Err(format!("Invalid role: {}", s)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stored_meta_json(has_pin: Option<bool>) -> serde_json::Value {
+        let mut json = serde_json::json!({
+            "id": "abcdefghijkl",
+            "burn_after_reading": false,
+            "created_at": 0,
+            "owner_id": null,
+        });
+        if let Some(has_pin) = has_pin {
+            json["has_pin"] = serde_json::Value::Bool(has_pin);
+        }
+        json
+    }
+
+    #[test]
+    fn stored_meta_without_has_pin_key_reads_as_none() {
+        let meta: StoredPasteMeta = serde_json::from_value(stored_meta_json(None)).unwrap();
+        assert_eq!(meta.has_pin, None);
+    }
+
+    #[test]
+    fn stored_meta_has_pin_round_trips_as_bool() {
+        for has_pin in [false, true] {
+            let meta: StoredPasteMeta =
+                serde_json::from_value(stored_meta_json(Some(has_pin))).unwrap();
+            assert_eq!(meta.has_pin, Some(has_pin));
+            let json = serde_json::to_value(&meta).unwrap();
+            assert_eq!(json["has_pin"], serde_json::Value::Bool(has_pin));
         }
     }
 }

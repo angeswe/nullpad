@@ -244,7 +244,7 @@ pub async fn create_paste(
         burn_after_reading: metadata.burn_after_reading,
         created_at: crate::util::now_secs(),
         owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
-        has_pin: metadata.has_pin,
+        has_pin: Some(metadata.has_pin),
         // Only store a verifier that passed the has_pin checks above.
         pin_verifier: if metadata.has_pin {
             metadata.pin_verifier
@@ -471,18 +471,30 @@ pub async fn get_paste(
         .await?
         .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
-    if meta.has_pin {
-        // PIN-gated: probe frame without content. No blob is read, so no
-        // permit is taken.
-        let probe = GetPasteResponse {
-            encrypted_metadata: None,
-            filename: None,
-            content_type: None,
-            burn_after_reading: meta.burn_after_reading,
-            created_at: None,
-            needs_pin: Some(true),
-        };
-        return paste_frame_response(&probe, None);
+    match meta.has_pin {
+        Some(true) => {
+            // PIN-gated: probe frame without content. No blob is read, so no
+            // permit is taken.
+            let probe = GetPasteResponse {
+                encrypted_metadata: None,
+                filename: None,
+                content_type: None,
+                burn_after_reading: meta.burn_after_reading,
+                created_at: None,
+                needs_pin: Some(true),
+            };
+            return paste_frame_response(&probe, None);
+        }
+        Some(false) => {}
+        // Written before server-side PIN gating: it may be a PIN paste whose
+        // ciphertext the server cannot gate, so it is never served.
+        None => {
+            tracing::warn!(
+                action = "legacy_paste_refused",
+                "Paste record has no has_pin field"
+            );
+            return Err(AppError::NotFound("Paste not found".to_string()));
+        }
     }
 
     let permit = acquire_blob_read_permit(&state)?;
@@ -552,7 +564,7 @@ pub async fn attempt_paste(
         .await?
         .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
 
-    if !meta.has_pin {
+    if meta.has_pin != Some(true) {
         return Err(AppError::NotFound("Paste not found".to_string()));
     }
 
