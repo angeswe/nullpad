@@ -34,6 +34,16 @@ fn get_valkey_url() -> &'static str {
         .expect("VALKEY_URL not initialized — tests must run via main()")
 }
 
+/// Parent of every per-test paste storage directory. `main()` owns the
+/// `TempDir` and deletes it after all tests, including ones that panicked.
+static STORAGE_ROOT: OnceLock<std::path::PathBuf> = OnceLock::new();
+
+fn storage_root() -> &'static std::path::Path {
+    STORAGE_ROOT
+        .get()
+        .expect("STORAGE_ROOT not initialized — tests must run via main()")
+}
+
 /// Run a named async test function, printing pass/fail like the default harness.
 async fn run_test<F, Fut>(name: &str, f: F) -> bool
 where
@@ -84,6 +94,13 @@ async fn main() {
     VALKEY_URL
         .set(format!("redis://{}:{}", host, port))
         .expect("VALKEY_URL already set");
+    let storage_dir = tempfile::Builder::new()
+        .prefix("nullpad_test_")
+        .tempdir()
+        .expect("Failed to create test storage root");
+    STORAGE_ROOT
+        .set(storage_dir.path().to_path_buf())
+        .expect("STORAGE_ROOT already set");
 
     let (passed, failed) = run_tests![
         test_create_and_get_paste,
@@ -172,6 +189,10 @@ async fn main() {
         .rm()
         .await
         .expect("Failed to remove Valkey container");
+    // `process::exit` below skips destructors, so remove the directory here.
+    storage_dir
+        .close()
+        .expect("Failed to remove test storage root");
 
     println!(
         "\ntest result: {}. {} passed; {} failed\n",
@@ -274,8 +295,7 @@ async fn spawn_test_server_configured(
         .await
         .expect("Failed to upsert admin");
 
-    let paste_storage_path =
-        std::env::temp_dir().join(format!("nullpad_test_{}", nanoid::nanoid!(8)));
+    let paste_storage_path = storage_root().join(format!("server_{}", nanoid::nanoid!(8)));
     storage::blob::init_storage(&paste_storage_path)
         .await
         .expect("Failed to init paste storage");
@@ -4215,8 +4235,7 @@ async fn test_cleanup_reclaims_all_orphans_beyond_cap() {
         .get_connection_manager()
         .await
         .unwrap();
-    let storage_path =
-        std::env::temp_dir().join(format!("nullpad_cleanup_test_{}", nanoid::nanoid!(8)));
+    let storage_path = storage_root().join(format!("cleanup_{}", nanoid::nanoid!(8)));
     let blob_path = |id: &str| storage_path.join(&id[..2]).join(id);
 
     let live_ids: Vec<String> = (0..1200).map(|_| nanoid::nanoid!(10)).collect();
