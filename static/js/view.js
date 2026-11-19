@@ -683,6 +683,9 @@
     contentFetched = false;
     pinAttempts = 0;
     pinBackoffUntil = 0;
+    contentDisplay.replaceChildren();
+    rawContent.textContent = '';
+    contentPanel.classList.add('hidden');
     // Best-effort clipboard clear (may fail without user gesture)
     if (clipboardDirty && navigator.clipboard) {
       navigator.clipboard.writeText('').catch(() => {});
@@ -699,6 +702,10 @@
 
     // Zero sensitive data on page unload
     window.addEventListener('pagehide', clearSensitiveData);
+    // A reload re-decrypts only if the key fragment is still in the URL; fetchAndShow strips it.
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted) window.location.reload();
+    });
 
     // Load paste
     loadPaste();
