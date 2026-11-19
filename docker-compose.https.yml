@@ -5,6 +5,8 @@ services:
   # cookies, and break crypto.subtle — defeating the point of the override.
   nullpad:
     ports: !reset []
+    environment:
+      - TRUSTED_PROXY_COUNT=1
 
   caddy:
     image: caddy:2-alpine
