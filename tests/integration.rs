@@ -15,7 +15,7 @@ use futures::FutureExt;
 use hmac::{Hmac, KeyInit, Mac};
 use nullpad::{
     auth::middleware::AppState, cleanup, config::Config, listener::WriteTimeoutListener,
-    middleware::security_headers, routes, storage,
+    middleware::security_headers, routes, routes::paste::MAX_BLOB_READS_PER_IP, storage,
 };
 use reqwest::multipart;
 use sha2::Sha256;
@@ -114,6 +114,14 @@ async fn main() {
         test_failed_commit_leaves_no_record_or_owner_entry,
         test_store_paste_returns_typed_rejections,
         test_duplicate_paste_id_returns_409,
+        test_paste_id_not_reusable_after_burn,
+        test_paste_id_not_reusable_after_admin_delete,
+        test_paste_id_not_reusable_after_expiry,
+        test_unreserved_paste_id_refused,
+        test_reserve_issues_id_with_ttl,
+        test_expired_reservation_refused,
+        test_concurrent_creates_with_one_reservation_store_one,
+        test_reserve_rate_limited,
         test_auth_challenge_response_flow,
         test_auth_challenge_unknown_user,
         test_auth_verify_invalid_signature,
@@ -182,6 +190,8 @@ async fn main() {
         test_concurrent_blob_reads_bounded,
         test_stalled_blob_reader_released_by_write_timeout,
         test_pin_attempt_503_does_not_consume_pin_attempt,
+        test_blob_reads_per_ip_capped,
+        test_per_ip_cap_leaves_blob_reads_for_other_ips,
         test_admin_delete_during_stream_keeps_streamed_bytes,
         test_oversized_json_body_returns_413,
         test_paste_over_default_body_limit_succeeds,
@@ -254,6 +264,7 @@ struct TestServerOverrides {
     request_timeout: std::time::Duration,
     /// Requests handled at once; further requests wait for a slot.
     max_concurrent_requests: usize,
+    rate_limit_paste_per_min: u32,
 }
 
 impl Default for TestServerOverrides {
@@ -272,6 +283,7 @@ impl Default for TestServerOverrides {
             max_pastes_per_user: 50,
             request_timeout: std::time::Duration::from_secs(120),
             max_concurrent_requests: 256,
+            rate_limit_paste_per_min: 10000,
         }
     }
 }
@@ -329,7 +341,7 @@ async fn spawn_test_server_configured(
         user_active_ttl_secs: 86400,
         session_ttl_secs: 900,
         challenge_ttl_secs: 30,
-        rate_limit_paste_per_min: 10000,
+        rate_limit_paste_per_min: overrides.rate_limit_paste_per_min,
         rate_limit_auth_per_min: overrides.rate_limit_auth_per_min,
         rate_limit_pin_attempt: overrides.rate_limit_pin_attempt,
         rate_limit_pin_attempt_global: overrides.rate_limit_pin_attempt_global,
@@ -345,6 +357,7 @@ async fn spawn_test_server_configured(
         blob_read_permits: Arc::new(tokio::sync::Semaphore::new(
             config.max_concurrent_blob_reads,
         )),
+        blob_reads_per_ip: Default::default(),
         config: Arc::new(config),
         ip_hmac_salt: Arc::new(rand::random()),
     };
@@ -419,6 +432,39 @@ async fn spawn_test_server_with_storage() -> (
     spawn_test_server_configured(TestServerOverrides::default()).await
 }
 
+/// Spin up a test server that takes the client IP from `X-Forwarded-For`
+/// (see [`get_from_ip`]). Returns the base URL, a Valkey connection, the
+/// paste storage path and a client with a 10 s timeout.
+async fn spawn_trusted_proxy_server(
+    overrides: TestServerOverrides,
+) -> (
+    String,
+    redis::aio::ConnectionManager,
+    std::path::PathBuf,
+    reqwest::Client,
+) {
+    let (base_url, con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            trusted_proxy_count: 1,
+            ..overrides
+        })
+        .await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    (base_url, con, storage_path, client)
+}
+
+/// GET `url` as client IP `ip`, on a server from [`spawn_trusted_proxy_server`].
+async fn get_from_ip(
+    client: &reqwest::Client,
+    url: &str,
+    ip: &str,
+) -> reqwest::Result<reqwest::Response> {
+    client.get(url).header("X-Forwarded-For", ip).send().await
+}
+
 /// Helper: perform full challenge -> sign -> verify login flow, return session token.
 async fn admin_login(
     client: &reqwest::Client,
@@ -478,7 +524,7 @@ async fn create_paste(
     token: Option<&str>,
     has_pin: bool,
 ) -> reqwest::Response {
-    let paste_id = nanoid::nanoid!(12);
+    let paste_id = reserve_id(client, base_url).await;
     // Use a dummy base64 blob as encrypted_metadata (server stores opaquely)
     let encrypted_metadata = general_purpose::STANDARD.encode(b"encrypted-file-metadata");
 
@@ -751,6 +797,8 @@ async fn test_failed_commit_leaves_no_record_or_owner_entry() {
     // record and the user_pastes entry were written.
     let id = format!("../{}", nanoid::nanoid!(12));
     let owner = format!("owner_{}", nanoid::nanoid!(8));
+    // reserve_paste_id never issues an ID like this one.
+    let _: () = con.set(format!("paste_reserve:{}", id), 1).await.unwrap();
     let meta = nullpad::models::StoredPasteMeta {
         id: id.clone(),
         encrypted_metadata: general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
@@ -817,13 +865,14 @@ async fn store_test_paste<C: redis::AsyncCommands>(
 }
 
 async fn test_store_paste_returns_typed_rejections() {
+    use redis::AsyncCommands;
     use storage::paste::StorePasteError;
 
     let (_base_url, mut con, _admin_key, _admin_alias, storage_path) =
         spawn_test_server_with_storage().await;
     let owner = format!("owner_{}", nanoid::nanoid!(8));
-    let first = nanoid::nanoid!(12);
-    let second = nanoid::nanoid!(12);
+    let first = storage::paste::reserve_paste_id(&mut con).await.unwrap();
+    let second = storage::paste::reserve_paste_id(&mut con).await.unwrap();
 
     assert!(
         store_test_paste(&mut con, &storage_path, &first, Some(&owner), 1)
@@ -834,10 +883,16 @@ async fn test_store_paste_returns_typed_rejections() {
         store_test_paste(&mut con, &storage_path, &second, Some(&owner), 1).await,
         Err(StorePasteError::QuotaExceeded)
     ));
+    // No reservation: `second` spent its own on the store the quota refused.
     assert!(matches!(
-        store_test_paste(&mut con, &storage_path, &first, Some(&owner), 0).await,
+        store_test_paste(&mut con, &storage_path, &second, Some(&owner), 0).await,
         Err(StorePasteError::Conflict)
     ));
+    // Reserved again, so this store reaches the SET NX on the existing record.
+    let _: () = con
+        .set(format!("paste_reserve:{}", first), 1)
+        .await
+        .unwrap();
     assert!(matches!(
         store_test_paste(&mut con, &storage_path, &first, None, 0).await,
         Err(StorePasteError::Conflict)
@@ -849,7 +904,7 @@ async fn test_duplicate_paste_id_returns_409() {
     let client = reqwest::Client::new();
 
     // Use a fixed paste ID for both requests
-    let paste_id = nanoid::nanoid!(12);
+    let paste_id = reserve_id(&client, &base_url).await;
     let encrypted_metadata = general_purpose::STANDARD.encode(b"encrypted-file-metadata");
 
     let metadata = serde_json::json!({
@@ -910,6 +965,154 @@ async fn test_duplicate_paste_id_returns_409() {
 }
 
 // ============================================================================
+// Paste ID Reservation Tests
+// ============================================================================
+
+/// POST /api/paste/reserve and return the issued paste ID.
+async fn reserve_id(client: &reqwest::Client, base_url: &str) -> String {
+    let resp = client
+        .post(format!("{}/api/paste/reserve", base_url))
+        .send()
+        .await
+        .expect("Failed to send request");
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    body["id"].as_str().unwrap().to_string()
+}
+
+/// POST /api/paste without auth: a text paste stored under `paste_id`.
+async fn post_paste_with_id(
+    client: &reqwest::Client,
+    base_url: &str,
+    paste_id: &str,
+    burn: bool,
+) -> reqwest::Response {
+    let mut metadata = anon_text_paste_metadata(paste_id);
+    metadata["burn_after_reading"] = serde_json::Value::Bool(burn);
+    post_paste_with_raw_metadata(client, base_url, metadata.to_string()).await
+}
+
+async fn test_paste_id_not_reusable_after_burn() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let id = reserve_id(&client, &base_url).await;
+    let resp = post_paste_with_id(&client, &base_url, &id, true).await;
+    assert_eq!(resp.status(), 200);
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let resp = post_paste_with_id(&client, &base_url, &id, false).await;
+    assert_eq!(resp.status(), 409);
+}
+
+async fn test_paste_id_not_reusable_after_admin_delete() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let id = reserve_id(&client, &base_url).await;
+    let resp = post_paste_with_id(&client, &base_url, &id, false).await;
+    assert_eq!(resp.status(), 200);
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let resp = client
+        .delete(format!("{}/api/paste/{}", base_url, id))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let resp = post_paste_with_id(&client, &base_url, &id, false).await;
+    assert_eq!(resp.status(), 409);
+}
+
+async fn test_paste_id_not_reusable_after_expiry() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let id = reserve_id(&client, &base_url).await;
+    let resp = post_paste_with_id(&client, &base_url, &id, false).await;
+    assert_eq!(resp.status(), 200);
+    let _: () = con.del(format!("paste:{}", id)).await.unwrap();
+
+    let resp = post_paste_with_id(&client, &base_url, &id, false).await;
+    assert_eq!(resp.status(), 409);
+}
+
+async fn test_unreserved_paste_id_refused() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let resp = post_paste_with_id(&client, &base_url, &nanoid::nanoid!(12), false).await;
+    assert_eq!(resp.status(), 409);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        body["error"],
+        "Paste ID is not reserved or was already used. Reload the page and try again."
+    );
+}
+
+async fn test_reserve_issues_id_with_ttl() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let id = reserve_id(&client, &base_url).await;
+    assert_eq!(id.len(), 12);
+    let ttl: i64 = con.ttl(format!("paste_reserve:{}", id)).await.unwrap();
+    assert!((1..=600).contains(&ttl), "reservation TTL was {}", ttl);
+}
+
+async fn test_expired_reservation_refused() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let id = reserve_id(&client, &base_url).await;
+    let _: () = con.del(format!("paste_reserve:{}", id)).await.unwrap();
+
+    let resp = post_paste_with_id(&client, &base_url, &id, false).await;
+    assert_eq!(resp.status(), 409);
+}
+
+async fn test_concurrent_creates_with_one_reservation_store_one() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let id = reserve_id(&client, &base_url).await;
+    let responses = futures::future::join_all(
+        (0..8).map(|_| post_paste_with_id(&client, &base_url, &id, false)),
+    )
+    .await;
+    let stored = responses.iter().filter(|r| r.status() == 200).count();
+    assert_eq!(stored, 1);
+}
+
+async fn test_reserve_rate_limited() {
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            rate_limit_paste_per_min: 2,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+
+    reserve_id(&client, &base_url).await;
+    reserve_id(&client, &base_url).await;
+    let resp = client
+        .post(format!("{}/api/paste/reserve", base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+}
+
+// ============================================================================
 // Per-User Paste Quota Race Tests
 // ============================================================================
 
@@ -943,16 +1146,10 @@ async fn test_concurrent_creates_respect_max_pastes_per_user() {
         let storage_path = storage_path.clone();
         let user_id = user_id.clone();
         let start = start.clone();
+        let id = storage::paste::reserve_paste_id(&mut con).await.unwrap();
         handles.push(tokio::spawn(async move {
             start.wait().await;
-            store_test_paste(
-                &mut task_con,
-                &storage_path,
-                &nanoid::nanoid!(12),
-                Some(&user_id),
-                3,
-            )
-            .await
+            store_test_paste(&mut task_con, &storage_path, &id, Some(&user_id), 3).await
         }));
     }
     let (mut stored, mut rejected) = (0, 0);
@@ -2316,11 +2513,9 @@ async fn test_challenge_nonce_single_use() {
 // ============================================================================
 
 async fn test_concurrent_burn_after_reading_race() {
-    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap();
+    // Each request comes from its own IP, so the per-IP read cap does not apply.
+    let (base_url, _con, _storage_path, client) =
+        spawn_trusted_proxy_server(TestServerOverrides::default()).await;
 
     // Create a burn-after-reading paste
     let resp = create_paste(
@@ -2340,10 +2535,12 @@ async fn test_concurrent_burn_after_reading_race() {
 
     // Launch 10 concurrent requests to fetch the same paste
     let mut handles = vec![];
-    for _ in 0..10 {
+    for i in 0..10 {
         let url = format!("{}/api/paste/{}", base_url, paste_id);
         let c = client.clone();
-        handles.push(tokio::spawn(async move { c.get(&url).send().await }));
+        handles.push(tokio::spawn(async move {
+            get_from_ip(&c, &url, &format!("203.0.113.{}", i)).await
+        }));
     }
 
     // Collect results
@@ -3449,7 +3646,7 @@ async fn test_stored_blob_preserves_bucket_size() {
         let payload: Vec<u8> = (0..upload_len).map(|i| (i & 0xff) as u8).collect();
 
         // Use a fixed paste ID so we can locate the blob on disk
-        let paste_id = nanoid::nanoid!(12);
+        let paste_id = reserve_id(&client, &base_url).await;
         let encrypted_metadata = general_purpose::STANDARD.encode(b"encrypted-file-metadata");
 
         let metadata = serde_json::json!({
@@ -3589,11 +3786,12 @@ async fn read_paste_record(
     }
 }
 
-/// Paste IDs are client-chosen. When a PIN paste's Valkey record expires, its
-/// blob stays on disk until the cleanup job runs. Anyone can then claim the
-/// same ID with a new paste that has no PIN. store_paste claims the key before
-/// the new blob replaces the old one, so a GET in that window sees the new
-/// record (no PIN) next to the OLD blob.
+/// When a PIN paste's Valkey record expires, its blob stays on disk until the
+/// cleanup job runs. Paste IDs were once client-chosen, so anyone could then
+/// claim the same ID with a new paste that has no PIN. store_paste claims the
+/// key before the new blob replaces the old one, so a GET in that window saw
+/// the new record (no PIN) next to the OLD blob. The server now issues each ID
+/// once; the hash check stays as a second barrier.
 ///
 /// This test builds that window directly: it replaces the record with what
 /// store_paste writes for the attacker's paste (no PIN, hash of the
@@ -3979,7 +4177,9 @@ async fn store_large_paste(
     storage_path: &std::path::Path,
     len: usize,
 ) -> String {
-    let id = nanoid::nanoid!(12);
+    let id = storage::paste::reserve_paste_id(con)
+        .await
+        .expect("Failed to reserve paste ID");
     let meta = nullpad::models::StoredPasteMeta {
         id: id.clone(),
         encrypted_metadata: general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
@@ -4160,6 +4360,69 @@ async fn test_pin_attempt_503_does_not_consume_pin_attempt() {
     );
     let (_meta, content) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert_eq!(content, pin_content);
+}
+
+async fn test_blob_reads_per_ip_capped() {
+    let (base_url, mut con, storage_path, client) =
+        spawn_trusted_proxy_server(TestServerOverrides::default()).await;
+    let id = store_large_paste(&mut con, &storage_path, LARGE_PASTE_BYTES).await;
+    let url = format!("{}/api/paste/{}", base_url, id);
+    let get = || get_from_ip(&client, &url, "203.0.113.7");
+
+    let mut held = Vec::new();
+    for _ in 0..MAX_BLOB_READS_PER_IP {
+        let resp = get().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        held.push(resp);
+    }
+
+    let resp = get().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        429,
+        "a read over the per-IP cap must get 429"
+    );
+
+    drop(held);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let resp = get().await.unwrap();
+        if resp.status() == 200 {
+            break;
+        }
+        assert_eq!(resp.status(), 429);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "per-IP read slots were not released after the bodies were dropped"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn test_per_ip_cap_leaves_blob_reads_for_other_ips() {
+    let (base_url, mut con, storage_path, client) =
+        spawn_trusted_proxy_server(TestServerOverrides {
+            max_concurrent_blob_reads: MAX_BLOB_READS_PER_IP + 1,
+            ..Default::default()
+        })
+        .await;
+    let id = store_large_paste(&mut con, &storage_path, LARGE_PASTE_BYTES).await;
+    let url = format!("{}/api/paste/{}", base_url, id);
+
+    // One IP tries to hold every global permit with reads it never finishes.
+    let mut held = Vec::new();
+    for _ in 0..=MAX_BLOB_READS_PER_IP {
+        held.push(get_from_ip(&client, &url, "203.0.113.7").await.unwrap());
+    }
+
+    let resp = get_from_ip(&client, &url, "198.51.100.9").await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "one IP at its per-IP cap must not block reads from another IP"
+    );
+    drop(resp);
+    drop(held);
 }
 
 async fn test_admin_delete_during_stream_keeps_streamed_bytes() {
@@ -4418,7 +4681,7 @@ async fn test_second_file_field_replaces_first() {
     let (base_url, _con, _admin_key, _admin_alias, storage) =
         spawn_test_server_with_storage().await;
     let client = reqwest::Client::new();
-    let paste_id = nanoid::nanoid!(12);
+    let paste_id = reserve_id(&client, &base_url).await;
     let metadata = serde_json::json!({
         "paste_id": paste_id,
         "encrypted_metadata": general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
@@ -4502,8 +4765,10 @@ async fn test_slow_request_times_out_with_408() {
     );
 }
 
-/// The request timeout fires after SET NX is sent, while a paused Valkey holds
-/// it. The paste must still be stored in full and listed under its owner.
+/// The request timeout fires after the store's first write (the reservation
+/// DEL) is sent, while a paused Valkey holds it. The SET NX runs after the
+/// handler is gone. The paste must still be stored in full and listed under
+/// its owner.
 async fn test_timeout_after_paste_id_claim_still_records_owner() {
     use redis::AsyncCommands;
     use tokio::io::AsyncWriteExt;
@@ -4517,7 +4782,7 @@ async fn test_timeout_after_paste_id_claim_still_records_owner() {
     let client = reqwest::Client::new();
     let token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
 
-    let paste_id = nanoid::nanoid!(12);
+    let paste_id = reserve_id(&client, &base_url).await;
     let metadata = serde_json::json!({
         "paste_id": paste_id,
         "encrypted_metadata": general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
@@ -4549,11 +4814,11 @@ async fn test_timeout_after_paste_id_claim_still_records_owner() {
         )
         .await
         .unwrap();
-    // SET NX is sent at about 800 ms and held by the pause. The 1 s request
+    // The reservation DEL is sent at about 800 ms and held by the pause. The 1 s request
     // timeout drops the handler at 1000 ms. Writes resume at about 1150 ms,
     // inside the 500 ms Valkey response timeout of the server's connection.
     // `con` shares the server's Valkey connection, so UNPAUSE on it would queue
-    // behind the held SET NX.
+    // behind the held DEL.
     let mut control = redis::Client::open(get_valkey_url())
         .unwrap()
         .get_multiplexed_async_connection()

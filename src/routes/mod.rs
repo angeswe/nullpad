@@ -272,6 +272,7 @@ pub fn api_router(
             "/api/paste",
             post(paste::create_paste).layer(DefaultBodyLimit::max(max_upload_bytes)),
         )
+        .route("/api/paste/reserve", post(paste::reserve_paste))
         .route(
             "/api/paste/{id}",
             get(paste::get_paste)
