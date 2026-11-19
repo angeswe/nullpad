@@ -4,6 +4,7 @@
 //! - nullpad-kry: Essential security headers (Referrer-Policy, X-Content-Type-Options, etc.)
 //! - nullpad-2hm: Content Security Policy hardening
 
+use crate::routes::PROTECTED_PATHS;
 use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Response};
 
 /// Middleware that adds comprehensive security headers to all responses.
@@ -52,19 +53,24 @@ use axum::{extract::Request, http::HeaderValue, middleware::Next, response::Resp
 ///     .layer(middleware::from_fn(security_headers));
 /// ```
 pub async fn security_headers(request: Request, next: Next) -> Response {
-    let is_api = {
-        let path = request.uri().path();
-        path.starts_with("/api/") || path == "/healthz"
-    };
+    let path = request.uri().path();
+    let is_api = path.starts_with("/api/") || path == "/healthz";
+    let is_protected = PROTECTED_PATHS.contains(&path);
 
     let mut response = next.run(request).await;
     let headers = response.headers_mut();
 
-    // Cache control: no-store for API responses, short revalidating cache for static assets.
+    // Cache control: no-store for API responses; no-store, private for auth-gated pages
+    // (keeps them out of shared caches and bfcache); short revalidating cache for static assets.
     // Static assets are unversioned (no content-hash filenames), so aggressive caching
     // would prevent security updates from reaching users.
     if is_api {
         headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    } else if is_protected {
+        headers.insert(
+            "cache-control",
+            HeaderValue::from_static("no-store, private"),
+        );
     } else {
         headers.insert(
             "cache-control",
