@@ -2,7 +2,7 @@ services:
   nullpad:
     build: .
     ports:
-      - "3015:3000"
+      - "127.0.0.1:3015:3000"
     depends_on:
       valkey:
         condition: service_healthy
