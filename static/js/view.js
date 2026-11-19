@@ -430,6 +430,18 @@
     }
   }
 
+  function showContentOrRenderError(decrypted) {
+    try {
+      showContent(decrypted);
+    } catch (err) {
+      console.error('Paste rendering failed:', err);
+      contentPanel.classList.add('hidden');
+      showError(metadata.burn
+        ? 'Failed to render paste content. This was a burn-after-reading paste and it has already been consumed, so it cannot be viewed again.'
+        : 'Failed to render paste content. Open the original link again to retry.');
+    }
+  }
+
   // ============================================================================
   // Event Handlers
   // ============================================================================
@@ -455,6 +467,7 @@
       return;
     }
 
+    let decrypted;
     try {
       // Derive key with PIN first (needed for both verifier and decryption)
       const derived = await NullpadCrypto.deriveKeyWithPin(encryptionKey, pin, pinSalt);
@@ -484,8 +497,7 @@
         }
       }
 
-      const decrypted = await decryptPaste(pin);
-      showContent(decrypted);
+      decrypted = await decryptPaste(pin);
     } catch (err) {
       pinAttempts++;
       // Exponential backoff: 1s, 2s, 4s, 8s, 16s, 30s max
@@ -517,7 +529,9 @@
         : 'Invalid PIN. Please try again.';
       pinInput.value = '';
       pinInput.focus();
+      return;
     }
+    showContentOrRenderError(decrypted);
   }
 
   function handleDownload() {
@@ -622,13 +636,15 @@
         showPinPrompt();
       } else {
         // Try to decrypt without PIN first
+        let decrypted;
         try {
-          const decrypted = await decryptPaste();
-          showContent(decrypted);
+          decrypted = await decryptPaste();
         } catch (err) {
           // Decryption failed - probably needs PIN
           showPinPrompt();
+          return;
         }
+        showContentOrRenderError(decrypted);
       }
     } catch (err) {
       showError(err.message);

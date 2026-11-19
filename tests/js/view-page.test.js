@@ -102,10 +102,16 @@ function loadViewJs(locationOverrides, sandboxOverrides) {
   elementIds.forEach((id) => { elements[id] = makeElement(); });
 
   const docListeners = {};
+  const createdElements = [];
   let readyState = 'loading';
   const document = {
     get readyState() { return readyState; },
     getElementById: (id) => elements[id] || null,
+    createElement() {
+      const el = makeElement();
+      createdElements.push(el);
+      return el;
+    },
     addEventListener(type, handler) {
       (docListeners[type] = docListeners[type] || []).push(handler);
     },
@@ -127,7 +133,7 @@ function loadViewJs(locationOverrides, sandboxOverrides) {
     removeEventListener() {}
   };
 
-  const NullpadCrypto = {
+  const NullpadCrypto = (sandboxOverrides && sandboxOverrides.NullpadCrypto) || {
     base64urlDecode: () => new Uint8Array(32)
   };
 
@@ -137,8 +143,9 @@ function loadViewJs(locationOverrides, sandboxOverrides) {
   const sandbox = {
     window,
     document,
-    fetch,
+    fetch: (sandboxOverrides && sandboxOverrides.fetch) || fetch,
     NullpadCrypto,
+    TextDecoder,
     NullpadUtils: (sandboxOverrides && sandboxOverrides.NullpadUtils) || loadNullpadUtils(),
     URLSearchParams,
     console: {
@@ -157,7 +164,7 @@ function loadViewJs(locationOverrides, sandboxOverrides) {
   readyState = 'complete';
   (docListeners.DOMContentLoaded || []).forEach((h) => h());
 
-  return { elements, fetchCalls, consoleCalls, historyCalls };
+  return { elements, createdElements, fetchCalls, consoleCalls, historyCalls };
 }
 
 test('view.js does not request the paste on load when the URL carries the burn hint', () => {
@@ -323,4 +330,84 @@ test('view.js logs the underlying error to console when reading the burn hint th
     loggedErrors.includes(thrown),
     'the caught error must be passed to console.warn or console.error'
   );
+});
+
+// ============================================================================
+// Wiring: an exception while rendering decrypted content is a render error,
+// not a decryption failure, and must never count as a wrong PIN.
+// ============================================================================
+
+const RENDER_ERROR = 'Failed to render paste content. Open the original link again to retry.';
+const DECRYPT_ERROR = 'Decryption failed. Invalid key or PIN.';
+
+// Fetch responses whose body is the parsed frame itself; parsePasteFrame is
+// stubbed to return it unchanged.
+function frameResponse(meta, content) {
+  return { ok: true, status: 200, arrayBuffer: async () => ({ meta, content }) };
+}
+
+// The raw view throws, so rendering the decrypted text fails.
+function loadDecryptableView(location, responses) {
+  const utils = { ...loadNullpadUtils(), parsePasteFrame: (frame) => frame };
+  const crypto = {
+    base64urlDecode: () => new Uint8Array(32),
+    deriveKeyWithPin: async () => ({ key: 'derived-key' }),
+    computePinVerifier: async () => 'verifier',
+    decrypt: async () => new TextEncoder().encode('hello')
+  };
+  const view = loadViewJs(location, {
+    NullpadUtils: utils,
+    NullpadCrypto: crypto,
+    fetch: async () => responses.shift()
+  });
+  Object.defineProperty(view.elements['raw-content'], 'textContent', {
+    set() { throw new Error('render boom'); }
+  });
+  return view;
+}
+
+test('render error in no-PIN flow is reported as a render error, not a decrypt failure', async () => {
+  const { elements } = loadDecryptableView(
+    { search: '?id=abcdefghijkl', hash: '#key' },
+    [frameResponse({}, new Uint8Array(64))]
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(elements['error-message'].textContent, RENDER_ERROR);
+  assert.notEqual(elements['error-message'].textContent, DECRYPT_ERROR);
+  assert.ok(
+    elements['pin-prompt'].classList.contains('hidden'),
+    'a render error must not fall back to the PIN prompt'
+  );
+});
+
+test('render error in PIN flow does not count as a wrong PIN', async () => {
+  const { elements, createdElements } = loadDecryptableView(
+    { search: '?id=abcdefghijkl', hash: '#key' },
+    [
+      frameResponse({ needs_pin: true }, new Uint8Array(0)),
+      frameResponse({}, new Uint8Array(64))
+    ]
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+  elements.pin.value = '1234';
+  await elements['pin-form']._listeners.submit[0].handler({ preventDefault() {} });
+
+  const pinMessages = createdElements.map((el) => el.textContent).join('\n');
+  assert.doesNotMatch(pinMessages, /Invalid PIN|Wrong PIN|Too many attempts/);
+  assert.equal(elements['error-message'].textContent, RENDER_ERROR);
+});
+
+test('render failure on a burn paste says the paste was already consumed', async () => {
+  const { elements } = loadDecryptableView(
+    { search: '?id=abcdefghijkl', hash: '#key' },
+    [frameResponse({ burn_after_reading: true }, new Uint8Array(64))]
+  );
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(elements['error-message'].textContent, /already been consumed/);
+  assert.doesNotMatch(elements['error-message'].textContent, /reload/i);
 });
