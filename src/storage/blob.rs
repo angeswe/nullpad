@@ -326,6 +326,13 @@ async fn verified_blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, Bl
     // Build and create shard directory
     let shard_name = &safe_id[..2];
     let shard_dir = canonical_storage.join(shard_name);
+    // CodeQL's rust/path-injection model accepts `starts_with` as a prefix
+    // check; it does not model `strip_prefix`.
+    if !shard_dir.starts_with(&canonical_storage) {
+        return Err(BlobError::InvalidId(
+            "Path escapes storage directory".to_string(),
+        ));
+    }
     fs::create_dir_all(&shard_dir).await?;
 
     // Verify shard directory is within storage; reconstruct from trusted root
