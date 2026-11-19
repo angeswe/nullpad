@@ -240,6 +240,7 @@ async fn main() {
         blob_read_permits: Arc::new(tokio::sync::Semaphore::new(
             config.max_concurrent_blob_reads,
         )),
+        blob_reads_per_ip: Default::default(),
     };
 
     // Build router:

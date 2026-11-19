@@ -1,6 +1,6 @@
 //! Paste API endpoints.
 
-use crate::auth::middleware::{AdminSession, AppState, AuthSession};
+use crate::auth::middleware::{AdminSession, AppState, AuthSession, BlobReadsPerIp};
 use crate::error::AppError;
 use crate::models::{CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPasteMeta};
 use crate::storage;
@@ -15,13 +15,28 @@ use axum::{
 };
 use base64::{engine::general_purpose, Engine as _};
 use std::io::Cursor;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
+use std::time::Duration;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncReadExt, ReadBuf};
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_util::io::ReaderStream;
+
+/// Paste bodies one client IP may have streaming at once. A read over it gets 429.
+pub const MAX_BLOB_READS_PER_IP: usize = 4;
+
+/// A paste body that is still streaming after
+/// `BLOB_TRANSFER_BASE_SECS + size / BLOB_TRANSFER_MIN_BYTES_PER_SEC` seconds
+/// is cut off, so a client that reads slowly cannot hold its read slots forever.
+const BLOB_TRANSFER_BASE_SECS: u64 = 30;
+const BLOB_TRANSFER_MIN_BYTES_PER_SEC: u64 = 64 * 1024;
+
+fn transfer_deadline(len: u64) -> Duration {
+    Duration::from_secs(BLOB_TRANSFER_BASE_SECS + len / BLOB_TRANSFER_MIN_BYTES_PER_SEC)
+}
 
 /// Read size for streaming a paste frame to the client.
 const FRAME_STREAM_CHUNK_BYTES: usize = 64 * 1024;
@@ -345,12 +360,13 @@ pub fn encode_frame_prefix(meta: &GetPasteResponse) -> Result<Vec<u8>, AppError>
 /// as long as it lives.
 ///
 /// Both are released when the response body is dropped: after the last byte
-/// is sent, or when the connection fails or times out. Until then, a delete
-/// of the blob does not overwrite the bytes being streamed.
+/// is sent, when the connection fails or times out, or when `deadline` passes.
+/// Until then, a delete of the blob does not overwrite the bytes being streamed.
 struct PermitReader<R> {
     inner: R,
-    _permit: OwnedSemaphorePermit,
+    _permit: BlobReadPermit,
     _blob_guard: BlobReadGuard,
+    deadline: tokio::time::Instant,
 }
 
 impl<R: AsyncRead + Unpin> AsyncRead for PermitReader<R> {
@@ -359,6 +375,13 @@ impl<R: AsyncRead + Unpin> AsyncRead for PermitReader<R> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
+        if tokio::time::Instant::now() >= self.deadline {
+            tracing::warn!("Paste body transfer passed its deadline, closing the connection");
+            return Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "paste body transfer deadline passed",
+            )));
+        }
         let poll = Pin::new(&mut self.inner).poll_read(cx, buf);
         // The status line and headers are already sent, so the client only
         // sees a cut-off body. Log the cause here.
@@ -376,10 +399,11 @@ impl<R: AsyncRead + Unpin> AsyncRead for PermitReader<R> {
 /// (the `needs_pin` probe) the frame has zero content bytes.
 ///
 /// The blob is streamed from its open file handle in fixed-size chunks, so
-/// memory use does not depend on the paste size.
+/// memory use does not depend on the paste size. `permit` is held until the
+/// body is dropped.
 pub fn paste_frame_response(
     meta: &GetPasteResponse,
-    blob: Option<(OpenedBlob, OwnedSemaphorePermit)>,
+    blob: Option<(OpenedBlob, BlobReadPermit)>,
 ) -> Result<Response, AppError> {
     let prefix = encode_frame_prefix(meta)?;
     let content_len = blob.as_ref().map_or(0, |(opened, _)| opened.len);
@@ -391,6 +415,7 @@ pub fn paste_frame_response(
                 inner: Cursor::new(prefix).chain(opened.file.take(opened.len)),
                 _permit: permit,
                 _blob_guard: opened.guard,
+                deadline: tokio::time::Instant::now() + transfer_deadline(total_len),
             };
             Body::from_stream(ReaderStream::with_capacity(
                 reader,
@@ -426,16 +451,62 @@ fn served_paste_meta(meta: StoredPasteMeta) -> GetPasteResponse {
     }
 }
 
-/// Take a blob read permit without waiting.
+/// One of the [`MAX_BLOB_READS_PER_IP`] read slots of a client IP.
+/// Dropping it frees the slot.
+struct IpReadSlot {
+    ip: IpAddr,
+    reads_per_ip: BlobReadsPerIp,
+}
+
+impl Drop for IpReadSlot {
+    fn drop(&mut self) {
+        let mut reads = self.reads_per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = reads.get_mut(&self.ip) {
+            *count -= 1;
+            if *count == 0 {
+                reads.remove(&self.ip);
+            }
+        }
+    }
+}
+
+/// A client IP's read slot and a global blob read permit, held together by
+/// a streaming paste body.
+pub struct BlobReadPermit {
+    _slot: IpReadSlot,
+    _permit: OwnedSemaphorePermit,
+}
+
+/// Take a read slot of `ip` and a blob read permit without waiting.
 ///
-/// Returns 503 when every permit is in use. The permit travels with the
-/// response body and is released when the body is dropped.
-fn acquire_blob_read_permit(state: &AppState) -> Result<OwnedSemaphorePermit, AppError> {
-    state
-        .blob_read_permits
+/// Returns 429 when `ip` already has [`MAX_BLOB_READS_PER_IP`] reads
+/// streaming, and 503 when every permit is in use. Both travel with the
+/// response body and are released when the body is dropped.
+pub fn acquire_blob_read_permit(
+    permits: &Arc<Semaphore>,
+    reads_per_ip: &BlobReadsPerIp,
+    ip: IpAddr,
+) -> Result<BlobReadPermit, AppError> {
+    let slot = {
+        let mut reads = reads_per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        let count = reads.entry(ip).or_insert(0);
+        if *count >= MAX_BLOB_READS_PER_IP {
+            return Err(AppError::RateLimited { retry_after: None });
+        }
+        *count += 1;
+        IpReadSlot {
+            ip,
+            reads_per_ip: reads_per_ip.clone(),
+        }
+    };
+    let permit = permits
         .clone()
         .try_acquire_owned()
-        .map_err(|_| AppError::ServiceUnavailable("No blob read permit free".to_string()))
+        .map_err(|_| AppError::ServiceUnavailable("No blob read permit free".to_string()))?;
+    Ok(BlobReadPermit {
+        _slot: slot,
+        _permit: permit,
+    })
 }
 
 /// GET /api/paste/:id — Get paste
@@ -496,7 +567,7 @@ pub async fn get_paste(
         }
     }
 
-    let permit = acquire_blob_read_permit(&state)?;
+    let permit = acquire_blob_read_permit(&state.blob_read_permits, &state.blob_reads_per_ip, ip)?;
 
     // Atomic get-and-delete-if-burn: single Lua script prevents race conditions.
     // Returns the paste and deletes it only if burn_after_reading is true.
@@ -528,8 +599,10 @@ pub async fn attempt_paste(
     super::validate_id(&id, "paste ID", 12)?;
 
     // Take the blob read permit before any PIN attempt counter is touched, so
-    // a busy server (503) never uses up a caller's PIN attempts.
-    let permit = acquire_blob_read_permit(&state)?;
+    // a busy server (503) or a full per-IP cap (429) never uses up a caller's
+    // PIN attempts.
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
+    let permit = acquire_blob_read_permit(&state.blob_read_permits, &state.blob_reads_per_ip, ip)?;
 
     let mut con = state.redis.clone();
 
@@ -546,7 +619,6 @@ pub async fn attempt_paste(
     .await?;
 
     // Rate limit per IP per paste
-    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
     let rate_limit_key = format!("ratelimit:pin_attempt:{}:{}", ip_hash, id);
     super::enforce_rate_limit(
@@ -647,6 +719,8 @@ pub async fn delete_paste(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn frame_prefix_layout() {
@@ -666,5 +740,50 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&prefix[4..]).unwrap();
         assert!(json.get("burn_after_reading").is_some());
         assert!(json.get("encrypted_content").is_none());
+    }
+
+    #[test]
+    fn transfer_deadline_scales_with_size() {
+        assert_eq!(transfer_deadline(0), Duration::from_secs(30));
+        assert_eq!(
+            transfer_deadline(50 * 1024 * 1024),
+            Duration::from_secs(30 + 800)
+        );
+    }
+
+    #[tokio::test]
+    async fn read_past_deadline_times_out_and_frees_read_slots() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        storage::blob::init_storage(storage_path).await.unwrap();
+        storage::blob::write_blob(storage_path, "ab123456789012", b"content")
+            .await
+            .unwrap();
+        let opened = storage::blob::open_blob(storage_path, "ab123456789012", 1024)
+            .await
+            .unwrap()
+            .unwrap();
+        let ip: IpAddr = "203.0.113.7".parse().unwrap();
+        let permits = Arc::new(tokio::sync::Semaphore::new(1));
+        let reads_per_ip: BlobReadsPerIp = Arc::new(Mutex::new(HashMap::from([(ip, 1)])));
+        let mut reader = PermitReader {
+            inner: opened.file,
+            _permit: BlobReadPermit {
+                _slot: IpReadSlot {
+                    ip,
+                    reads_per_ip: reads_per_ip.clone(),
+                },
+                _permit: permits.clone().try_acquire_owned().unwrap(),
+            },
+            _blob_guard: opened.guard,
+            deadline: tokio::time::Instant::now(),
+        };
+
+        let err = reader.read(&mut [0u8; 16]).await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::TimedOut);
+
+        drop(reader);
+        assert_eq!(permits.available_permits(), 1);
+        assert!(reads_per_ip.lock().unwrap().is_empty());
     }
 }

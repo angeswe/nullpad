@@ -61,9 +61,12 @@ static GLOBAL: TrackingAlloc = TrackingAlloc;
 async fn get_paste_response_peak_memory_is_bounded() {
     use futures::StreamExt;
     use nullpad::models::GetPasteResponse;
-    use nullpad::routes::paste::{encode_frame_prefix, paste_frame_response};
+    use nullpad::routes::paste::{
+        acquire_blob_read_permit, encode_frame_prefix, paste_frame_response,
+    };
     use nullpad::storage::blob;
-    use std::sync::Arc;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use tokio::sync::Semaphore;
 
@@ -88,6 +91,7 @@ async fn get_paste_response_peak_memory_is_bounded() {
     };
     let prefix_len = encode_frame_prefix(&meta).unwrap().len();
     let permits = Arc::new(Semaphore::new(1));
+    let reads_per_ip = Arc::new(Mutex::new(HashMap::new()));
 
     // Start measuring from here.
     PEAK.store(CURRENT.load(Ordering::SeqCst), Ordering::SeqCst);
@@ -101,7 +105,8 @@ async fn get_paste_response_peak_memory_is_bounded() {
     assert_eq!(opened.len, blob_size as u64);
 
     // Step 2: build the response exactly as get_paste does.
-    let permit = permits.clone().try_acquire_owned().unwrap();
+    let permit = acquire_blob_read_permit(&permits, &reads_per_ip, "203.0.113.7".parse().unwrap())
+        .unwrap_or_else(|_| panic!("a blob read permit should be free"));
     let response = paste_frame_response(&meta, Some((opened, permit))).unwrap();
 
     // Step 3: drain the body one chunk at a time, dropping each chunk.
