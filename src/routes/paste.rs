@@ -313,7 +313,6 @@ pub async fn create_paste(
 
     tracing::info!(
         action = "paste_created",
-        paste_id = %paste_id,
         burn = meta.burn_after_reading,
         ttl = ttl_secs,
         "Paste created"
@@ -542,7 +541,7 @@ pub async fn attempt_paste(
         &global_key,
         state.config.rate_limit_pin_attempt_global,
         3600,
-        Some(("pin_attempt_global", &id)),
+        Some(("pin_attempt_global", "per_paste")),
     )
     .await?;
 
@@ -583,7 +582,6 @@ pub async fn attempt_paste(
     if stored_verifier.is_empty() {
         tracing::warn!(
             action = "pin_verifier_missing",
-            paste_id = %id,
             "PIN-gated paste has no stored verifier (data integrity issue)"
         );
         return Err(AppError::Forbidden("Invalid PIN".to_string()));
@@ -597,7 +595,6 @@ pub async fn attempt_paste(
         .map_err(|_| {
             tracing::error!(
                 action = "pin_verifier_corrupt",
-                paste_id = %id,
                 "Stored PIN verifier has invalid base64 encoding"
             );
             AppError::Internal("PIN verification error".to_string())
@@ -642,7 +639,7 @@ pub async fn delete_paste(
         return Err(AppError::NotFound("Paste not found".to_string()));
     }
 
-    tracing::info!(action = "paste_deleted", paste_id = %id, "Admin deleted paste");
+    tracing::info!(action = "paste_deleted", "Admin deleted paste");
 
     Ok(StatusCode::NO_CONTENT)
 }
