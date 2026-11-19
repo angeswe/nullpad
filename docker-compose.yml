@@ -9,8 +9,16 @@ services:
     env_file:
       - .env
     environment:
-      - VALKEY_URL=redis://:${VALKEY_PASSWORD:?VALKEY_PASSWORD must be set}@valkey:6379
       - RUST_LOG=info
+    secrets:
+      - valkey_password
+    command: >-
+      sh -c 'set -e;
+      pw=$$(cat /run/secrets/valkey_password);
+      [ -n "$$pw" ] || { echo "valkey_password secret is empty" >&2; exit 1; };
+      export VALKEY_URL="redis://:$$pw@valkey:6379";
+      unset pw;
+      exec /app/nullpad'
     restart: unless-stopped
     networks:
       - internal
@@ -43,23 +51,29 @@ services:
       - valkey-data:/data
     env_file:
       - .env
+    secrets:
+      - valkey_password
     restart: unless-stopped
     # NOTE: AOF persistence means burn-after-reading pastes persist in the AOF
     # file until rewrite. Aggressive rewrite settings below minimize this window.
     # For stronger burn guarantees, disable AOF (--appendonly no --save "").
     command: >-
-      sh -c 'valkey-server --appendonly yes
+      sh -c 'set -e; umask 077;
+      pw=$$(cat /run/secrets/valkey_password);
+      [ -n "$$pw" ] || { echo "valkey_password secret is empty" >&2; exit 1; };
+      printf "requirepass %s\n" "$$pw" > /tmp/valkey.conf;
+      unset pw;
+      exec valkey-server /tmp/valkey.conf --appendonly yes
       --auto-aof-rewrite-percentage 50
       --auto-aof-rewrite-min-size 16mb
-      --requirepass "$$VALKEY_PASSWORD"
       --maxmemory "$${VALKEY_MAXMEMORY:-2gb}"
-      --maxmemory-policy volatile-lru
+      --maxmemory-policy noeviction
       --rename-command FLUSHALL ""
       --rename-command FLUSHDB ""
       --rename-command DEBUG ""
       --rename-command CONFIG ""'
     healthcheck:
-      test: ["CMD-SHELL", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$$(cat /run/secrets/valkey_password)\" valkey-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -81,6 +95,10 @@ services:
 networks:
   internal:
     driver: bridge
+
+secrets:
+  valkey_password:
+    file: ./secrets/valkey_password
 
 volumes:
   valkey-data:

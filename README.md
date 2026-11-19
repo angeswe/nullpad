@@ -37,7 +37,13 @@ cargo run -- keygen <alias> <secret>
 nano .env
 # Set ADMIN_ALIAS=<your alias>
 # Set ADMIN_PUBKEY=<generated public key>
-# Set VALKEY_PASSWORD=<strong password>
+
+# 3b. Create the Valkey password file. Both containers read it at
+# /run/secrets/valkey_password, so the file is world-readable and the
+# 0700 directory keeps other host users out.
+install -d -m 700 secrets
+openssl rand -hex 32 > secrets/valkey_password
+chmod 644 secrets/valkey_password
 
 # 4. Start nullpad
 docker compose up -d
@@ -84,7 +90,9 @@ See `.env.example` for all available options. Key environment variables:
 - `VALKEY_URL` — Valkey connection string (default: "redis://127.0.0.1:6379"). nullpad speaks RESP via the redis-rs client, so any RESP-compatible server works (Valkey or Redis); the URL keeps the `redis://` scheme either way
 - `BIND_ADDR` — Server bind address (default: "0.0.0.0:3000")
 - `PASTE_STORAGE_PATH` — Directory for encrypted paste content (default: "/data/pastes")
-- `VALKEY_PASSWORD` — Valkey authentication password (required in Docker)
+- `secrets/valkey_password` — Valkey password file (required in Docker). Use hex or alphanumeric characters only: it is written into a Valkey config line and into `VALKEY_URL`. It is not an environment variable, so `docker compose config`, `docker inspect`, and `ps` do not show it.
+  **Upgrading from a release that used `VALKEY_PASSWORD`:** write the old value to `secrets/valkey_password` (step 3b above), then delete the `VALKEY_PASSWORD` and `VALKEY_URL` lines from `.env`. Compose refuses to start while the file is missing. A leftover `VALKEY_PASSWORD` in `.env` still reaches both containers' environment and shows in `docker inspect`.
+- `VALKEY_MAXMEMORY` — Valkey memory limit in Docker (default: "2gb")
 - `MAX_UPLOAD_BYTES` — Max file size (default: 52428800 / 50MB)
 - `ANON_MAX_BYTES` — Max blob size for anonymous uploads (default: 262172, the 256 KiB padding bucket plus 28 bytes AES-GCM overhead)
 - `ANON_MAX_PASTES_PER_IP_PER_DAY` — Anonymous pastes one IP may attempt per day (default: 100)
@@ -136,6 +144,7 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 **Data Expiration**
 
 - All Valkey keys have TTLs — pastes expire based on chosen duration (1 minute to 1 week)
+- Valkey runs with `maxmemory-policy noeviction`. When Valkey reaches `VALKEY_MAXMEMORY`, it rejects writes instead of dropping keys, so new pastes, logins, and rate-limit updates fail with errors until keys expire. This is deliberate: eviction would silently drop PIN rate-limit counters and paste metadata (the cleanup job then deletes those pastes' files as orphans). Monitor `used_memory` against `maxmemory` (`valkey-cli INFO memory`) and raise the limit before it is reached.
 - Burn-after-reading uses atomic Lua script (no race conditions)
 - Burn and admin delete clean up user_pastes references atomically
 
