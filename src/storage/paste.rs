@@ -2,6 +2,7 @@
 //!
 //! Valkey key patterns:
 //! - `paste:{nanoid}` — paste metadata (JSON, no content)
+//! - `paste_reserve:{nanoid}` — a paste ID that was issued and not yet used (`1`, 600 s TTL)
 //! - `user_pastes:{user_id}` — SET of paste IDs owned by user
 //!
 //! Filesystem:
@@ -23,7 +24,7 @@ pub struct OpenedPaste {
 /// Why `store_paste` did not store a paste.
 #[derive(Debug, thiserror::Error)]
 pub enum StorePasteError {
-    #[error("Paste ID already exists")]
+    #[error("Paste ID is not reserved or was already used")]
     Conflict,
     #[error("Paste limit reached")]
     QuotaExceeded,
@@ -31,7 +32,30 @@ pub enum StorePasteError {
     Redis(#[from] redis::RedisError),
 }
 
-/// Store a paste: claim ID in Valkey first (SETNX), then write content to disk.
+/// Seconds an issued paste ID stays usable.
+pub const PASTE_RESERVATION_TTL_SECS: u64 = 600;
+
+/// Issue a new paste ID: a 12-character nanoid, recorded as `paste_reserve:{id}`
+/// for `PASTE_RESERVATION_TTL_SECS`. `store_paste` accepts no other ID.
+pub async fn reserve_paste_id<C: AsyncCommands>(con: &mut C) -> Result<String, redis::RedisError> {
+    let id = nanoid::nanoid!(12);
+    con.set_ex::<_, _, ()>(
+        format!("paste_reserve:{}", id),
+        1,
+        PASTE_RESERVATION_TTL_SECS,
+    )
+    .await?;
+    Ok(id)
+}
+
+/// Store a paste: use up the ID's reservation, claim the ID in Valkey (SETNX),
+/// then write content to disk.
+///
+/// The ID must come from `reserve_paste_id`. The reservation is deleted first,
+/// and only the caller whose DEL removed it goes on, so an ID stores at most one
+/// paste, ever: the ID of a burned, expired or deleted paste cannot be stored
+/// again. An ID with no reservation returns `StorePasteError::Conflict`. A store
+/// that fails after this step leaves the ID used up.
 ///
 /// Uses SET NX (set-if-not-exists) to atomically claim the paste ID, preventing
 /// overwrites of existing pastes. If the ID already exists, returns
@@ -70,6 +94,11 @@ where
         .owner_id
         .as_ref()
         .map(|owner_id| format!("user_pastes:{}", owner_id));
+
+    let reserved: bool = con.del(format!("paste_reserve:{}", meta.id)).await?;
+    if !reserved {
+        return Err(StorePasteError::Conflict);
+    }
 
     match &user_pastes_key {
         Some(user_pastes_key) => {
@@ -266,11 +295,11 @@ where
     // Step 2: Lua script — GET metadata, check the blob hash, then DEL if
     // burn + SREM from user_pastes.
     //
-    // The blob must be the one the record was stored with. Paste IDs are
-    // client-chosen: after a paste expires, a new paste can claim its ID
-    // before its blob replaces the old one on disk. Serving the old blob under
-    // the new record would skip the old paste's PIN check. The check runs
-    // before any DEL, so a mismatched read never consumes a burn paste.
+    // The blob must be the one the record was stored with. store_paste accepts
+    // each ID once, so a record should never sit next to another paste's blob.
+    // If it ever does, serving that blob under the record would skip the other
+    // paste's PIN check. The check runs before any DEL, so a mismatched read
+    // never consumes a burn paste.
     //
     // A record with no content_sha256 field was written before the field
     // existed and is not checked. Any other value that is not the blob's hash

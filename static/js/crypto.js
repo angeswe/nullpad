@@ -43,26 +43,6 @@
     }
 
     // ============================================================================
-    // ID Generation
-    // ============================================================================
-
-    const NANOID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-';
-
-    /**
-     * Generate a cryptographically random nanoid (12 chars, URL-safe alphabet)
-     * @returns {string}
-     */
-    function generateId() {
-        const bytes = new Uint8Array(12);
-        crypto.getRandomValues(bytes);
-        let id = '';
-        for (let i = 0; i < 12; i++) {
-            id += NANOID_ALPHABET[bytes[i] & 63]; // 64 chars in alphabet = 6 bits
-        }
-        return id;
-    }
-
-    // ============================================================================
     // Key Generation
     // ============================================================================
 
@@ -471,8 +451,7 @@
     // ============================================================================
 
     const NullpadCrypto = Object.freeze({
-        // ID and key generation
-        generateId,
+        // Key generation
         generateKey,
         deriveKeyWithPin,
 

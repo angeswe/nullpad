@@ -168,9 +168,6 @@
         contentType = NullpadUtils.contentTypeForRenderMode(renderMode);
       }
 
-      // 4. Generate paste ID client-side (used as AAD for AES-GCM binding)
-      const clientPasteId = NullpadCrypto.generateId();
-
       // Pre-flight size check: ensure the framed content will fit the top bucket.
       // contentPadTarget returns null when no bucket can hold the framed length,
       // which encrypt() would also catch — this early check avoids allocating a
@@ -188,11 +185,15 @@
         }
       }
 
+      // 4. Get the paste ID from the server (used as AAD for AES-GCM binding).
+      // Reserved last, so the reservation's 10 minutes cover only encryption and upload.
+      const pasteId = await NullpadUtils.reservePasteId(fetch);
+
       // 5. Encrypt content with paste ID as AAD, padded to the content bucket ladder.
       // Bucket selection uses "strictly greater than framed length" so equal-to-bucket
       // inputs are pushed to the next bucket, preventing a no-padding side channel.
       const encrypted = await NullpadCrypto.encrypt(
-        contentBytes, encryptionKey, clientPasteId, { pad: 'content' }
+        contentBytes, encryptionKey, pasteId, { pad: 'content' }
       );
       const encryptedBytes = NullpadCrypto.base64Decode(encrypted);
 
@@ -202,18 +203,18 @@
       // bytes — well within the server's 4096-byte encrypted_metadata cap.
       const fileMetadata = JSON.stringify({ filename: filename, content_type: contentType });
       const encryptedMetadata = await NullpadCrypto.encrypt(
-        NullpadCrypto.textEncode(fileMetadata), encryptionKey, clientPasteId, { pad: 'metadata' }
+        NullpadCrypto.textEncode(fileMetadata), encryptionKey, pasteId, { pad: 'metadata' }
       );
 
       // 7. Compute PIN verifier for server-side validation (if PIN set)
       let pinVerifier = null;
       if (pin) {
-        pinVerifier = await NullpadCrypto.computePinVerifier(encryptionKey, clientPasteId);
+        pinVerifier = await NullpadCrypto.computePinVerifier(encryptionKey, pasteId);
       }
 
       // 8. Prepare metadata (plaintext fields for server, encrypted blob for client)
       const metadata = JSON.stringify({
-        paste_id: clientPasteId,
+        paste_id: pasteId,
         encrypted_metadata: encryptedMetadata,
         paste_type: currentFile ? 'file' : 'text',
         ttl_secs: parseInt(ttlSelect.value, 10),

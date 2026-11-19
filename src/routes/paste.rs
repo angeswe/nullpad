@@ -2,7 +2,9 @@
 
 use crate::auth::middleware::{AdminSession, AppState, AuthSession, BlobReadsPerIp};
 use crate::error::AppError;
-use crate::models::{CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPasteMeta};
+use crate::models::{
+    CreatePasteResponse, GetPasteResponse, PasteMetadata, ReservePasteResponse, StoredPasteMeta,
+};
 use crate::storage;
 use crate::storage::blob::{BlobReadGuard, OpenedBlob};
 use crate::storage::paste::StorePasteError;
@@ -48,11 +50,40 @@ pub struct PinAttemptRequest {
     pub pin_verifier: Option<String>,
 }
 
+/// POST /api/paste/reserve — Issue a paste ID
+///
+/// No auth and no request body. `create_paste` stores a paste only under an ID
+/// issued here, and only once. The ID is not logged.
+pub async fn reserve_paste(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<ReservePasteResponse>, AppError> {
+    let mut con = state.redis.clone();
+
+    let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
+    let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
+    super::enforce_rate_limit(
+        &mut con,
+        &format!("ratelimit:paste_reserve:{}", ip_hash),
+        state.config.rate_limit_paste_per_min,
+        60,
+        Some(("paste_reserve", &ip_hash)),
+    )
+    .await?;
+
+    let id = storage::paste::reserve_paste_id(&mut con).await?;
+    Ok(Json(ReservePasteResponse { id }))
+}
+
 /// POST /api/paste — Create paste
 ///
 /// Accepts multipart form with:
 /// - "metadata" field: JSON PasteMetadata (paste_id, encrypted_metadata, paste_type, ttl_secs, burn_after_reading)
 /// - "file" field: encrypted bytes
+///
+/// `paste_id` must be an ID from `reserve_paste` that no create request has
+/// used yet. Any other ID gets 409.
 ///
 /// Anonymous users: blobs up to `anon_max_bytes`, and a daily per-IP paste quota.
 /// Authenticated users: blobs up to `max_upload_bytes`.
@@ -179,7 +210,7 @@ pub async fn create_paste(
     let metadata = metadata.ok_or_else(|| AppError::BadRequest("Missing metadata".to_string()))?;
     let upload = upload.ok_or_else(|| AppError::BadRequest("Missing file".to_string()))?;
 
-    // Validate client-generated paste ID
+    // Format check only. store_paste refuses an ID that was not reserved.
     super::validate_id(&metadata.paste_id, "paste ID", 12)?;
 
     // Require pin_verifier when has_pin is true; reject it when has_pin is false,
@@ -247,7 +278,6 @@ pub async fn create_paste(
         requested_ttl.clamp(60, state.config.max_ttl_secs)
     };
 
-    // Use client-generated paste ID (validated above)
     let paste_id = metadata.paste_id;
 
     let meta = StoredPasteMeta {
@@ -276,7 +306,8 @@ pub async fn create_paste(
     let task_meta = meta.clone();
     tokio::spawn(async move {
         let result = async {
-            // Store paste (metadata to Valkey via SETNX, then content to disk)
+            // Store paste (use up the reservation, metadata to Valkey via SETNX,
+            // then content to disk)
             storage::paste::store_paste(
                 &mut con,
                 &config.paste_storage_path,
@@ -304,8 +335,12 @@ pub async fn create_paste(
         .await;
         result.map_err(|e| match e {
             StorePasteError::Conflict => {
-                tracing::debug!("Paste store rejected: ID already exists");
-                AppError::Conflict("Paste ID already exists".to_string())
+                tracing::debug!("Paste store rejected: ID not reserved or already used");
+                AppError::Conflict(
+                    "Paste ID is not reserved or was already used. \
+                     Reload the page and try again."
+                        .to_string(),
+                )
             }
             StorePasteError::QuotaExceeded => {
                 tracing::debug!("Paste store rejected: paste limit reached");
