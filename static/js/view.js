@@ -242,17 +242,7 @@
         }
       }
 
-      // Try decryption with paste ID as AAD first (new format), fall back to
-      // without AAD only on auth-tag mismatch (OperationError) — that's the
-      // genuine legacy compat case. Other error classes (TypeError, framing
-      // errors) propagate so they reach the outer catch's console.error.
-      let bytes;
-      try {
-        bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey, pasteId);
-      } catch (err) {
-        if (err.name !== 'OperationError') throw err;
-        bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey);
-      }
+      const bytes = await NullpadCrypto.decrypt(encryptedData, decryptionKey, pasteId);
 
       // Store decrypted bytes for download
       decryptedBytes = bytes;

@@ -124,6 +124,7 @@ async fn main() {
         test_challenge_alias_validation,
         test_register_alias_validation,
         test_register_invite_not_consumed_on_validation_failure,
+        test_register_rejects_small_order_pubkey,
         test_verify_normalized_error_messages,
         test_rate_limiting_returns_429,
         test_admin_endpoints_require_auth,
@@ -165,6 +166,9 @@ async fn main() {
         test_reclaimed_id_does_not_serve_stale_blob,
         test_blob_metadata_mismatch_returns_not_found,
         test_legacy_meta_without_content_hash_is_still_served,
+        test_legacy_meta_without_has_pin_is_refused,
+        test_legacy_burn_meta_without_has_pin_is_not_consumed,
+        test_legacy_meta_without_has_pin_attempt_returns_404,
         test_mismatched_burn_paste_is_not_consumed,
         test_meta_with_null_content_hash_is_not_served,
         test_concurrent_blob_reads_bounded,
@@ -768,7 +772,7 @@ async fn test_failed_commit_leaves_no_record_or_owner_entry() {
         burn_after_reading: false,
         created_at: 0,
         owner_id: Some(owner.clone()),
-        has_pin: false,
+        has_pin: Some(false),
         pin_verifier: None,
         content_sha256: None,
     };
@@ -805,7 +809,7 @@ async fn store_test_paste<C: redis::AsyncCommands>(
         burn_after_reading: false,
         created_at: 0,
         owner_id: owner_id.map(str::to_string),
-        has_pin: false,
+        has_pin: Some(false),
         pin_verifier: None,
         content_sha256: None,
     };
@@ -1270,6 +1274,35 @@ async fn test_register_alias_validation() {
         .post(format!("{}/api/register", base_url))
         .json(&serde_json::json!({"token": "abcdefghijklmnop", "alias": "user@domain", "pubkey": pubkey}))
         .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+async fn test_register_rejects_small_order_pubkey() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let invite_token = nanoid::nanoid!(16);
+    let invite = nullpad::models::StoredInvite {
+        token: invite_token.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    nullpad::storage::user::store_invite(&mut con, &invite, 3600)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": "weakkeyuser",
+            "pubkey": general_purpose::STANDARD.encode([0u8; 32])
+        }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 400);
 }
 
@@ -3406,6 +3439,98 @@ async fn test_legacy_meta_without_content_hash_is_still_served() {
     assert_eq!(served, content);
 }
 
+/// Create a paste, then rewrite its record the way it looked before
+/// server-side PIN gating: no `has_pin` and no `pin_verifier` keys.
+/// Returns the paste ID and the path of its blob.
+async fn create_legacy_pre_pin_gate_paste(
+    client: &reqwest::Client,
+    base_url: &str,
+    con: &mut redis::aio::ConnectionManager,
+    storage_path: &std::path::Path,
+    burn: bool,
+) -> (String, std::path::PathBuf) {
+    let resp = create_paste(
+        client,
+        base_url,
+        "text",
+        b"pre-pin-gate ciphertext",
+        burn,
+        3600,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let mut record = read_paste_record(con, &id).await;
+    assert!(record.remove("has_pin").is_some());
+    record.remove("pin_verifier");
+    let _: () = redis::cmd("SET")
+        .arg(format!("paste:{}", id))
+        .arg(serde_json::Value::Object(record).to_string())
+        .arg("KEEPTTL")
+        .query_async(con)
+        .await
+        .unwrap();
+
+    let blob_path = storage_path.join(&id[..2]).join(&id);
+    (id, blob_path)
+}
+
+async fn assert_legacy_get_refused_and_kept(burn: bool) {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::new();
+    let (id, blob_path) =
+        create_legacy_pre_pin_gate_paste(&client, &base_url, &mut con, &storage_path, burn).await;
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        404,
+        "a record without has_pin must not be served"
+    );
+
+    let record_exists: bool = con.exists(format!("paste:{}", id)).await.unwrap();
+    assert!(record_exists, "refused legacy record was deleted");
+    assert!(blob_path.exists(), "refused legacy blob was deleted");
+}
+
+async fn test_legacy_meta_without_has_pin_is_refused() {
+    assert_legacy_get_refused_and_kept(false).await;
+}
+
+async fn test_legacy_burn_meta_without_has_pin_is_not_consumed() {
+    assert_legacy_get_refused_and_kept(true).await;
+}
+
+async fn test_legacy_meta_without_has_pin_attempt_returns_404() {
+    let (base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::new();
+    let (id, _blob_path) =
+        create_legacy_pre_pin_gate_paste(&client, &base_url, &mut con, &storage_path, false).await;
+
+    let resp = client
+        .post(format!("{}/api/paste/{}", base_url, id))
+        .header("Content-Type", "application/json")
+        .body(
+            serde_json::json!({ "pin_verifier": general_purpose::STANDARD.encode([0u8; 32]) })
+                .to_string(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}
+
 /// A GET that finds a blob not matching the record's hash must not consume a
 /// burn-after-reading paste. This happens, for example, when a GET lands after
 /// a new paste claims the ID but before its blob replaces a stale one. The
@@ -3578,7 +3703,7 @@ async fn store_large_paste(
         burn_after_reading: false,
         created_at: 0,
         owner_id: None,
-        has_pin: false,
+        has_pin: Some(false),
         pin_verifier: None,
         content_sha256: None,
     };

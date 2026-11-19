@@ -140,6 +140,12 @@ impl Config {
                 ),
             ));
         }
+        crate::auth::verify::parse_pubkey(&admin_pubkey).map_err(|_| {
+            ConfigError::InvalidValue(
+                "ADMIN_PUBKEY".to_string(),
+                "not a valid Ed25519 public key, or a weak (small-order) key".to_string(),
+            )
+        })?;
 
         let admin_alias = env::var("ADMIN_ALIAS").unwrap_or_else(|_| "admin".to_string());
 
@@ -331,8 +337,8 @@ mod tests {
         assert_eq!(result.unwrap(), 100);
     }
 
-    // Valid 32-byte Ed25519 public key encoded as base64 for tests
-    const TEST_PUBKEY_B64: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    // Ed25519 base point: a valid, non-weak public key
+    const TEST_PUBKEY_B64: &str = "WGZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY=";
 
     #[test]
     fn test_invalid_socket_addr() {
@@ -400,6 +406,24 @@ mod tests {
             result.unwrap_err(),
             ConfigError::InvalidValue(ref s, _) if s == "ADMIN_PUBKEY"
         ));
+
+        clear_test_env();
+    }
+
+    #[test]
+    fn test_weak_admin_pubkey_rejected() {
+        let _guard = lock_test();
+        let order8_point = "xxdqcD1N2E+6PAt2DRBnDyogU/osOczGTsf9d5KsA3o=";
+        for weak in ["AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", order8_point] {
+            clear_test_env();
+            env::set_var("ADMIN_PUBKEY", weak);
+
+            let result = Config::from_env();
+            assert!(matches!(
+                result,
+                Err(ConfigError::InvalidValue(ref s, _)) if s == "ADMIN_PUBKEY"
+            ));
+        }
 
         clear_test_env();
     }
