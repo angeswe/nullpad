@@ -28,6 +28,9 @@ pub enum AppError {
     #[error("Conflict: {0}")]
     Conflict(String),
 
+    #[error("Payload too large: {0}")]
+    PayloadTooLarge(String),
+
     /// The server has no capacity for this request right now (for example,
     /// every blob read permit is in use). The message is not sent to the client.
     #[error("Service unavailable: {0}")]
@@ -56,6 +59,7 @@ impl IntoResponse for AppError {
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
             AppError::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
+            AppError::PayloadTooLarge(msg) => (StatusCode::PAYLOAD_TOO_LARGE, msg.clone()),
             AppError::ServiceUnavailable(msg) => {
                 // Log the reason server-side, return generic message to client
                 tracing::warn!(error = %msg, "Service unavailable");

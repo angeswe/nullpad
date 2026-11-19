@@ -10,16 +10,27 @@
 //!
 //! Also supports `keygen` subcommand for generating admin keypairs.
 
-use axum::serve::ListenerExt;
 use nullpad::{
     auth::middleware::AppState, cleanup, config::Config, listener::WriteTimeoutListener,
     middleware::security_headers, routes, storage,
 };
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
+
+/// Longest time a request may take to be handled, upload included. A 50 MB
+/// upload at 4 Mbit/s takes about 100 s.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Time a client may take to send the request headers. Hyper also closes an
+/// idle keep-alive connection after this time. It is set above common reverse
+/// proxy idle timeouts (Caddy 2 min, Traefik 90 s) so the proxy closes idle
+/// upstream connections first.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(150);
+
+/// Requests handled at once; further requests wait for a slot.
+const MAX_CONCURRENT_REQUESTS: usize = 256;
 
 /// Generate Ed25519 keypair from alias + secret using Argon2id (same as JS client)
 fn keygen(alias: &str, secret: &str) -> Result<String, String> {
@@ -239,16 +250,15 @@ async fn main() {
     // CorsLayer::new() with no allowed origins rejects all CORS preflight requests.
     let cors = CorsLayer::new();
 
-    let app = routes::api_router()
-        .fallback_service(
-            ServeDir::new("static").not_found_service(ServeFile::new("static/404.html")),
-        )
-        .layer(axum::extract::DefaultBodyLimit::max(
-            config.max_upload_bytes,
-        ))
-        .layer(cors)
-        .layer(axum::middleware::from_fn(security_headers))
-        .with_state(state);
+    let app = routes::api_router(
+        config.max_upload_bytes,
+        REQUEST_TIMEOUT,
+        MAX_CONCURRENT_REQUESTS,
+    )
+    .fallback_service(ServeDir::new("static").not_found_service(ServeFile::new("static/404.html")))
+    .layer(cors)
+    .layer(axum::middleware::from_fn(security_headers))
+    .with_state(state);
 
     // Start cleanup job for orphaned paste files (runs every 5 minutes)
     let cleanup_path = config.paste_storage_path.clone();
@@ -264,17 +274,9 @@ async fn main() {
     tracing::info!("Listening on {}", config.bind_addr);
 
     // Blocked socket writes time out so a client that stops reading a paste
-    // body releases its blob read permit. The no-op tap_io is what gives this
-    // listener axum's `Connected` impl for `SocketAddr` (see nullpad::listener).
+    // body releases its blob read permit.
     let listener =
-        WriteTimeoutListener::new(listener, Duration::from_secs(config.write_timeout_secs))
-            .tap_io(|_| {});
+        WriteTimeoutListener::new(listener, Duration::from_secs(config.write_timeout_secs));
 
-    // Start server (with_connect_info required for ConnectInfo<SocketAddr> extractors)
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .await
-    .expect("Server error");
+    nullpad::listener::serve(listener, app, HEADER_READ_TIMEOUT).await;
 }

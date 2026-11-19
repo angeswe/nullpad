@@ -175,6 +175,7 @@ fn sha256_hex(digest: &[u8]) -> String {
 
 /// Lowercase hex SHA-256 of blob bytes, the format of
 /// `StoredPasteMeta::content_sha256`.
+#[cfg(test)]
 pub(crate) fn content_sha256_hex(content: &[u8]) -> String {
     sha256_hex(&Sha256::digest(content))
 }
@@ -316,16 +317,22 @@ fn resolve_blob_path(canonical_storage: &Path, id: &str) -> Result<Option<PathBu
     Ok(Some(canonical_storage.join(relative)))
 }
 
-/// Write a blob to disk.
-///
-/// Uses atomic write (write to temp file, then rename) to prevent partial reads.
-pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result<(), BlobError> {
+/// Build the path of blob `id`, creating its shard directory, and verify that
+/// it stays within storage.
+async fn verified_blob_path(storage_path: &Path, id: &str) -> Result<PathBuf, BlobError> {
     let safe_id = sanitize_blob_id(id)?;
     let canonical_storage = canonicalize_storage_root(storage_path)?;
 
     // Build and create shard directory
     let shard_name = &safe_id[..2];
     let shard_dir = canonical_storage.join(shard_name);
+    // CodeQL's rust/path-injection model accepts `starts_with` as a prefix
+    // check; it does not model `strip_prefix`.
+    if !shard_dir.starts_with(&canonical_storage) {
+        return Err(BlobError::InvalidId(
+            "Path escapes storage directory".to_string(),
+        ));
+    }
     fs::create_dir_all(&shard_dir).await?;
 
     // Verify shard directory is within storage; reconstruct from trusted root
@@ -335,39 +342,94 @@ pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
     let verified_shard = canonical_storage.join(shard_relative);
 
-    // Build final paths from verified shard
     let blob_path = verified_shard.join(safe_id);
-    let temp_path = blob_path.with_extension("tmp");
 
     // Belt-and-suspenders: verify blob path is also within storage
     blob_path
         .strip_prefix(&canonical_storage)
         .map_err(|_| BlobError::InvalidId("Path escapes storage directory".to_string()))?;
 
-    // Write atomically: temp file (exclusive create) -> sync -> rename.
-    // If a stale temp file exists from a previous crash, remove it first.
-    let open_result = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp_path)
-        .await;
-    let mut file = match open_result {
-        Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            fs::remove_file(&temp_path).await?;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temp_path)
-                .await?
-        }
-        Err(e) => return Err(e.into()),
-    };
-    file.write_all(content).await?;
-    file.sync_all().await?;
-    fs::rename(&temp_path, &blob_path).await?;
+    Ok(blob_path)
+}
 
-    Ok(())
+/// A blob being written to a temp file in storage, chunk by chunk, while its
+/// SHA-256 is computed.
+///
+/// [`BlobUpload::commit`] syncs the file and renames it to its blob path.
+/// An upload dropped without a successful commit deletes its temp file.
+pub struct BlobUpload {
+    file: fs::File,
+    temp_path: PathBuf,
+    hasher: Sha256,
+    bytes_written: u64,
+    committed: bool,
+}
+
+impl BlobUpload {
+    /// Create an empty temp file under a random name, so the upload can start
+    /// before the paste ID is known.
+    pub async fn create(storage_path: &Path) -> Result<Self, BlobError> {
+        let temp_path = verified_blob_path(storage_path, &nanoid::nanoid!(21))
+            .await?
+            .with_extension("tmp");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .await?;
+        Ok(Self {
+            file,
+            temp_path,
+            hasher: Sha256::new(),
+            bytes_written: 0,
+            committed: false,
+        })
+    }
+
+    pub async fn write(&mut self, chunk: &[u8]) -> Result<(), BlobError> {
+        self.file.write_all(chunk).await?;
+        self.hasher.update(chunk);
+        self.bytes_written += chunk.len() as u64;
+        Ok(())
+    }
+
+    pub fn bytes_written(&self) -> u64 {
+        self.bytes_written
+    }
+
+    /// Lowercase hex SHA-256 of the bytes written so far.
+    pub fn sha256_hex(&self) -> String {
+        sha256_hex(&self.hasher.clone().finalize())
+    }
+
+    /// Sync the temp file and rename it to the path of blob `id`.
+    pub async fn commit(mut self, storage_path: &Path, id: &str) -> Result<(), BlobError> {
+        let blob_path = verified_blob_path(storage_path, id).await?;
+        self.file.flush().await?;
+        self.file.sync_all().await?;
+        fs::rename(&self.temp_path, &blob_path).await?;
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl Drop for BlobUpload {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Err(e) = std::fs::remove_file(&self.temp_path) {
+                tracing::error!(error = %e, "Failed to remove upload temp file");
+            }
+        }
+    }
+}
+
+/// Write a blob to disk.
+///
+/// Uses atomic write (write to temp file, then rename) to prevent partial reads.
+pub async fn write_blob(storage_path: &Path, id: &str, content: &[u8]) -> Result<(), BlobError> {
+    let mut upload = BlobUpload::create(storage_path).await?;
+    upload.write(content).await?;
+    upload.commit(storage_path, id).await
 }
 
 /// Open a blob for streaming, with a size limit.
@@ -536,6 +598,73 @@ mod tests {
         // Delete again (should return false)
         let deleted = delete_blob(storage_path, id).await.unwrap();
         assert!(!deleted);
+    }
+
+    #[tokio::test]
+    async fn upload_commit_stores_chunks_and_hash() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let mut upload = BlobUpload::create(storage_path).await.unwrap();
+        upload.write(b"first chunk ").await.unwrap();
+        upload.write(b"second chunk").await.unwrap();
+        let content = b"first chunk second chunk";
+        assert_eq!(upload.bytes_written(), content.len() as u64);
+        assert_eq!(upload.sha256_hex(), content_sha256_hex(content));
+
+        let id = "up123456789012";
+        upload.commit(storage_path, id).await.unwrap();
+
+        let mut opened = open_blob(storage_path, id, 1024)
+            .await
+            .unwrap()
+            .expect("blob should exist");
+        let mut read_back = Vec::new();
+        opened.file.read_to_end(&mut read_back).await.unwrap();
+        assert_eq!(read_back, content);
+        assert_eq!(files_under(storage_path), vec![blob_path(storage_path, id)]);
+    }
+
+    #[tokio::test]
+    async fn dropped_upload_removes_temp_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let mut upload = BlobUpload::create(storage_path).await.unwrap();
+        upload.write(b"never committed").await.unwrap();
+        assert_eq!(files_under(storage_path).len(), 1);
+
+        drop(upload);
+        assert!(files_under(storage_path).is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_commit_removes_temp_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let storage_path = temp_dir.path();
+        init_storage(storage_path).await.unwrap();
+
+        let mut upload = BlobUpload::create(storage_path).await.unwrap();
+        upload.write(b"content").await.unwrap();
+        assert!(upload.commit(storage_path, "../escape").await.is_err());
+        assert!(files_under(storage_path).is_empty());
+    }
+
+    /// Every regular file in the shard directories of `storage_path`.
+    fn files_under(storage_path: &Path) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for shard in std::fs::read_dir(storage_path).unwrap() {
+            for file in std::fs::read_dir(shard.unwrap().path()).unwrap() {
+                files.push(file.unwrap().path());
+            }
+        }
+        files
+    }
+
+    fn blob_path(storage_path: &Path, id: &str) -> PathBuf {
+        storage_path.join(&id[..2]).join(id)
     }
 
     #[tokio::test]

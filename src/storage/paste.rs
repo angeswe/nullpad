@@ -7,8 +7,8 @@
 //! Filesystem:
 //! - `{storage_path}/{id[0..2]}/{id}` — encrypted content
 
-use crate::models::{StoredPaste, StoredPasteMeta};
-use crate::storage::blob::{self, content_sha256_hex, OpenedBlob};
+use crate::models::StoredPasteMeta;
+use crate::storage::blob::{self, BlobUpload, OpenedBlob};
 use redis::{AsyncCommands, FromRedisValue};
 use std::path::Path;
 
@@ -26,29 +26,30 @@ pub struct OpenedPaste {
 /// overwrites of existing pastes. If the ID already exists, returns an error
 /// that maps to 409 Conflict.
 ///
-/// The stored metadata always records the SHA-256 of the content
-/// (`content_sha256`), whatever `paste.meta.content_sha256` holds.
+/// The stored metadata always records the SHA-256 of the uploaded content
+/// (`content_sha256`), whatever `meta.content_sha256` holds.
 ///
 /// If the paste has an owner_id, also add the paste ID to the user's paste set.
 /// `max_ttl_secs` is used for the user_pastes SET expiry (from config.max_ttl_secs).
 pub async fn store_paste<C>(
     con: &mut C,
     storage_path: &Path,
-    paste: &StoredPaste,
+    meta: &StoredPasteMeta,
+    upload: BlobUpload,
     ttl_secs: u64,
     max_ttl_secs: u64,
 ) -> Result<(), redis::RedisError>
 where
     C: AsyncCommands,
 {
-    let key = format!("paste:{}", paste.meta.id);
+    let key = format!("paste:{}", meta.id);
     // Tie the record to this blob. A blob left on disk by an expired paste
     // with the same ID then fails the check in get_paste_atomic.
-    let meta = StoredPasteMeta {
-        content_sha256: Some(content_sha256_hex(&paste.encrypted_content)),
-        ..paste.meta.clone()
+    let stored_meta = StoredPasteMeta {
+        content_sha256: Some(upload.sha256_hex()),
+        ..meta.clone()
     };
-    let json = serde_json::to_string(&meta).map_err(super::json_serialize_err)?;
+    let json = serde_json::to_string(&stored_meta).map_err(super::json_serialize_err)?;
 
     // Step 1: Atomically claim the paste ID with SET NX (set-if-not-exists).
     // This prevents overwriting existing pastes when clients control the ID.
@@ -75,11 +76,11 @@ where
     }
 
     // Step 2: Write content to disk (only after Valkey confirms the ID is ours).
-    if let Err(e) = blob::write_blob(storage_path, &paste.meta.id, &paste.encrypted_content).await {
+    if let Err(e) = upload.commit(storage_path, &meta.id).await {
         // Cleanup: delete Valkey key if blob write fails
         if let Err(cleanup_err) = con.del::<_, ()>(&key).await {
             tracing::error!(
-                paste_id = %paste.meta.id,
+                paste_id = %meta.id,
                 error = %cleanup_err,
                 "Failed to clean up Valkey key after blob write failure"
             );
@@ -92,10 +93,9 @@ where
     }
 
     // Step 3: If paste has an owner, add to user's paste set
-    if let Some(ref owner_id) = paste.meta.owner_id {
+    if let Some(ref owner_id) = meta.owner_id {
         let user_pastes_key = format!("user_pastes:{}", owner_id);
-        con.sadd::<_, _, ()>(&user_pastes_key, &paste.meta.id)
-            .await?;
+        con.sadd::<_, _, ()>(&user_pastes_key, &meta.id).await?;
         if ttl_secs == 0 {
             // Forever paste: persist the user_pastes set (remove any TTL)
             con.persist::<_, ()>(&user_pastes_key).await?;
@@ -546,7 +546,7 @@ mod tests {
     #[test]
     fn content_sha256_hex_matches_known_vector() {
         assert_eq!(
-            content_sha256_hex(b"abc"),
+            blob::content_sha256_hex(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
     }
