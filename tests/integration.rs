@@ -124,6 +124,7 @@ async fn main() {
         test_challenge_alias_validation,
         test_register_alias_validation,
         test_register_invite_not_consumed_on_validation_failure,
+        test_register_rejects_small_order_pubkey,
         test_verify_normalized_error_messages,
         test_rate_limiting_returns_429,
         test_admin_endpoints_require_auth,
@@ -1270,6 +1271,35 @@ async fn test_register_alias_validation() {
         .post(format!("{}/api/register", base_url))
         .json(&serde_json::json!({"token": "abcdefghijklmnop", "alias": "user@domain", "pubkey": pubkey}))
         .send().await.unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+async fn test_register_rejects_small_order_pubkey() {
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let invite_token = nanoid::nanoid!(16);
+    let invite = nullpad::models::StoredInvite {
+        token: invite_token.clone(),
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+    nullpad::storage::user::store_invite(&mut con, &invite, 3600)
+        .await
+        .unwrap();
+
+    let resp = client
+        .post(format!("{}/api/register", base_url))
+        .json(&serde_json::json!({
+            "token": invite_token,
+            "alias": "weakkeyuser",
+            "pubkey": general_purpose::STANDARD.encode([0u8; 32])
+        }))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status(), 400);
 }
 

@@ -220,27 +220,8 @@ pub async fn register(
     // Validate invite token format
     super::validate_id(&req.token, "invite token", 16)?;
 
-    // Validate pubkey FIRST (before touching Valkey): must be valid base64, 32 bytes, and a valid Ed25519 public key
-    let pubkey_bytes = general_purpose::STANDARD
-        .decode(&req.pubkey)
-        .map_err(|_| AppError::BadRequest("Invalid public key: not valid base64".to_string()))?;
-    if pubkey_bytes.len() != 32 {
-        tracing::debug!(
-            expected = 32,
-            got = pubkey_bytes.len(),
-            "Invalid pubkey length in registration"
-        );
-        return Err(AppError::BadRequest(
-            "Invalid public key format".to_string(),
-        ));
-    }
-    let key_array: [u8; 32] = pubkey_bytes
-        .try_into()
-        .map_err(|_| AppError::BadRequest("Invalid public key format".to_string()))?;
-    ed25519_dalek::VerifyingKey::from_bytes(&key_array).map_err(|e| {
-        tracing::debug!(error = %e, "Invalid Ed25519 public key in registration");
-        AppError::BadRequest("Invalid public key format".to_string())
-    })?;
+    // Validate pubkey FIRST (before touching Valkey): must be valid base64, 32 bytes, a valid Ed25519 public key, and not small-order
+    crate::auth::verify::parse_pubkey(&req.pubkey)?;
 
     // Create user ID upfront (needed for Lua script)
     let user_id = nanoid::nanoid!(12);
