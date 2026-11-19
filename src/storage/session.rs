@@ -109,18 +109,21 @@ where
 /// If the user already has `max_sessions` sessions, the oldest sessions
 /// (by TTL) are deleted before creating the new one. This prevents
 /// unbounded session growth across many IPs.
+///
+/// Returns false without storing if `user:{user_id}` does not exist.
 pub async fn store_session<C>(
     con: &mut C,
     token: &str,
     session: &StoredSession,
     ttl_secs: u64,
     max_sessions: usize,
-) -> Result<(), redis::RedisError>
+) -> Result<bool, redis::RedisError>
 where
     C: AsyncCommands,
 {
     let session_key = format!("session:{}", token);
     let user_sessions_key = format!("user_sessions:{}", session.user_id);
+    let user_key = format!("user:{}", session.user_id);
 
     let json = serde_json::to_string(session).map_err(super::json_serialize_err)?;
 
@@ -202,6 +205,9 @@ where
     // Never downgrade a persistent key (-1) to a finite TTL.
     let store_script = redis::Script::new(
         r"
+        if redis.call('EXISTS', KEYS[3]) == 0 then
+            return 0
+        end
         redis.call('SETEX', KEYS[1], ARGV[1], ARGV[2])
         redis.call('SADD', KEYS[2], ARGV[3])
         local current_ttl = redis.call('TTL', KEYS[2])
@@ -215,19 +221,20 @@ where
         ",
     );
 
-    store_script
+    let stored: i32 = store_script
         .key(&session_key)
         .key(&user_sessions_key)
+        .key(&user_key)
         .arg(ttl_secs)
         .arg(&json)
         .arg(token)
-        .invoke_async::<i32>(con)
+        .invoke_async(con)
         .await?;
 
-    Ok(())
+    Ok(stored == 1)
 }
 
-/// Get a session by token.
+/// Get a session by token, or None if it or its `user:{user_id}` record is missing.
 ///
 /// The session JSON is zeroized after deserialization.
 pub async fn get_session<C>(
@@ -238,7 +245,22 @@ where
     C: AsyncCommands,
 {
     let key = format!("session:{}", token);
-    let json: Option<String> = con.get(&key).await?;
+    // ARGV[1] is the `user:` key prefix that storage::user and store_session use;
+    // the user key is built in Lua because user_id is known only after the decode.
+    let script = redis::Script::new(
+        r"
+        local val = redis.call('GET', KEYS[1])
+        if not val then
+            return false
+        end
+        local user_id = cjson.decode(val).user_id
+        if redis.call('EXISTS', ARGV[1] .. user_id) == 0 then
+            return false
+        end
+        return val
+        ",
+    );
+    let json: Option<String> = script.key(&key).arg("user:").invoke_async(con).await?;
 
     match json {
         Some(data) => {

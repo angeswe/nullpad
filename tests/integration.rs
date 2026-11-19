@@ -140,6 +140,9 @@ async fn main() {
         test_paste_id_never_logged,
         test_stale_tmp_file_id_never_logged,
         test_admin_revoke_user,
+        test_session_rejected_after_user_record_deleted,
+        test_store_session_requires_existing_user,
+        test_verify_rejects_login_when_session_user_is_missing,
         test_admin_cannot_delete_self,
         test_security_headers_on_api,
         test_activate_user_on_first_upload,
@@ -2094,13 +2097,12 @@ async fn test_admin_revoke_user() {
 
     // Verify user's session is invalid
     let resp = client
-        .get(format!("{}/api/invites", base_url))
+        .get(format!("{}/trusted.html", base_url))
         .header("Authorization", format!("Bearer {}", user_token))
         .send()
         .await
         .unwrap();
-    // Should be 401 (session deleted) or 403 (not admin) - either way, not 200
-    assert_ne!(resp.status(), 200);
+    assert_eq!(resp.status(), 401);
 
     // Verify user no longer in list
     let resp = client
@@ -2117,6 +2119,84 @@ async fn test_admin_revoke_user() {
         .iter()
         .any(|u| u["alias"].as_str() == Some(&user_alias));
     assert!(!has_user, "User should not appear after revocation");
+}
+
+async fn test_session_rejected_after_user_record_deleted() {
+    use redis::AsyncCommands;
+
+    let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let (_key, user_alias, user_token) =
+        create_trusted_user(&client, &base_url, &admin_token).await;
+    let user_id: String = con.get(format!("alias:{}", user_alias)).await.unwrap();
+
+    let _: () = con.del(format!("user:{}", user_id)).await.unwrap();
+
+    let resp = client
+        .get(format!("{}/trusted.html", base_url))
+        .header("Authorization", format!("Bearer {}", user_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+}
+
+async fn test_store_session_requires_existing_user() {
+    use redis::AsyncCommands;
+
+    let (_base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let token = general_purpose::STANDARD.encode(rand::random::<[u8; 32]>());
+    let session = nullpad::models::StoredSession {
+        user_id: nanoid::nanoid!(12),
+        role: nullpad::models::Role::Trusted,
+        created_at: 0,
+    };
+
+    let stored = storage::session::store_session(&mut con, &token, &session, 900, 10)
+        .await
+        .unwrap();
+    assert!(
+        !stored,
+        "store_session must return false for a missing user"
+    );
+
+    let exists: bool = con.exists(format!("session:{}", token)).await.unwrap();
+    assert!(!exists, "session must not be stored for a missing user");
+}
+
+async fn test_verify_rejects_login_when_session_user_is_missing() {
+    use redis::AsyncCommands;
+
+    let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let (user_key, user_alias, _user_token) =
+        create_trusted_user(&client, &base_url, &admin_token).await;
+    let user_id: String = con.get(format!("alias:{}", user_alias)).await.unwrap();
+
+    // The alias lookup still finds this record, but the session is written for
+    // an id whose user key is absent, as when a revoke lands mid-login.
+    let missing_id = nanoid::nanoid!(12);
+    let user_json: String = con.get(format!("user:{}", user_id)).await.unwrap();
+    let mut user: serde_json::Value = serde_json::from_str(&user_json).unwrap();
+    user["id"] = serde_json::Value::String(missing_id.clone());
+    let _: () = con
+        .set(format!("user:{}", user_id), user.to_string())
+        .await
+        .unwrap();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &user_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(user_key.sign(&nonce).to_bytes());
+    let (status, _body) =
+        post_verify(&client, &base_url, &user_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
+
+    let tracked: usize = con
+        .scard(format!("user_sessions:{}", missing_id))
+        .await
+        .unwrap();
+    assert_eq!(tracked, 0, "no session may be stored for a missing user");
 }
 
 async fn test_admin_cannot_delete_self() {
