@@ -56,7 +56,9 @@ fn is_https(headers: &HeaderMap, trusted_proxy_count: usize) -> bool {
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
     {
-        return proto.eq_ignore_ascii_case("https");
+        let entries: Vec<&str> = proto.split(',').map(str::trim).collect();
+        return entries[entries.len().saturating_sub(trusted_proxy_count)]
+            .eq_ignore_ascii_case("https");
     }
     if let Some(fwd) = headers.get("forwarded").and_then(|v| v.to_str().ok()) {
         // RFC 7239: comma separates proxy entries, semicolon separates params within an entry.
@@ -394,5 +396,38 @@ mod tests {
     #[test]
     fn test_signature_verdict_valid_signature_is_ok() {
         assert!(signature_verdict(Ok(true)).is_ok());
+    }
+
+    fn proto_headers(proto: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", proto.parse().unwrap());
+        headers
+    }
+
+    #[test]
+    fn test_is_https_single_value() {
+        assert!(is_https(&proto_headers("https"), 1));
+        assert!(!is_https(&proto_headers("http"), 1));
+        assert!(!is_https(&proto_headers("https"), 0));
+    }
+
+    #[test]
+    fn test_is_https_comma_joined_two_proxies() {
+        assert!(is_https(&proto_headers("https, https"), 2));
+        assert!(is_https(&proto_headers("https,http"), 2));
+        assert!(!is_https(&proto_headers("http, https"), 2));
+    }
+
+    #[test]
+    fn test_is_https_fewer_entries_than_proxies_uses_leftmost() {
+        assert!(is_https(&proto_headers("https"), 2));
+        assert!(!is_https(&proto_headers("http"), 2));
+    }
+
+    #[test]
+    fn test_is_https_spoofed_leftmost_entry_ignored() {
+        assert!(!is_https(&proto_headers("https, http"), 1));
+        assert!(is_https(&proto_headers("http, https"), 1));
+        assert!(!is_https(&proto_headers("https, http, https"), 2));
     }
 }
