@@ -134,6 +134,8 @@ async fn main() {
         test_admin_create_and_list_invites,
         test_admin_revoke_invite,
         test_admin_delete_paste,
+        test_paste_id_never_logged,
+        test_stale_tmp_file_id_never_logged,
         test_admin_revoke_user,
         test_admin_cannot_delete_self,
         test_security_headers_on_api,
@@ -1763,6 +1765,167 @@ async fn test_admin_delete_paste() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[derive(Clone)]
+struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn test_paste_id_never_logged() {
+    let logs = LogBuffer(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let writer = logs.clone();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .init();
+
+    let (base_url, _con, admin_key, admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            rate_limit_pin_attempt_global: 1,
+            trusted_proxy_count: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+    let mut ids = Vec::new();
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"pin data",
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let pin_id = body["id"].as_str().unwrap().to_string();
+    let verifier = test_pin_verifier(&test_dummy_key(), &pin_id);
+    for (ip_suffix, expected) in [(1u8, 200), (2, 429)] {
+        let resp = pin_attempt_with_xff(&client, &base_url, &pin_id, &verifier, ip_suffix)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected);
+    }
+    ids.push(pin_id);
+
+    for _ in 0..3 {
+        let resp = create_paste(
+            &client, &base_url, "text", b"data", false, 3600, None, false,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        ids.push(body["id"].as_str().unwrap().to_string());
+    }
+
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let resp = client
+        .delete(format!("{}/api/paste/{}", base_url, ids[1]))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let missing_blob = storage_path.join(&ids[2][..2]).join(&ids[2]);
+    std::fs::remove_file(&missing_blob).unwrap();
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, ids[2]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    let unreadable_blob = storage_path.join(&ids[3][..2]).join(&ids[3]);
+    std::fs::remove_file(&unreadable_blob).unwrap();
+    std::fs::create_dir(&unreadable_blob).unwrap();
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, ids[3]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "Paste created",
+        "Rate limit exceeded",
+        "Admin deleted paste",
+        "blob missing on disk",
+        "Failed to read blob",
+    ] {
+        assert!(
+            logs.contains(expected),
+            "expected log line {expected:?} not captured"
+        );
+    }
+    for id in &ids {
+        assert!(
+            !logs.contains(id.as_str()),
+            "paste ID {id} appears in logs:\n{logs}"
+        );
+    }
+}
+
+async fn test_stale_tmp_file_id_never_logged() {
+    use std::os::unix::fs::PermissionsExt;
+    use tracing::instrument::WithSubscriber;
+
+    let logs = LogBuffer(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+
+    let mut con = redis::Client::open(get_valkey_url())
+        .unwrap()
+        .get_connection_manager()
+        .await
+        .unwrap();
+    let storage_path = storage_root().join(format!("tmp_log_{}", nanoid::nanoid!(8)));
+    let id = nanoid::nanoid!(12);
+    let shard = storage_path.join(&id[..2]);
+    std::fs::create_dir_all(&shard).unwrap();
+    let tmp_file = std::fs::File::create(shard.join(format!("{id}.tmp"))).unwrap();
+    tmp_file
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))
+        .unwrap();
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = cleanup::cleanup_orphaned_files(&mut con, &storage_path)
+        .with_subscriber(subscriber)
+        .await;
+
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&storage_path);
+    result.unwrap();
+
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("Failed to delete stale tmp file"),
+        "expected stale tmp warning not captured:\n{logs}"
+    );
+    assert!(
+        !logs.contains(id.as_str()),
+        "paste ID {id} appears in logs:\n{logs}"
+    );
 }
 
 async fn test_admin_revoke_user() {

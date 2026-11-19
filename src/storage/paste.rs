@@ -215,20 +215,18 @@ where
 /// a new `BlobError` variant fails to compile here until someone decides
 /// which bucket it belongs in.
 fn classify_blob_read_error(
-    id: &str,
     err: blob::BlobError,
 ) -> Result<Option<OpenedPaste>, redis::RedisError> {
     match err {
         blob::BlobError::InvalidId(_) => {
             tracing::warn!(
-                paste_id = %id,
                 error = %err,
                 "Blob ID rejected by sanitizer; treating paste as not found"
             );
             Ok(None)
         }
         blob::BlobError::Io(_) | blob::BlobError::TooLarge(_) => {
-            tracing::error!(paste_id = %id, error = %err, "Failed to read blob");
+            tracing::error!(error = %err, "Failed to read blob");
             Err(redis::RedisError::from((
                 redis::ErrorKind::UnexpectedReturnType,
                 "Blob read failed",
@@ -258,11 +256,11 @@ where
         Ok(None) => {
             let exists: bool = redis::cmd("EXISTS").arg(&key).query_async(con).await?;
             if exists {
-                tracing::warn!(paste_id = %id, "Paste metadata exists but blob missing on disk");
+                tracing::warn!("Paste metadata exists but blob missing on disk");
             }
             return Ok(None);
         }
-        Err(e) => return classify_blob_read_error(id, e),
+        Err(e) => return classify_blob_read_error(e),
     };
 
     // Step 2: Lua script — GET metadata, check the blob hash, then DEL if
@@ -329,7 +327,7 @@ where
     // overwritten only after the response has finished streaming it.
     if meta.burn_after_reading {
         if let Err(e) = blob::delete_blob(storage_path, id).await {
-            tracing::error!(paste_id = %id, error = %e, "Failed to delete burn blob");
+            tracing::error!(error = %e, "Failed to delete burn blob");
         }
     }
 
@@ -378,7 +376,7 @@ where
     if deleted > 0 {
         // Delete blob from disk
         if let Err(e) = blob::delete_blob(storage_path, id).await {
-            tracing::warn!(paste_id = %id, error = %e, "Failed to delete blob (may not exist)");
+            tracing::warn!(error = %e, "Failed to delete blob (may not exist)");
             // Continue anyway - metadata is already deleted
         }
     }
@@ -521,7 +519,7 @@ where
     // Delete blobs from disk (best effort - failures logged but don't fail operation)
     for paste_id in paste_ids {
         if let Err(e) = blob::delete_blob(storage_path, &paste_id).await {
-            tracing::warn!(paste_id = %paste_id, error = %e, "Failed to delete user paste blob");
+            tracing::warn!(error = %e, "Failed to delete user paste blob");
         }
     }
 
@@ -538,7 +536,7 @@ mod tests {
     #[test]
     fn test_classify_blob_read_error_io_propagates_as_err() {
         let io_err = std::io::Error::other("simulated unreadable blob");
-        let result = classify_blob_read_error("some-paste-id", blob::BlobError::Io(io_err));
+        let result = classify_blob_read_error(blob::BlobError::Io(io_err));
         assert!(
             result.is_err(),
             "expected an I/O blob read failure to propagate as Err, got {:?}",
@@ -551,10 +549,8 @@ mod tests {
     /// error (500), not be swallowed into Ok(None) (404).
     #[test]
     fn test_classify_blob_read_error_too_large_propagates_as_err() {
-        let result = classify_blob_read_error(
-            "some-paste-id",
-            blob::BlobError::TooLarge("blob too large".to_string()),
-        );
+        let result =
+            classify_blob_read_error(blob::BlobError::TooLarge("blob too large".to_string()));
         assert!(
             result.is_err(),
             "expected an oversized blob to propagate as Err, got {:?}",
@@ -566,10 +562,8 @@ mod tests {
     /// this is the one case that should still present as "not found" (404).
     #[test]
     fn test_classify_blob_read_error_invalid_id_yields_ok_none() {
-        let result = classify_blob_read_error(
-            "bad id",
-            blob::BlobError::InvalidId("invalid characters".to_string()),
-        );
+        let result =
+            classify_blob_read_error(blob::BlobError::InvalidId("invalid characters".to_string()));
         assert!(
             matches!(result, Ok(None)),
             "expected an InvalidId blob read failure to yield Ok(None), got {:?}",

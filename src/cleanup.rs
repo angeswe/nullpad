@@ -88,7 +88,6 @@ where
                             if now.saturating_sub(modified_secs) > STALE_TMP_SECS {
                                 if let Err(e) = fs::remove_file(&file_path).await {
                                     tracing::warn!(
-                                        path = %file_path.display(),
                                         error = %e,
                                         "Failed to delete stale tmp file"
                                     );
@@ -98,11 +97,11 @@ where
                             }
                         }
                         Err(e) => {
-                            tracing::debug!(path = %file_path.display(), error = %e, "Failed to get modified time for tmp file");
+                            tracing::debug!(error = %e, "Failed to get modified time for tmp file");
                         }
                     },
                     Err(e) => {
-                        tracing::debug!(path = %file_path.display(), error = %e, "Failed to get metadata for tmp file");
+                        tracing::debug!(error = %e, "Failed to get metadata for tmp file");
                     }
                 }
                 continue;
@@ -183,7 +182,7 @@ where
         }
     };
 
-    for (i, (paste_id, file_path)) in files.drain(..).enumerate() {
+    for (i, (_, file_path)) in files.drain(..).enumerate() {
         checked += 1;
 
         // Default to true (keep file) if result is missing
@@ -191,11 +190,7 @@ where
 
         if !exists {
             if let Err(e) = fs::remove_file(&file_path).await {
-                tracing::warn!(
-                    paste_id = %paste_id,
-                    error = %e,
-                    "Failed to delete orphaned file"
-                );
+                tracing::warn!(error = %e, "Failed to delete orphaned file");
             } else {
                 deleted += 1;
             }
