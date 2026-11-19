@@ -12,7 +12,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src tests && \
     echo "fn main() {}" > src/main.rs && \
     touch src/lib.rs tests/integration.rs && \
-    cargo build --release && \
+    cargo build --release --locked && \
     rm -rf src target/release/nullpad target/release/deps/nullpad-* target/release/deps/libnullpad-* target/release/.fingerprint/nullpad-*
 
 # Copy source code and build for real
