@@ -5,7 +5,7 @@ use crate::error::AppError;
 use crate::models::{CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPasteMeta};
 use crate::storage;
 use crate::storage::blob::{BlobReadGuard, OpenedBlob};
-use crate::storage::paste::StorePasteError;
+use crate::storage::paste::{PinReservation, StorePasteError};
 use axum::{
     body::Body,
     extract::{multipart::MultipartError, ConnectInfo, Multipart, Path, State},
@@ -253,6 +253,7 @@ pub async fn create_paste(
         },
         // store_paste computes and records the blob hash.
         content_sha256: None,
+        pin_failures: 0,
     };
 
     // A request timeout or client disconnect drops this handler. The store runs
@@ -515,7 +516,8 @@ pub async fn get_paste(
 /// POST /api/paste/:id — Attempt to retrieve a PIN-gated paste
 ///
 /// Rate limited per IP per paste. Returns full content for PIN-gated pastes.
-/// Returns 404 if paste doesn't exist or isn't PIN-gated.
+/// Returns 404 if paste doesn't exist or isn't PIN-gated. After
+/// `pin_max_failures` wrong PINs over its life the paste is deleted.
 /// Burns paste on first attempt if burn_after_reading is true.
 /// A 200 body is a paste frame (see [`paste_frame_response`]).
 pub async fn attempt_paste(
@@ -533,18 +535,6 @@ pub async fn attempt_paste(
 
     let mut con = state.redis.clone();
 
-    // Rate limit globally per paste (distributed brute-force protection).
-    // Check global first so an exhausted paste doesn't leak per-IP budget.
-    let global_key = format!("ratelimit:pin_attempt_global:{}", id);
-    super::enforce_rate_limit(
-        &mut con,
-        &global_key,
-        state.config.rate_limit_pin_attempt_global,
-        3600,
-        Some(("pin_attempt_global", "per_paste")),
-    )
-    .await?;
-
     // Rate limit per IP per paste
     let ip = super::client_ip(&headers, &addr, state.config.trusted_proxy_count);
     let ip_hash = super::hash_ip(&*state.ip_hmac_salt, &ip);
@@ -558,7 +548,13 @@ pub async fn attempt_paste(
     )
     .await?;
 
-    // Verify paste exists and is PIN-gated
+    let submitted_bytes = body
+        .pin_verifier
+        .as_deref()
+        .and_then(|v| general_purpose::STANDARD.decode(v).ok())
+        .filter(|b| b.len() == 32)
+        .ok_or_else(|| AppError::Forbidden("Invalid PIN".to_string()))?;
+
     let meta = storage::paste::get_paste_meta(&mut con, &id)
         .await?
         .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
@@ -575,10 +571,7 @@ pub async fn attempt_paste(
         }
     }
 
-    // Verify PIN: constant-time compare submitted verifier against stored verifier
     let stored_verifier = meta.pin_verifier.as_deref().unwrap_or("");
-    let submitted_verifier = body.pin_verifier.as_deref().unwrap_or("");
-
     if stored_verifier.is_empty() {
         tracing::warn!(
             action = "pin_verifier_missing",
@@ -586,10 +579,6 @@ pub async fn attempt_paste(
         );
         return Err(AppError::Forbidden("Invalid PIN".to_string()));
     }
-    if submitted_verifier.is_empty() {
-        return Err(AppError::Forbidden("Invalid PIN".to_string()));
-    }
-
     let stored_bytes = general_purpose::STANDARD
         .decode(stored_verifier)
         .map_err(|_| {
@@ -599,27 +588,59 @@ pub async fn attempt_paste(
             );
             AppError::Internal("PIN verification error".to_string())
         })?;
-    let submitted_bytes = general_purpose::STANDARD
-        .decode(submitted_verifier)
-        .map_err(|_| AppError::Forbidden("Invalid PIN".to_string()))?;
 
-    if stored_bytes.len() != submitted_bytes.len()
-        || stored_bytes.ct_eq(&submitted_bytes).unwrap_u8() != 1
-    {
-        return Err(AppError::Forbidden("Invalid PIN".to_string()));
-    }
-
-    // PIN verified — fetch full paste (triggers burn if applicable)
-    let paste = storage::paste::get_paste_atomic(
+    let ip_key = format!("ratelimit:pin_fail_ip:{}:{}", ip_hash, id);
+    let reservation = storage::paste::reserve_pin_attempt(
         &mut con,
-        &state.config.paste_storage_path,
         &id,
-        state.config.max_upload_bytes as u64,
+        &ip_key,
+        state.config.pin_max_failures,
+        state.config.pin_max_failures_per_ip,
+        state.config.max_ttl_secs,
     )
-    .await?
-    .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
+    .await?;
+    match reservation {
+        PinReservation::NotFound => Err(AppError::NotFound("Paste not found".to_string())),
+        PinReservation::IpShareUsed { retry_after_secs } => Err(AppError::RateLimited {
+            retry_after: Some(retry_after_secs),
+        }),
+        PinReservation::Exhausted => delete_capped_paste(&mut con, &state, &id).await,
+        PinReservation::Reserved { failures } => {
+            let pin_matches = stored_bytes.len() == submitted_bytes.len()
+                && stored_bytes.ct_eq(&submitted_bytes).unwrap_u8() == 1;
+            if pin_matches {
+                storage::paste::refund_pin_attempt(&mut con, &id, &ip_key).await?;
+                let paste = storage::paste::get_paste_atomic(
+                    &mut con,
+                    &state.config.paste_storage_path,
+                    &id,
+                    state.config.max_upload_bytes as u64,
+                )
+                .await?
+                .ok_or_else(|| AppError::NotFound("Paste not found".to_string()))?;
+                paste_frame_response(&served_paste_meta(paste.meta), Some((paste.blob, permit)))
+            } else if failures < state.config.pin_max_failures {
+                Err(AppError::Forbidden("Invalid PIN".to_string()))
+            } else {
+                delete_capped_paste(&mut con, &state, &id).await
+            }
+        }
+    }
+}
 
-    paste_frame_response(&served_paste_meta(paste.meta), Some((paste.blob, permit)))
+async fn delete_capped_paste(
+    con: &mut redis::aio::ConnectionManager,
+    state: &AppState,
+    id: &str,
+) -> Result<Response, AppError> {
+    storage::paste::delete_paste(con, &state.config.paste_storage_path, id).await?;
+    tracing::warn!(
+        action = "pin_failure_cap_delete",
+        "Paste deleted after too many wrong PINs"
+    );
+    Err(AppError::NotFound(
+        "Paste deleted after too many wrong PINs".to_string(),
+    ))
 }
 
 /// DELETE /api/paste/:id — Delete paste (admin only)

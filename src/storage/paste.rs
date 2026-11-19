@@ -384,6 +384,141 @@ where
     Ok(deleted > 0)
 }
 
+/// Outcome of [`reserve_pin_attempt`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum PinReservation {
+    /// No paste record, or the paste has no PIN.
+    NotFound,
+    /// One failure was counted against the paste and the requester.
+    Reserved { failures: u32 },
+    /// The requester has used up its share of the paste's failures.
+    IpShareUsed { retry_after_secs: u64 },
+    /// The paste has used up its lifetime failure budget.
+    Exhausted,
+}
+
+/// Count one PIN failure against the paste (`pin_failures` in its record) and
+/// against the requester (`ip_key`) before the verifier is compared, so
+/// concurrent wrong attempts can never exceed `max_failures`. A correct PIN
+/// takes the failure back with [`refund_pin_attempt`].
+///
+/// `ip_key` expires with the paste, or after `ip_key_ttl_secs` when the paste
+/// has no TTL.
+///
+/// The record is rewritten through cjson. StoredPasteMeta has no arrays,
+/// keeps nulls as cjson.null, and its numbers are integers below 2^53, so the
+/// rewritten JSON reads back the same through serde.
+pub async fn reserve_pin_attempt<C>(
+    con: &mut C,
+    id: &str,
+    ip_key: &str,
+    max_failures: u32,
+    max_failures_per_ip: u32,
+    ip_key_ttl_secs: u64,
+) -> Result<PinReservation, redis::RedisError>
+where
+    C: AsyncCommands,
+{
+    // Replies: {0} not found, {1, failures} reserved, {2, ttl} requester share
+    // used, {3} exhausted.
+    let script = redis::Script::new(
+        r#"
+        local val = redis.call('GET', KEYS[1])
+        if not val then
+            return {0}
+        end
+        local obj = cjson.decode(val)
+        if obj.has_pin ~= true then
+            return {0}
+        end
+        local ip_used = tonumber(redis.call('GET', KEYS[2]) or '0')
+        if ip_used >= tonumber(ARGV[2]) then
+            local ttl = redis.call('TTL', KEYS[2])
+            if ttl < 1 then
+                ttl = 1
+            end
+            return {2, ttl}
+        end
+        local failures = tonumber(obj.pin_failures or 0)
+        if failures >= tonumber(ARGV[1]) then
+            return {3}
+        end
+        obj.pin_failures = failures + 1
+        redis.call('SET', KEYS[1], cjson.encode(obj), 'KEEPTTL')
+        if redis.call('INCR', KEYS[2]) == 1 then
+            local pttl = redis.call('PTTL', KEYS[1])
+            if pttl > 0 then
+                redis.call('PEXPIRE', KEYS[2], pttl)
+            else
+                redis.call('EXPIRE', KEYS[2], ARGV[3])
+            end
+        end
+        return {1, failures + 1}
+        "#,
+    );
+
+    let reply: Vec<u64> = script
+        .key(format!("paste:{}", id))
+        .key(ip_key)
+        .arg(max_failures)
+        .arg(max_failures_per_ip)
+        .arg(ip_key_ttl_secs)
+        .invoke_async(con)
+        .await?;
+
+    match reply.as_slice() {
+        [0] => Ok(PinReservation::NotFound),
+        [1, failures] => Ok(PinReservation::Reserved {
+            failures: *failures as u32,
+        }),
+        [2, ttl] => Ok(PinReservation::IpShareUsed {
+            retry_after_secs: *ttl,
+        }),
+        [3] => Ok(PinReservation::Exhausted),
+        other => Err(redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "Unexpected reserve_pin_attempt script result",
+            format!("{:?}", other),
+        ))),
+    }
+}
+
+/// Take back a failure counted by [`reserve_pin_attempt`]. A missing record
+/// or `ip_key` is skipped: a burn paste may already be gone.
+pub async fn refund_pin_attempt<C>(
+    con: &mut C,
+    id: &str,
+    ip_key: &str,
+) -> Result<(), redis::RedisError>
+where
+    C: AsyncCommands,
+{
+    let script = redis::Script::new(
+        r#"
+        local val = redis.call('GET', KEYS[1])
+        if val then
+            local obj = cjson.decode(val)
+            local failures = tonumber(obj.pin_failures or 0)
+            if failures > 0 then
+                obj.pin_failures = failures - 1
+                redis.call('SET', KEYS[1], cjson.encode(obj), 'KEEPTTL')
+            end
+        end
+        if tonumber(redis.call('GET', KEYS[2]) or '0') > 0 then
+            redis.call('DECR', KEYS[2])
+        end
+        return 1
+        "#,
+    );
+
+    let _: i64 = script
+        .key(format!("paste:{}", id))
+        .key(ip_key)
+        .invoke_async(con)
+        .await?;
+    Ok(())
+}
+
 /// Atomically activate a user's TTL on their first upload.
 ///
 /// Uses a Lua script to check if the user_pastes set has exactly 1 member

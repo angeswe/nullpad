@@ -154,7 +154,15 @@ async fn main() {
         test_pin_gated_attempt_returns_content,
         test_pin_gated_attempt_wrong_verifier_returns_403,
         test_pin_gated_attempt_rate_limited,
-        test_pin_gated_global_attempt_rate_limited,
+        test_pin_failure_cap_deletes_paste,
+        test_pin_failure_cap_survives_rate_limit_reset,
+        test_pin_failure_cap_applies_to_forever_paste,
+        test_correct_pin_does_not_count_toward_failure_cap,
+        test_malformed_verifier_does_not_count_toward_failure_cap,
+        test_single_ip_limited_to_per_ip_failure_share,
+        test_single_ip_cannot_lock_out_recipient,
+        test_concurrent_wrong_pins_from_one_ip_stop_at_ip_share,
+        test_concurrent_wrong_verifiers_do_not_exceed_cap,
         test_pin_gated_burn_consumed_on_attempt,
         test_non_pin_attempt_returns_404,
         test_non_pin_get_unchanged,
@@ -237,7 +245,8 @@ async fn spawn_test_server() -> (String, redis::aio::ConnectionManager, SigningK
 struct TestServerOverrides {
     rate_limit_auth_per_min: u32,
     rate_limit_pin_attempt: u32,
-    rate_limit_pin_attempt_global: u32,
+    pin_max_failures: u32,
+    pin_max_failures_per_ip: u32,
     /// Number of trusted proxies (affects which XFF entry is used as client IP).
     trusted_proxy_count: usize,
     /// Paste bodies the server streams at once before answering 503.
@@ -261,7 +270,8 @@ impl Default for TestServerOverrides {
         Self {
             rate_limit_auth_per_min: 10000,
             rate_limit_pin_attempt: 10000,
-            rate_limit_pin_attempt_global: 10000,
+            pin_max_failures: 10000,
+            pin_max_failures_per_ip: 10000,
             trusted_proxy_count: 0,
             max_concurrent_blob_reads: 32,
             write_timeout_secs: 60,
@@ -332,7 +342,8 @@ async fn spawn_test_server_configured(
         rate_limit_paste_per_min: 10000,
         rate_limit_auth_per_min: overrides.rate_limit_auth_per_min,
         rate_limit_pin_attempt: overrides.rate_limit_pin_attempt,
-        rate_limit_pin_attempt_global: overrides.rate_limit_pin_attempt_global,
+        pin_max_failures: overrides.pin_max_failures,
+        pin_max_failures_per_ip: overrides.pin_max_failures_per_ip,
         trusted_proxy_count: overrides.trusted_proxy_count,
         max_sessions_per_user: 5,
         max_pastes_per_user: overrides.max_pastes_per_user,
@@ -390,21 +401,27 @@ async fn spawn_test_server_with_auth_limit(
     (base_url, con, admin_key, admin_alias)
 }
 
-/// Spin up a test server with custom per-IP and global PIN attempt rate limits.
+/// Spin up a test server with custom PIN attempt pacing and failure caps.
 /// Uses `trusted_proxy_count=1` so XFF headers control client IP selection.
 async fn spawn_test_server_with_pin_limits(
-    per_ip_limit: u32,
-    global_limit: u32,
-) -> (String, redis::aio::ConnectionManager, SigningKey, String) {
-    let (base_url, con, admin_key, admin_alias, _storage) =
-        spawn_test_server_configured(TestServerOverrides {
-            rate_limit_pin_attempt: per_ip_limit,
-            rate_limit_pin_attempt_global: global_limit,
-            trusted_proxy_count: 1,
-            ..Default::default()
-        })
-        .await;
-    (base_url, con, admin_key, admin_alias)
+    per_ip_pacing: u32,
+    max_failures: u32,
+    max_failures_per_ip: u32,
+) -> (
+    String,
+    redis::aio::ConnectionManager,
+    SigningKey,
+    String,
+    std::path::PathBuf,
+) {
+    spawn_test_server_configured(TestServerOverrides {
+        rate_limit_pin_attempt: per_ip_pacing,
+        pin_max_failures: max_failures,
+        pin_max_failures_per_ip: max_failures_per_ip,
+        trusted_proxy_count: 1,
+        ..Default::default()
+    })
+    .await
 }
 
 /// Spin up a test server and also return the paste storage path, for tests
@@ -763,6 +780,7 @@ async fn test_failed_commit_leaves_no_record_or_owner_entry() {
         has_pin: Some(false),
         pin_verifier: None,
         content_sha256: None,
+        pin_failures: 0,
     };
     let upload = storage::blob::BlobUpload::create(&storage_path)
         .await
@@ -800,6 +818,7 @@ async fn store_test_paste<C: redis::AsyncCommands>(
         has_pin: Some(false),
         pin_verifier: None,
         content_sha256: None,
+        pin_failures: 0,
     };
     let upload = storage::blob::BlobUpload::create(storage_path)
         .await
@@ -1854,7 +1873,8 @@ async fn test_paste_id_never_logged() {
 
     let (base_url, _con, admin_key, admin_alias, storage_path) =
         spawn_test_server_configured(TestServerOverrides {
-            rate_limit_pin_attempt_global: 1,
+            rate_limit_pin_attempt: 1,
+            pin_max_failures: 1,
             trusted_proxy_count: 1,
             ..Default::default()
         })
@@ -1877,13 +1897,19 @@ async fn test_paste_id_never_logged() {
     let body: serde_json::Value = resp.json().await.unwrap();
     let pin_id = body["id"].as_str().unwrap().to_string();
     let verifier = test_pin_verifier(&test_dummy_key(), &pin_id);
-    for (ip_suffix, expected) in [(1u8, 200), (2, 429)] {
+    for (ip_suffix, expected) in [(1u8, 200), (1, 429)] {
         let resp = pin_attempt_with_xff(&client, &base_url, &pin_id, &verifier, ip_suffix)
             .await
             .unwrap();
         assert_eq!(resp.status(), expected);
     }
     ids.push(pin_id);
+
+    let capped_id = create_pin_paste(&client, &base_url, 3600, None).await;
+    let resp = pin_attempt_with_xff(&client, &base_url, &capped_id, &wrong_pin_verifier(), 2)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
 
     for _ in 0..3 {
         let resp = create_paste(
@@ -1894,6 +1920,8 @@ async fn test_paste_id_never_logged() {
         let body: serde_json::Value = resp.json().await.unwrap();
         ids.push(body["id"].as_str().unwrap().to_string());
     }
+
+    ids.push(capped_id);
 
     let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
     let resp = client
@@ -1927,6 +1955,7 @@ async fn test_paste_id_never_logged() {
     for expected in [
         "Paste created",
         "Rate limit exceeded",
+        "Paste deleted after too many wrong PINs",
         "Admin deleted paste",
         "blob missing on disk",
         "Failed to read blob",
@@ -2769,11 +2798,28 @@ async fn test_trusted_user_can_upload_files() {
 // PIN Gating Tests
 // ============================================================================
 
-/// POST a PIN attempt with a spoofed client IP via X-Forwarded-For.
+/// POST a PIN attempt body with a spoofed client IP via X-Forwarded-For.
 ///
-/// `client_ip_suffix` sets the last octet of a 10.0.0.N address in the XFF
-/// header alongside a fixed trusted proxy IP, giving each distinct suffix its
-/// own per-IP rate-limit bucket.
+/// `client_ip_suffix` sets the last octet of the 10.0.0.N address that the one
+/// trusted proxy puts in XFF, giving each distinct suffix its own per-IP
+/// bucket.
+async fn post_pin_body(
+    client: &reqwest::Client,
+    base_url: &str,
+    id: &str,
+    body: serde_json::Value,
+    client_ip_suffix: u8,
+) -> reqwest::Response {
+    client
+        .post(format!("{}/api/paste/{}", base_url, id))
+        .header("Content-Type", "application/json")
+        .header("X-Forwarded-For", format!("10.0.0.{}", client_ip_suffix))
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap()
+}
+
 async fn pin_attempt_with_xff(
     client: &reqwest::Client,
     base_url: &str,
@@ -2781,14 +2827,8 @@ async fn pin_attempt_with_xff(
     verifier: &str,
     client_ip_suffix: u8,
 ) -> Result<reqwest::Response, reqwest::Error> {
-    let xff = format!("10.0.0.{}, 192.168.1.1", client_ip_suffix);
-    client
-        .post(format!("{}/api/paste/{}", base_url, id))
-        .header("Content-Type", "application/json")
-        .header("X-Forwarded-For", xff)
-        .body(serde_json::json!({ "pin_verifier": verifier }).to_string())
-        .send()
-        .await
+    let body = serde_json::json!({ "pin_verifier": verifier });
+    Ok(post_pin_body(client, base_url, id, body, client_ip_suffix).await)
 }
 
 async fn test_pin_gated_get_returns_needs_pin() {
@@ -2921,9 +2961,8 @@ async fn test_pin_gated_attempt_wrong_verifier_returns_403() {
 }
 
 async fn test_pin_gated_attempt_rate_limited() {
-    // per-IP limit = 2, global limit = 10000 (well above attempt count, won't fire)
-    let (base_url, _con, _admin_key, _admin_alias) =
-        spawn_test_server_with_pin_limits(2, 10000).await;
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(2, 10000, 10000).await;
     let client = reqwest::Client::new();
 
     // Create a PIN-gated paste
@@ -2976,70 +3015,307 @@ async fn test_pin_gated_attempt_rate_limited() {
     assert!(retry_after > 0, "Retry-After must be positive");
 }
 
-async fn test_pin_gated_global_attempt_rate_limited() {
-    // Global cap = 3. Per-IP cap = 100: set well above the 3 attempts made here
-    // so only the global cap can fire, not any per-IP bucket.
-    // Three distinct client IPs each make 1 attempt (each under per-IP limit).
-    // The 4th attempt from yet another IP must be 429 due to global cap.
-    let (base_url, _con, _admin_key, _admin_alias) =
-        spawn_test_server_with_pin_limits(100, 3).await;
-    let client = reqwest::Client::new();
-
-    // Create a PIN-gated paste
+async fn create_pin_paste(
+    client: &reqwest::Client,
+    base_url: &str,
+    ttl: u64,
+    token: Option<&str>,
+) -> String {
     let resp = create_paste(
-        &client,
-        &base_url,
+        client,
+        base_url,
         "text",
-        b"global secret",
+        b"pin data",
         false,
-        3600,
-        None,
+        ttl,
+        token,
         true,
     )
     .await;
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    let id = body["id"].as_str().unwrap().to_string();
+    body["id"].as_str().unwrap().to_string()
+}
 
-    let dummy_key = test_dummy_key();
-    let verifier = test_pin_verifier(&dummy_key, &id);
+fn wrong_pin_verifier() -> String {
+    general_purpose::STANDARD.encode([0u8; 32])
+}
 
-    // Three distinct client IPs, each within per-IP limit → correct PIN → 200.
-    //
-    // With trusted_proxy_count=1, client_ip() reads XFF[len - 1 - 1] = XFF[0]
-    // from a two-entry header "10.0.0.N, 192.168.1.1", so 10.0.0.N is the client
-    // IP. Each distinct N lands in its own per-IP rate-limit bucket.
-    for ip_suffix in 1u8..=3 {
-        let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, ip_suffix)
+async fn paste_record(
+    con: &mut redis::aio::ConnectionManager,
+    id: &str,
+) -> Option<serde_json::Value> {
+    use redis::AsyncCommands;
+    let json: Option<String> = con.get(format!("paste:{}", id)).await.unwrap();
+    json.map(|j| serde_json::from_str(&j).unwrap())
+}
+
+/// Send one wrong PIN from each 10.0.0.N address in `ips`, in order, and
+/// return the response statuses.
+async fn send_wrong_pins(
+    client: &reqwest::Client,
+    base_url: &str,
+    id: &str,
+    ips: impl IntoIterator<Item = u8>,
+) -> Vec<u16> {
+    let mut statuses = Vec::new();
+    for ip in ips {
+        let resp = pin_attempt_with_xff(client, base_url, id, &wrong_pin_verifier(), ip)
             .await
             .unwrap();
-        assert_eq!(
-            resp.status(),
-            200,
-            "Expected 200 for client IP 10.0.0.{}, got {}",
-            ip_suffix,
-            resp.status()
-        );
+        statuses.push(resp.status().as_u16());
     }
+    statuses
+}
 
-    // 4th attempt from a fresh IP — global cap exhausted → 429
-    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, 4)
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.status(),
-        429,
-        "Expected 429 after global cap exhausted"
-    );
-    let retry_after: u64 = resp
-        .headers()
+fn retry_after_secs(resp: &reqwest::Response) -> u64 {
+    resp.headers()
         .get("retry-after")
         .expect("429 must include Retry-After header")
         .to_str()
         .unwrap()
         .parse()
-        .expect("Retry-After must be a positive integer");
-    assert!(retry_after > 0, "Retry-After must be positive");
+        .expect("Retry-After must be an integer")
+}
+
+async fn test_pin_failure_cap_deletes_paste() {
+    let (base_url, mut con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_with_pin_limits(100, 3, 100).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+    let blob_path = storage_path.join(&id[..2]).join(&id);
+    assert!(blob_path.exists());
+
+    let statuses = send_wrong_pins(&client, &base_url, &id, 1..=3).await;
+    assert_eq!(statuses, [403, 403, 404]);
+    assert!(paste_record(&mut con, &id).await.is_none());
+    assert!(!blob_path.exists());
+
+    let verifier = test_pin_verifier(&test_dummy_key(), &id);
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, 4)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+    let body: serde_json::Value = resp.json().await.unwrap_or_default();
+    assert!(body.get("encrypted_content").is_none());
+}
+
+async fn test_pin_failure_cap_survives_rate_limit_reset() {
+    let (base_url, mut con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(100, 3, 100).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+
+    let statuses = send_wrong_pins(&client, &base_url, &id, 1..=2).await;
+    assert_eq!(statuses, [403, 403]);
+
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg("ratelimit:*")
+            .arg("COUNT")
+            .arg(1000)
+            .query_async(&mut con)
+            .await
+            .unwrap();
+        if !keys.is_empty() {
+            let _: () = redis::cmd("DEL")
+                .arg(&keys)
+                .query_async(&mut con)
+                .await
+                .unwrap();
+        }
+        if next == 0 {
+            break;
+        }
+        cursor = next;
+    }
+
+    let statuses = send_wrong_pins(&client, &base_url, &id, [3]).await;
+    assert_eq!(statuses, [404]);
+    assert!(paste_record(&mut con, &id).await.is_none());
+}
+
+async fn test_pin_failure_cap_applies_to_forever_paste() {
+    let (base_url, mut con, admin_key, admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(100, 3, 100).await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let id = create_pin_paste(&client, &base_url, 0, Some(&admin_token)).await;
+    let ttl: i64 = redis::cmd("TTL")
+        .arg(format!("paste:{}", id))
+        .query_async(&mut con)
+        .await
+        .unwrap();
+    assert_eq!(ttl, -1);
+
+    let statuses = send_wrong_pins(&client, &base_url, &id, 1..=3).await;
+    assert_eq!(statuses, [403, 403, 404]);
+    assert!(paste_record(&mut con, &id).await.is_none());
+}
+
+async fn test_correct_pin_does_not_count_toward_failure_cap() {
+    let (base_url, mut con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(100, 3, 100).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+
+    let statuses = send_wrong_pins(&client, &base_url, &id, 1..=2).await;
+    assert_eq!(statuses, [403, 403]);
+    let verifier = test_pin_verifier(&test_dummy_key(), &id);
+    for ip in 3u8..=7 {
+        let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, ip)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "correct PIN from IP {}", ip);
+    }
+    let record = paste_record(&mut con, &id).await.unwrap();
+    assert_eq!(record["pin_failures"], 2);
+}
+
+async fn test_malformed_verifier_does_not_count_toward_failure_cap() {
+    let (base_url, mut con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(100, 3, 100).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+
+    let bodies = [
+        serde_json::json!({}),
+        serde_json::json!({ "pin_verifier": "not base64!" }),
+        serde_json::json!({ "pin_verifier": general_purpose::STANDARD.encode([0u8; 16]) }),
+    ];
+    let mut ip = 0u8;
+    for body in &bodies {
+        for _ in 0..3 {
+            ip += 1;
+            let resp = post_pin_body(&client, &base_url, &id, body.clone(), ip).await;
+            assert_eq!(resp.status(), 403, "malformed body {} from IP {}", body, ip);
+        }
+    }
+
+    let verifier = test_pin_verifier(&test_dummy_key(), &id);
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, ip + 1)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let record = paste_record(&mut con, &id).await.unwrap();
+    assert_eq!(record["pin_failures"], 0);
+}
+
+async fn test_single_ip_limited_to_per_ip_failure_share() {
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(100, 30, 5).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+
+    for attempt in 1..=5 {
+        let resp = pin_attempt_with_xff(&client, &base_url, &id, &wrong_pin_verifier(), 1)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403, "wrong PIN attempt {}", attempt);
+    }
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &wrong_pin_verifier(), 1)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    assert!(retry_after_secs(&resp) > 0);
+
+    let verifier = test_pin_verifier(&test_dummy_key(), &id);
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, 1)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 429);
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, 2)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_single_ip_cannot_lock_out_recipient() {
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(5, 30, 5).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+
+    futures::future::join_all(
+        (0..31).map(|_| post_pin_body(&client, &base_url, &id, serde_json::json!({}), 1)),
+    )
+    .await;
+
+    let verifier = test_pin_verifier(&test_dummy_key(), &id);
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, 2)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_concurrent_wrong_pins_from_one_ip_stop_at_ip_share() {
+    let (base_url, mut con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(100, 30, 5).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+    let wrong = wrong_pin_verifier();
+
+    let responses = futures::future::join_all(
+        (0..31).map(|_| pin_attempt_with_xff(&client, &base_url, &id, &wrong, 1)),
+    )
+    .await;
+    let statuses: Vec<u16> = responses
+        .iter()
+        .map(|r| r.as_ref().unwrap().status().as_u16())
+        .collect();
+    assert_eq!(
+        statuses.iter().filter(|&&s| s == 403).count(),
+        5,
+        "{:?}",
+        statuses
+    );
+    assert_eq!(
+        statuses.iter().filter(|&&s| s == 429).count(),
+        26,
+        "{:?}",
+        statuses
+    );
+
+    let verifier = test_pin_verifier(&test_dummy_key(), &id);
+    let resp = pin_attempt_with_xff(&client, &base_url, &id, &verifier, 2)
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let record = paste_record(&mut con, &id).await.unwrap();
+    assert_eq!(record["pin_failures"], 5);
+}
+
+async fn test_concurrent_wrong_verifiers_do_not_exceed_cap() {
+    let (base_url, mut con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_with_pin_limits(100, 3, 100).await;
+    let client = reqwest::Client::new();
+    let id = create_pin_paste(&client, &base_url, 3600, None).await;
+    let wrong = wrong_pin_verifier();
+
+    let responses = futures::future::join_all(
+        (1u8..=20).map(|ip| pin_attempt_with_xff(&client, &base_url, &id, &wrong, ip)),
+    )
+    .await;
+    let statuses: Vec<u16> = responses
+        .iter()
+        .map(|r| r.as_ref().unwrap().status().as_u16())
+        .collect();
+    assert_eq!(
+        statuses.iter().filter(|&&s| s == 403).count(),
+        2,
+        "{:?}",
+        statuses
+    );
+    assert_eq!(
+        statuses.iter().filter(|&&s| s == 404).count(),
+        18,
+        "{:?}",
+        statuses
+    );
+    assert!(paste_record(&mut con, &id).await.is_none());
 }
 
 async fn test_pin_gated_burn_consumed_on_attempt() {
@@ -3992,6 +4268,7 @@ async fn store_large_paste(
         has_pin: Some(false),
         pin_verifier: None,
         content_sha256: None,
+        pin_failures: 0,
     };
     let mut upload = storage::blob::BlobUpload::create(storage_path)
         .await
@@ -4098,7 +4375,7 @@ async fn test_pin_attempt_503_does_not_consume_pin_attempt() {
         spawn_test_server_configured(TestServerOverrides {
             max_concurrent_blob_reads: 1,
             rate_limit_pin_attempt: 1,
-            rate_limit_pin_attempt_global: 1,
+            pin_max_failures: 1,
             ..Default::default()
         })
         .await;
