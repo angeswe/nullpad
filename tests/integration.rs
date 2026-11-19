@@ -15,7 +15,7 @@ use futures::FutureExt;
 use hmac::{Hmac, KeyInit, Mac};
 use nullpad::{
     auth::middleware::AppState, cleanup, config::Config, listener::WriteTimeoutListener,
-    middleware::security_headers, routes, storage,
+    middleware::security_headers, routes, routes::paste::MAX_BLOB_READS_PER_IP, storage,
 };
 use reqwest::multipart;
 use sha2::Sha256;
@@ -182,6 +182,8 @@ async fn main() {
         test_concurrent_blob_reads_bounded,
         test_stalled_blob_reader_released_by_write_timeout,
         test_pin_attempt_503_does_not_consume_pin_attempt,
+        test_blob_reads_per_ip_capped,
+        test_per_ip_cap_leaves_blob_reads_for_other_ips,
         test_admin_delete_during_stream_keeps_streamed_bytes,
         test_oversized_json_body_returns_413,
         test_paste_over_default_body_limit_succeeds,
@@ -345,6 +347,7 @@ async fn spawn_test_server_configured(
         blob_read_permits: Arc::new(tokio::sync::Semaphore::new(
             config.max_concurrent_blob_reads,
         )),
+        blob_reads_per_ip: Default::default(),
         config: Arc::new(config),
         ip_hmac_salt: Arc::new(rand::random()),
     };
@@ -417,6 +420,39 @@ async fn spawn_test_server_with_storage() -> (
     std::path::PathBuf,
 ) {
     spawn_test_server_configured(TestServerOverrides::default()).await
+}
+
+/// Spin up a test server that takes the client IP from `X-Forwarded-For`
+/// (see [`get_from_ip`]). Returns the base URL, a Valkey connection, the
+/// paste storage path and a client with a 10 s timeout.
+async fn spawn_trusted_proxy_server(
+    overrides: TestServerOverrides,
+) -> (
+    String,
+    redis::aio::ConnectionManager,
+    std::path::PathBuf,
+    reqwest::Client,
+) {
+    let (base_url, con, _admin_key, _admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            trusted_proxy_count: 1,
+            ..overrides
+        })
+        .await;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap();
+    (base_url, con, storage_path, client)
+}
+
+/// GET `url` as client IP `ip`, on a server from [`spawn_trusted_proxy_server`].
+async fn get_from_ip(
+    client: &reqwest::Client,
+    url: &str,
+    ip: &str,
+) -> reqwest::Result<reqwest::Response> {
+    client.get(url).header("X-Forwarded-For", ip).send().await
 }
 
 /// Helper: perform full challenge -> sign -> verify login flow, return session token.
@@ -2316,11 +2352,9 @@ async fn test_challenge_nonce_single_use() {
 // ============================================================================
 
 async fn test_concurrent_burn_after_reading_race() {
-    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .unwrap();
+    // Each request comes from its own IP, so the per-IP read cap does not apply.
+    let (base_url, _con, _storage_path, client) =
+        spawn_trusted_proxy_server(TestServerOverrides::default()).await;
 
     // Create a burn-after-reading paste
     let resp = create_paste(
@@ -2340,10 +2374,12 @@ async fn test_concurrent_burn_after_reading_race() {
 
     // Launch 10 concurrent requests to fetch the same paste
     let mut handles = vec![];
-    for _ in 0..10 {
+    for i in 0..10 {
         let url = format!("{}/api/paste/{}", base_url, paste_id);
         let c = client.clone();
-        handles.push(tokio::spawn(async move { c.get(&url).send().await }));
+        handles.push(tokio::spawn(async move {
+            get_from_ip(&c, &url, &format!("203.0.113.{}", i)).await
+        }));
     }
 
     // Collect results
@@ -4160,6 +4196,69 @@ async fn test_pin_attempt_503_does_not_consume_pin_attempt() {
     );
     let (_meta, content) = parse_paste_frame(&resp.bytes().await.unwrap());
     assert_eq!(content, pin_content);
+}
+
+async fn test_blob_reads_per_ip_capped() {
+    let (base_url, mut con, storage_path, client) =
+        spawn_trusted_proxy_server(TestServerOverrides::default()).await;
+    let id = store_large_paste(&mut con, &storage_path, LARGE_PASTE_BYTES).await;
+    let url = format!("{}/api/paste/{}", base_url, id);
+    let get = || get_from_ip(&client, &url, "203.0.113.7");
+
+    let mut held = Vec::new();
+    for _ in 0..MAX_BLOB_READS_PER_IP {
+        let resp = get().await.unwrap();
+        assert_eq!(resp.status(), 200);
+        held.push(resp);
+    }
+
+    let resp = get().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        429,
+        "a read over the per-IP cap must get 429"
+    );
+
+    drop(held);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let resp = get().await.unwrap();
+        if resp.status() == 200 {
+            break;
+        }
+        assert_eq!(resp.status(), 429);
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "per-IP read slots were not released after the bodies were dropped"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn test_per_ip_cap_leaves_blob_reads_for_other_ips() {
+    let (base_url, mut con, storage_path, client) =
+        spawn_trusted_proxy_server(TestServerOverrides {
+            max_concurrent_blob_reads: MAX_BLOB_READS_PER_IP + 1,
+            ..Default::default()
+        })
+        .await;
+    let id = store_large_paste(&mut con, &storage_path, LARGE_PASTE_BYTES).await;
+    let url = format!("{}/api/paste/{}", base_url, id);
+
+    // One IP tries to hold every global permit with reads it never finishes.
+    let mut held = Vec::new();
+    for _ in 0..=MAX_BLOB_READS_PER_IP {
+        held.push(get_from_ip(&client, &url, "203.0.113.7").await.unwrap());
+    }
+
+    let resp = get_from_ip(&client, &url, "198.51.100.9").await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "one IP at its per-IP cap must not block reads from another IP"
+    );
+    drop(resp);
+    drop(held);
 }
 
 async fn test_admin_delete_during_stream_keeps_streamed_bytes() {

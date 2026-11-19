@@ -6,7 +6,12 @@ use crate::models::Role;
 use crate::storage;
 use axum::{extract::FromRequestParts, http::request::Parts};
 use redis::AsyncCommands;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::IpAddr;
+use std::sync::{Arc, Mutex};
+
+/// Paste bodies streaming per client IP (as `routes::client_ip` returns it).
+pub type BlobReadsPerIp = Arc<Mutex<HashMap<IpAddr, usize>>>;
 
 /// Application state shared across handlers.
 #[derive(Clone)]
@@ -22,6 +27,9 @@ pub struct AppState {
     /// A read that finds none free gets 503; the permit is released when the
     /// response body is dropped.
     pub blob_read_permits: Arc<tokio::sync::Semaphore>,
+    /// Paste bodies streaming per client IP (as `routes::client_ip` returns it).
+    /// Capped at `routes::paste::MAX_BLOB_READS_PER_IP`.
+    pub blob_reads_per_ip: BlobReadsPerIp,
 }
 
 /// Authenticated session extractor.
