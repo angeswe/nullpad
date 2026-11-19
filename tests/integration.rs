@@ -132,6 +132,9 @@ async fn main() {
         test_protected_html_unauthenticated_returns_401,
         test_protected_html_with_session_cookie,
         test_protected_html_not_served_by_static_fallback,
+        test_protected_pages_are_no_store,
+        test_protected_pages_unauthenticated_no_store,
+        test_public_pages_keep_no_cache,
         test_verify_sets_np_session_cookie,
         test_stored_blob_preserves_bucket_size,
         test_unreadable_blob_returns_500_not_404,
@@ -2732,6 +2735,69 @@ async fn test_protected_html_not_served_by_static_fallback() {
         .unwrap();
     // Should be 404 (protected/ is not in static/)
     assert_eq!(resp.status(), 404);
+}
+
+fn cache_control(resp: &reqwest::Response) -> String {
+    resp.headers()
+        .get("cache-control")
+        .expect("response must set cache-control")
+        .to_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Gated pages must not be stored by browsers or shared caches.
+async fn test_protected_pages_are_no_store() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    for path in routes::PROTECTED_PATHS {
+        let resp = client
+            .get(format!("{}{}", base_url, path))
+            .header("cookie", format!("np_session={}", admin_token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{}", path);
+        assert_eq!(cache_control(&resp), "no-store, private", "{}", path);
+    }
+}
+
+/// Auth failures on gated pages must not be cached either.
+async fn test_protected_pages_unauthenticated_no_store() {
+    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    for path in routes::PROTECTED_PATHS {
+        let resp = client
+            .get(format!("{}{}", base_url, path))
+            .send()
+            .await
+            .unwrap();
+        assert!(
+            resp.status() == 401 || resp.status() == 403,
+            "{} returned {}",
+            path,
+            resp.status()
+        );
+        assert!(cache_control(&resp).contains("no-store"), "{}", path);
+    }
+}
+
+/// Public pages keep the revalidating cache policy.
+async fn test_public_pages_keep_no_cache() {
+    let (base_url, _con, _key, _alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    for path in ["/view.html", "/index.html"] {
+        let resp = client
+            .get(format!("{}{}", base_url, path))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(cache_control(&resp), "public, no-cache", "{}", path);
+    }
 }
 
 /// Upload payloads whose sizes land exactly on ciphertext bucket boundaries and
