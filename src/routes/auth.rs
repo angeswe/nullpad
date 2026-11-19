@@ -1,7 +1,9 @@
 //! Auth API endpoints.
 
 use crate::auth::middleware::{AppState, AuthSession};
-use crate::auth::session::{generate_challenge_nonce, generate_session_token};
+use crate::auth::session::{
+    generate_challenge_id, generate_challenge_nonce, generate_session_token, is_valid_challenge_id,
+};
 use crate::auth::verify::{parse_pubkey, verify_signature};
 use crate::error::AppError;
 use crate::models::{
@@ -95,12 +97,13 @@ pub async fn request_challenge(
     )
     .await?;
 
-    // Per-alias rate limit BEFORE storing challenge to prevent challenge overwrite DoS.
-    // Check unconditionally (alias existence is checked atomically when storing).
-    let alias_rate_key = format!("ratelimit:challenge_alias:{}", req.alias);
+    // Keyed on alias and caller together, so one caller's requests never use up another
+    // caller's allowance for the same alias.
+    let alias_rate_key = format!("ratelimit:challenge_alias:{}:{}", req.alias, ip_hash);
     super::enforce_rate_limit(&mut con, &alias_rate_key, 10, 30, None).await?;
 
-    // Generate nonce regardless of whether user exists to prevent alias enumeration
+    // Generate ID and nonce regardless of whether user exists to prevent alias enumeration
+    let challenge_id = generate_challenge_id();
     let nonce = generate_challenge_nonce();
 
     let challenge = StoredChallenge {
@@ -114,13 +117,17 @@ pub async fn request_challenge(
     storage::session::store_challenge_if_user_exists(
         &mut con,
         &req.alias,
+        &challenge_id,
         &challenge,
         state.config.challenge_ttl_secs,
     )
     .await?;
 
     // Always return a challenge response (non-existent users get a throwaway nonce)
-    Ok(Json(ChallengeResponse { nonce }))
+    Ok(Json(ChallengeResponse {
+        challenge_id,
+        nonce,
+    }))
 }
 
 /// POST /api/auth/verify — Verify signature and create session
@@ -154,11 +161,15 @@ pub async fn verify_challenge(
     if !signature_well_formed {
         return Err(auth_failed("Malformed signature"));
     }
+    if !is_valid_challenge_id(&req.challenge_id) {
+        return Err(auth_failed("Malformed challenge id"));
+    }
 
     // Get and delete challenge (single-use)
-    let challenge = storage::session::get_and_delete_challenge(&mut con, &req.alias)
-        .await?
-        .ok_or_else(|| AppError::Unauthorized("Authentication failed".to_string()))?;
+    let challenge =
+        storage::session::get_and_delete_challenge(&mut con, &req.alias, &req.challenge_id)
+            .await?
+            .ok_or_else(|| AppError::Unauthorized("Authentication failed".to_string()))?;
 
     // Look up user to get pubkey
     let user = storage::user::get_user_by_alias(&mut con, &req.alias)

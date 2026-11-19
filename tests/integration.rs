@@ -128,12 +128,17 @@ async fn main() {
         test_verify_normalized_error_messages,
         test_verify_malformed_signature_does_not_reveal_alias,
         test_verify_malformed_signature_keeps_pending_challenge,
+        test_verify_malformed_challenge_id_returns_401,
+        test_challenge_alias_limit_is_per_requester,
+        test_other_requester_does_not_invalidate_pending_nonce,
         test_verify_weak_stored_pubkey_returns_401,
         test_rate_limiting_returns_429,
         test_admin_endpoints_require_auth,
         test_admin_create_and_list_invites,
         test_admin_revoke_invite,
         test_admin_delete_paste,
+        test_paste_id_never_logged,
+        test_stale_tmp_file_id_never_logged,
         test_admin_revoke_user,
         test_admin_cannot_delete_self,
         test_security_headers_on_api,
@@ -421,31 +426,11 @@ async fn admin_login(
     alias: &str,
     signing_key: &SigningKey,
 ) -> String {
-    // Request challenge
-    let resp = client
-        .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": alias}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let nonce_b64 = body["nonce"].as_str().unwrap();
-
-    // Decode nonce and sign it
-    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
-    let signature = signing_key.sign(&nonce_bytes);
-    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
-
-    // Verify
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": alias, "signature": sig_b64}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let (challenge_id, nonce) = request_challenge(client, base_url, alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(signing_key.sign(&nonce).to_bytes());
+    let (status, body) = post_verify(client, base_url, alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 200);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
     body["token"].as_str().unwrap().to_string()
 }
 
@@ -1015,6 +1000,7 @@ async fn test_auth_challenge_response_flow() {
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["nonce"].as_str().is_some());
+    assert!(body["challenge_id"].as_str().is_some());
 }
 
 async fn test_auth_challenge_unknown_user() {
@@ -1031,30 +1017,19 @@ async fn test_auth_challenge_unknown_user() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert!(body["nonce"].is_string());
+    assert!(body["challenge_id"].is_string());
 }
 
 async fn test_auth_verify_invalid_signature() {
     let (base_url, _con, _admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // Get a challenge
-    let resp = client
-        .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": admin_alias}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
+    let (challenge_id, _nonce) = request_challenge(&client, &base_url, &admin_alias).await;
 
     // Submit garbage signature
     let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": admin_alias, "signature": fake_sig}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &fake_sig).await;
+    assert_eq!(status, 401);
 }
 
 async fn test_auth_full_login_flow() {
@@ -1170,33 +1145,19 @@ async fn test_verify_alias_validation() {
     let client = reqwest::Client::new();
     let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
 
-    // Alias too short (1 char) -> 400
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": "a", "signature": fake_sig}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
-
-    // Alias too long (65 chars) -> 400
+    // Alias too short (1 char), too long (65 chars), special chars -> 400
     let long_alias = "a".repeat(65);
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": long_alias, "signature": fake_sig}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
-
-    // Alias with special chars -> 400
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": "user@evil.com", "signature": fake_sig}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 400);
+    for alias in ["a", long_alias.as_str(), "user@evil.com"] {
+        let (status, _) = post_verify(
+            &client,
+            &base_url,
+            alias,
+            WELL_FORMED_CHALLENGE_ID,
+            &fake_sig,
+        )
+        .await;
+        assert_eq!(status, 400, "alias={alias}");
+    }
 }
 
 async fn test_challenge_alias_validation() {
@@ -1451,63 +1412,87 @@ async fn test_verify_normalized_error_messages() {
     let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
 
     // Verify with no challenge -> 401 with generic "Authentication failed"
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": "nobody_here", "signature": fake_sig}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-    let body: serde_json::Value = resp.json().await.unwrap();
+    let (status, body) = post_verify(
+        &client,
+        &base_url,
+        "nobody_here",
+        WELL_FORMED_CHALLENGE_ID,
+        &fake_sig,
+    )
+    .await;
+    assert_eq!(status, 401);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(body["error"], "Authentication failed");
 
     // Verify with wrong signature (after getting a challenge) -> 401 with generic message
     // First get a challenge
-    let _resp = client
-        .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": admin_alias}))
-        .send()
-        .await
-        .unwrap();
+    let (challenge_id, _nonce) = request_challenge(&client, &base_url, &admin_alias).await;
     // Then submit bad sig
-    let resp = client
+    let (status, body) =
+        post_verify(&client, &base_url, &admin_alias, &challenge_id, &fake_sig).await;
+    assert_eq!(status, 401);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(body["error"], "Authentication failed");
+}
+
+const WELL_FORMED_CHALLENGE_ID: &str = "00000000000000000000000000000000";
+
+async fn send_verify(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+    challenge_id: &str,
+    signature: &str,
+) -> reqwest::Response {
+    client
         .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": admin_alias, "signature": fake_sig}))
+        .json(&serde_json::json!({"alias": alias, "challenge_id": challenge_id, "signature": signature}))
         .send()
         .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(body["error"], "Authentication failed");
+        .unwrap()
 }
 
 async fn post_verify(
     client: &reqwest::Client,
     base_url: &str,
     alias: &str,
+    challenge_id: &str,
     signature: &str,
 ) -> (reqwest::StatusCode, String) {
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": alias, "signature": signature}))
-        .send()
-        .await
-        .unwrap();
+    let resp = send_verify(client, base_url, alias, challenge_id, signature).await;
     (resp.status(), resp.text().await.unwrap())
 }
 
-async fn request_challenge(client: &reqwest::Client, base_url: &str, alias: &str) -> Vec<u8> {
-    let resp = client
+async fn send_challenge(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+    client_ip: Option<&str>,
+) -> reqwest::Response {
+    let mut req = client
         .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": alias}))
-        .send()
-        .await
-        .unwrap();
+        .json(&serde_json::json!({"alias": alias}));
+    if let Some(ip) = client_ip {
+        req = req.header("X-Forwarded-For", ip);
+    }
+    req.send().await.unwrap()
+}
+
+async fn parse_challenge(resp: reqwest::Response) -> (String, Vec<u8>) {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
-    general_purpose::STANDARD
+    let nonce = general_purpose::STANDARD
         .decode(body["nonce"].as_str().unwrap())
-        .unwrap()
+        .unwrap();
+    (body["challenge_id"].as_str().unwrap().to_string(), nonce)
+}
+
+async fn request_challenge(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+) -> (String, Vec<u8>) {
+    parse_challenge(send_challenge(client, base_url, alias, None).await).await
 }
 
 async fn unknown_alias_verify_response(
@@ -1515,7 +1500,14 @@ async fn unknown_alias_verify_response(
     base_url: &str,
 ) -> (reqwest::StatusCode, String) {
     let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
-    let response = post_verify(client, base_url, "nobody_here", &fake_sig).await;
+    let response = post_verify(
+        client,
+        base_url,
+        "nobody_here",
+        WELL_FORMED_CHALLENGE_ID,
+        &fake_sig,
+    )
+    .await;
     assert_eq!(response.0, 401);
     response
 }
@@ -1528,10 +1520,8 @@ async fn test_verify_malformed_signature_does_not_reveal_alias() {
 
     for signature in ["not-base64!", short_sig.as_str()] {
         for alias in [admin_alias.as_str(), "nobody_here"] {
-            if alias == admin_alias {
-                request_challenge(&client, &base_url, alias).await;
-            }
-            let response = post_verify(&client, &base_url, alias, signature).await;
+            let (challenge_id, _nonce) = request_challenge(&client, &base_url, alias).await;
+            let response = post_verify(&client, &base_url, alias, &challenge_id, signature).await;
             assert_eq!(response, expected, "alias={alias} signature={signature}");
         }
     }
@@ -1541,12 +1531,79 @@ async fn test_verify_malformed_signature_keeps_pending_challenge() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    let nonce = request_challenge(&client, &base_url, &admin_alias).await;
-    let (status, _) = post_verify(&client, &base_url, &admin_alias, "not-base64!").await;
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let (status, _) = post_verify(
+        &client,
+        &base_url,
+        &admin_alias,
+        &challenge_id,
+        "not-base64!",
+    )
+    .await;
     assert_eq!(status, 401);
 
     let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
-    let (status, _) = post_verify(&client, &base_url, &admin_alias, &sig_b64).await;
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 200);
+}
+
+async fn test_verify_malformed_challenge_id_returns_401() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let expected = unknown_alias_verify_response(&client, &base_url).await;
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let suffixed = format!("{challenge_id}:x");
+    let malformed = [
+        "",
+        &challenge_id[..31],
+        suffixed.as_str(),
+        "../../../../../../../../../../ab",
+        "0000000000000000000000000000000G",
+    ];
+    for bad_id in malformed {
+        let response = post_verify(&client, &base_url, &admin_alias, bad_id, &sig_b64).await;
+        assert_eq!(response, expected, "challenge_id={bad_id:?}");
+    }
+}
+
+async fn test_challenge_alias_limit_is_per_requester() {
+    let (base_url, _con, _admin_key, admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            trusted_proxy_count: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+
+    for ip in ["10.0.1.1", "10.0.1.2"] {
+        for _ in 0..5 {
+            let resp = send_challenge(&client, &base_url, &admin_alias, Some(ip)).await;
+            assert_eq!(resp.status(), 200);
+        }
+    }
+
+    let resp = send_challenge(&client, &base_url, &admin_alias, Some("10.0.1.3")).await;
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_other_requester_does_not_invalidate_pending_nonce() {
+    let (base_url, _con, admin_key, admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            trusted_proxy_count: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+
+    let owner = send_challenge(&client, &base_url, &admin_alias, Some("10.0.2.1")).await;
+    let (challenge_id, nonce) = parse_challenge(owner).await;
+    let attacker = send_challenge(&client, &base_url, &admin_alias, Some("10.0.2.2")).await;
+    assert_eq!(attacker.status(), 200);
+
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 200);
 }
 
@@ -1579,9 +1636,16 @@ async fn test_verify_weak_stored_pubkey_returns_401() {
     .await
     .unwrap();
 
-    request_challenge(&client, &base_url, "weak_key_user").await;
+    let (challenge_id, _nonce) = request_challenge(&client, &base_url, "weak_key_user").await;
     let fake_sig = general_purpose::STANDARD.encode([0u8; 64]);
-    let response = post_verify(&client, &base_url, "weak_key_user", &fake_sig).await;
+    let response = post_verify(
+        &client,
+        &base_url,
+        "weak_key_user",
+        &challenge_id,
+        &fake_sig,
+    )
+    .await;
     assert_eq!(response, expected);
 }
 
@@ -1763,6 +1827,167 @@ async fn test_admin_delete_paste() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+#[derive(Clone)]
+struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn test_paste_id_never_logged() {
+    let logs = LogBuffer(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let writer = logs.clone();
+    tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .init();
+
+    let (base_url, _con, admin_key, admin_alias, storage_path) =
+        spawn_test_server_configured(TestServerOverrides {
+            rate_limit_pin_attempt_global: 1,
+            trusted_proxy_count: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+    let mut ids = Vec::new();
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        b"pin data",
+        false,
+        3600,
+        None,
+        true,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let pin_id = body["id"].as_str().unwrap().to_string();
+    let verifier = test_pin_verifier(&test_dummy_key(), &pin_id);
+    for (ip_suffix, expected) in [(1u8, 200), (2, 429)] {
+        let resp = pin_attempt_with_xff(&client, &base_url, &pin_id, &verifier, ip_suffix)
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), expected);
+    }
+    ids.push(pin_id);
+
+    for _ in 0..3 {
+        let resp = create_paste(
+            &client, &base_url, "text", b"data", false, 3600, None, false,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        ids.push(body["id"].as_str().unwrap().to_string());
+    }
+
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let resp = client
+        .delete(format!("{}/api/paste/{}", base_url, ids[1]))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+
+    let missing_blob = storage_path.join(&ids[2][..2]).join(&ids[2]);
+    std::fs::remove_file(&missing_blob).unwrap();
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, ids[2]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+
+    let unreadable_blob = storage_path.join(&ids[3][..2]).join(&ids[3]);
+    std::fs::remove_file(&unreadable_blob).unwrap();
+    std::fs::create_dir(&unreadable_blob).unwrap();
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, ids[3]))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500);
+
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    for expected in [
+        "Paste created",
+        "Rate limit exceeded",
+        "Admin deleted paste",
+        "blob missing on disk",
+        "Failed to read blob",
+    ] {
+        assert!(
+            logs.contains(expected),
+            "expected log line {expected:?} not captured"
+        );
+    }
+    for id in &ids {
+        assert!(
+            !logs.contains(id.as_str()),
+            "paste ID {id} appears in logs:\n{logs}"
+        );
+    }
+}
+
+async fn test_stale_tmp_file_id_never_logged() {
+    use std::os::unix::fs::PermissionsExt;
+    use tracing::instrument::WithSubscriber;
+
+    let logs = LogBuffer(Arc::new(std::sync::Mutex::new(Vec::new())));
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+
+    let mut con = redis::Client::open(get_valkey_url())
+        .unwrap()
+        .get_connection_manager()
+        .await
+        .unwrap();
+    let storage_path = storage_root().join(format!("tmp_log_{}", nanoid::nanoid!(8)));
+    let id = nanoid::nanoid!(12);
+    let shard = storage_path.join(&id[..2]);
+    std::fs::create_dir_all(&shard).unwrap();
+    let tmp_file = std::fs::File::create(shard.join(format!("{id}.tmp"))).unwrap();
+    tmp_file
+        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200))
+        .unwrap();
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let result = cleanup::cleanup_orphaned_files(&mut con, &storage_path)
+        .with_subscriber(subscriber)
+        .await;
+
+    std::fs::set_permissions(&shard, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let _ = std::fs::remove_dir_all(&storage_path);
+    result.unwrap();
+
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("Failed to delete stale tmp file"),
+        "expected stale tmp warning not captured:\n{logs}"
+    );
+    assert!(
+        !logs.contains(id.as_str()),
+        "paste ID {id} appears in logs:\n{logs}"
+    );
 }
 
 async fn test_admin_revoke_user() {
@@ -2074,39 +2299,16 @@ async fn test_challenge_nonce_single_use() {
     let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
     let client = reqwest::Client::new();
 
-    // Request challenge
-    let resp = client
-        .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": admin_alias}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let nonce_b64 = body["nonce"].as_str().unwrap();
-
-    // Sign the nonce
-    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
-    let signature = admin_key.sign(&nonce_bytes);
-    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
 
     // First verification should succeed
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": admin_alias, "signature": sig_b64}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 200);
 
     // Second verification with same signature should fail (nonce consumed)
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": admin_alias, "signature": sig_b64}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 401);
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
 }
 
 // ============================================================================
@@ -3731,29 +3933,9 @@ async fn test_verify_sets_np_session_cookie() {
         .build()
         .unwrap();
 
-    // Request challenge
-    let resp = client
-        .post(format!("{}/api/auth/challenge", base_url))
-        .json(&serde_json::json!({"alias": admin_alias}))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let body: serde_json::Value = resp.json().await.unwrap();
-    let nonce_b64 = body["nonce"].as_str().unwrap();
-
-    // Sign nonce
-    let nonce_bytes = general_purpose::STANDARD.decode(nonce_b64).unwrap();
-    let signature = admin_key.sign(&nonce_bytes);
-    let sig_b64 = general_purpose::STANDARD.encode(signature.to_bytes());
-
-    // Verify
-    let resp = client
-        .post(format!("{}/api/auth/verify", base_url))
-        .json(&serde_json::json!({"alias": admin_alias, "signature": sig_b64}))
-        .send()
-        .await
-        .unwrap();
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let resp = send_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(resp.status(), 200);
 
     // Check Set-Cookie header contains session token, not role

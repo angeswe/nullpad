@@ -306,7 +306,9 @@ TRUSTED_PROXY_COUNT=2
 
 ### Docker Deployment with TLS
 
-The provided `docker-compose.yml` exposes the application on port 3015 (HTTP only). In production, place a TLS-terminating reverse proxy in front of it (nginx, Caddy, Traefik, etc.) and do not expose port 3015 publicly.
+The provided `docker-compose.yml` publishes the application on port 3015 (HTTP only), bound to 127.0.0.1. Only the host itself can reach it. In production, place a TLS-terminating reverse proxy on the same host in front of it (nginx, Caddy, Traefik, etc.).
+
+To reach port 3015 from other machines, change `"127.0.0.1:3015:3000"` in `docker-compose.yml` to `"3015:3000"`. Docker's published ports bypass the host firewall's INPUT rules, so this exposes plain HTTP to the whole network. It is not recommended.
 
 ### Build Version
 

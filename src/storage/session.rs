@@ -2,7 +2,7 @@
 //!
 //! Valkey key patterns:
 //! - `session:{token}` — session data (JSON)
-//! - `challenge:{alias}` — challenge nonce (JSON)
+//! - `challenge:{alias}:{challenge_id}` — challenge nonce (JSON)
 //!
 //! ## Security: Zeroizing Sensitive Data
 //!
@@ -28,6 +28,7 @@ use zeroize::Zeroizing;
 pub async fn store_challenge_if_user_exists<C>(
     con: &mut C,
     alias: &str,
+    challenge_id: &str,
     challenge: &StoredChallenge,
     ttl_secs: u64,
 ) -> Result<bool, redis::RedisError>
@@ -35,7 +36,7 @@ where
     C: AsyncCommands,
 {
     let alias_key = format!("alias:{}", alias);
-    let challenge_key = format!("challenge:{}", alias);
+    let challenge_key = format!("challenge:{}:{}", alias, challenge_id);
     let json = serde_json::to_string(challenge).map_err(super::json_serialize_err)?;
 
     // Lua script: check if user exists, store challenge atomically
@@ -67,11 +68,12 @@ where
 pub async fn get_and_delete_challenge<C>(
     con: &mut C,
     alias: &str,
+    challenge_id: &str,
 ) -> Result<Option<StoredChallenge>, redis::RedisError>
 where
     C: AsyncCommands,
 {
-    let key = format!("challenge:{}", alias);
+    let key = format!("challenge:{}:{}", alias, challenge_id);
 
     // Lua script for atomic GET + DEL
     let script = redis::Script::new(
