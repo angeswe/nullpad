@@ -183,7 +183,22 @@ pub async fn verify_challenge(
         .decode(&challenge.nonce)
         .map_err(|e| AppError::Internal(format!("Invalid nonce encoding: {}", e)))?;
 
-    signature_verdict(verify_signature(&user.pubkey, &nonce_bytes, &req.signature))?;
+    let pubkey = if user.role == Role::Admin {
+        if user.id != "admin" {
+            return Err(auth_failed("Admin role on a non-admin record"));
+        }
+        if user.pubkey != state.config.admin_pubkey {
+            tracing::warn!(
+                action = "admin_pubkey_mismatch",
+                "Stored admin pubkey differs from config; using config"
+            );
+        }
+        &state.config.admin_pubkey
+    } else {
+        &user.pubkey
+    };
+
+    signature_verdict(verify_signature(pubkey, &nonce_bytes, &req.signature))?;
 
     // Generate session token
     let token = generate_session_token();

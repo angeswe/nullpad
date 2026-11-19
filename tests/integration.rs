@@ -140,6 +140,9 @@ async fn main() {
         test_challenge_alias_limit_is_per_requester,
         test_other_requester_does_not_invalidate_pending_nonce,
         test_verify_weak_stored_pubkey_returns_401,
+        test_admin_login_rejects_stale_valkey_pubkey,
+        test_admin_login_uses_config_pubkey_after_restore,
+        test_admin_role_with_other_id_refused,
         test_rate_limiting_returns_429,
         test_admin_endpoints_require_auth,
         test_admin_create_and_list_invites,
@@ -1844,6 +1847,66 @@ async fn test_verify_weak_stored_pubkey_returns_401() {
     )
     .await;
     assert_eq!(response, expected);
+}
+
+async fn test_admin_login_rejects_stale_valkey_pubkey() {
+    let (base_url, mut con, _admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (old_key, old_pubkey) = test_keypair();
+    nullpad::storage::user::upsert_admin(&mut con, &old_pubkey, &admin_alias)
+        .await
+        .unwrap();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(old_key.sign(&nonce).to_bytes());
+    let (status, _body) =
+        post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
+}
+
+async fn test_admin_login_uses_config_pubkey_after_restore() {
+    let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (_old_key, old_pubkey) = test_keypair();
+    nullpad::storage::user::upsert_admin(&mut con, &old_pubkey, &admin_alias)
+        .await
+        .unwrap();
+
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_admin_role_with_other_id_refused() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (other_key, other_pubkey) = test_keypair();
+    let other_admin = nullpad::models::StoredUser {
+        id: "x-admin".to_string(),
+        alias: "xadmin".to_string(),
+        pubkey: other_pubkey,
+        role: nullpad::models::Role::Admin,
+        created_at: nullpad::util::now_secs(),
+    };
+    let _: () = con
+        .set("user:x-admin", serde_json::to_string(&other_admin).unwrap())
+        .await
+        .unwrap();
+    let _: () = con.set("alias:xadmin", "x-admin").await.unwrap();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, "xadmin").await;
+    let sig_b64 = general_purpose::STANDARD.encode(other_key.sign(&nonce).to_bytes());
+    let (status, _body) = post_verify(&client, &base_url, "xadmin", &challenge_id, &sig_b64).await;
+
+    let _: () = con.del(&["user:x-admin", "alias:xadmin"]).await.unwrap();
+    assert_eq!(status, 401);
 }
 
 async fn test_rate_limiting_returns_429() {
