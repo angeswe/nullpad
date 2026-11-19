@@ -702,7 +702,7 @@
 
     // Zero sensitive data on page unload
     window.addEventListener('pagehide', clearSensitiveData);
-    // The key fragment was stripped on load, so a reload cannot decrypt again.
+    // A reload re-decrypts only if the key fragment is still in the URL; fetchAndShow strips it.
     window.addEventListener('pageshow', (event) => {
       if (event.persisted) window.location.reload();
     });
