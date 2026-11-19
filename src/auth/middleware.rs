@@ -10,6 +10,23 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::{Arc, Mutex};
 
+/// Session cookie name. Browsers accept a `__Host-` cookie only with `Secure`,
+/// `Path=/` and no `Domain`, so every Set-Cookie for it goes through
+/// [`session_cookie`] and [`cleared_session_cookie`].
+pub const SESSION_COOKIE: &str = "__Host-np_session";
+
+const SESSION_COOKIE_ATTRS: &str = "HttpOnly; SameSite=Strict; Secure; Path=/";
+
+pub fn session_cookie(token: &str, max_age_secs: u64) -> String {
+    format!("{SESSION_COOKIE}={token}; {SESSION_COOKIE_ATTRS}; Max-Age={max_age_secs}")
+}
+
+pub fn cleared_session_cookie() -> String {
+    format!(
+        "{SESSION_COOKIE}=; {SESSION_COOKIE_ATTRS}; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+    )
+}
+
 /// Paste bodies streaming per client IP (as `routes::client_ip` returns it).
 pub type BlobReadsPerIp = Arc<Mutex<HashMap<IpAddr, usize>>>;
 
@@ -35,7 +52,7 @@ pub struct AppState {
 /// Authenticated session extractor.
 ///
 /// Extracts session from `Authorization: Bearer {token}` header first,
-/// then falls back to `np_session` HttpOnly cookie (for browser navigations
+/// then falls back to `__Host-np_session` HttpOnly cookie (for browser navigations
 /// where JS can't set headers).
 /// Returns 401 Unauthorized if neither source provides a valid token.
 pub struct AuthSession {
@@ -72,9 +89,9 @@ impl FromRequestParts<AppState> for AuthSession {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Try Bearer token first, then np_session cookie
+        // Try Bearer token first, then session cookie
         let token = extract_bearer_token(&parts.headers)
-            .or_else(|| get_cookie(&parts.headers, "np_session").map(|s| s.to_string()))
+            .or_else(|| get_cookie(&parts.headers, SESSION_COOKIE).map(|s| s.to_string()))
             .ok_or_else(|| AppError::Unauthorized("Missing authorization".to_string()))?;
 
         if !is_valid_token_format(&token) {
@@ -109,7 +126,7 @@ fn extract_bearer_token(headers: &axum::http::HeaderMap) -> Option<String> {
 
 /// Optional authenticated session extractor.
 ///
-/// Returns Some(AuthSession) if valid Bearer header or `np_session` cookie present,
+/// Returns Some(AuthSession) if valid Bearer header or `__Host-np_session` cookie present,
 /// None if neither source provides credentials.
 /// Propagates system errors (Valkey failures) instead of silently degrading.
 impl FromRequestParts<AppState> for Option<AuthSession> {
@@ -121,7 +138,7 @@ impl FromRequestParts<AppState> for Option<AuthSession> {
     ) -> Result<Self, Self::Rejection> {
         // If neither Bearer header nor session cookie present, return None (public access)
         let has_bearer = extract_bearer_token(&parts.headers).is_some();
-        let has_cookie = get_cookie(&parts.headers, "np_session").is_some();
+        let has_cookie = get_cookie(&parts.headers, SESSION_COOKIE).is_some();
 
         if !has_bearer && !has_cookie {
             return Ok(None);
@@ -220,6 +237,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_session_cookie_sets_token_and_host_prefix_attributes() {
+        assert_eq!(
+            session_cookie("tok", 900),
+            "__Host-np_session=tok; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age=900"
+        );
+    }
+
+    #[test]
+    fn test_cleared_session_cookie_keeps_host_prefix_attributes() {
+        assert_eq!(
+            cleared_session_cookie(),
+            "__Host-np_session=; HttpOnly; SameSite=Strict; Secure; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
+        );
+    }
 
     #[tokio::test]
     async fn test_check_rate_limit() {

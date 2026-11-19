@@ -180,7 +180,9 @@ async fn main() {
         test_protected_pages_are_no_store,
         test_protected_pages_unauthenticated_no_store,
         test_public_pages_keep_no_cache,
-        test_verify_sets_np_session_cookie,
+        test_login_sets_host_prefixed_session_cookie,
+        test_legacy_np_session_cookie_not_accepted,
+        test_logout_clears_host_prefixed_session_cookie,
         test_stored_blob_preserves_bucket_size,
         test_unreadable_blob_returns_500_not_404,
         test_pin_verifier_rejected_when_has_pin_false,
@@ -3692,10 +3694,10 @@ async fn test_protected_html_with_session_cookie() {
     // Login to get a real session token
     let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
 
-    // Admin can access /admin.html via np_session cookie
+    // Admin can access /admin.html via __Host-np_session cookie
     let resp = client
         .get(format!("{}/admin.html", base_url))
-        .header("cookie", format!("np_session={}", admin_token))
+        .header("cookie", format!("__Host-np_session={}", admin_token))
         .send()
         .await
         .unwrap();
@@ -3711,7 +3713,7 @@ async fn test_protected_html_with_session_cookie() {
     // Admin can also access /trusted.html
     let resp = client
         .get(format!("{}/trusted.html", base_url))
-        .header("cookie", format!("np_session={}", admin_token))
+        .header("cookie", format!("__Host-np_session={}", admin_token))
         .send()
         .await
         .unwrap();
@@ -3771,7 +3773,7 @@ async fn test_protected_pages_are_no_store() {
     for path in routes::PROTECTED_PATHS {
         let resp = client
             .get(format!("{}{}", base_url, path))
-            .header("cookie", format!("np_session={}", admin_token))
+            .header("cookie", format!("__Host-np_session={}", admin_token))
             .send()
             .await
             .unwrap();
@@ -4313,43 +4315,118 @@ async fn test_meta_with_null_content_hash_is_not_served() {
     );
 }
 
-/// Login verify endpoint sets np_session cookie with correct attributes.
-async fn test_verify_sets_np_session_cookie() {
-    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-
-    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
-    let resp = send_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+async fn login_set_cookie(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+    key: &SigningKey,
+) -> String {
+    let (challenge_id, nonce) = request_challenge(client, base_url, alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(key.sign(&nonce).to_bytes());
+    let resp = send_verify(client, base_url, alias, &challenge_id, &sig_b64).await;
     assert_eq!(resp.status(), 200);
-
-    // Check Set-Cookie header contains session token, not role
-    let cookie = resp
-        .headers()
+    resp.headers()
         .get("set-cookie")
-        .expect("verify response must set np_session cookie")
+        .expect("verify response must set the session cookie")
         .to_str()
-        .unwrap();
-    assert!(
-        cookie.starts_with("np_session="),
-        "cookie should set np_session"
-    );
-    // Token is 44 chars of base64
+        .unwrap()
+        .to_string()
+}
+
+fn cookie_attributes(cookie: &str) -> Vec<String> {
+    cookie
+        .split(';')
+        .skip(1)
+        .map(|a| a.trim().to_string())
+        .collect()
+}
+
+/// Login verify endpoint sets __Host-np_session cookie with correct attributes.
+/// The test server is plain HTTP with no proxy headers, so this also shows the
+/// cookie is Secure when the request carries no HTTPS signal.
+async fn test_login_sets_host_prefixed_session_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    assert!(base_url.starts_with("http://"));
+    let client = reqwest::Client::new();
+    let cookie = login_set_cookie(&client, &base_url, &admin_alias, &admin_key).await;
+
     let token_value = cookie
         .split(';')
         .next()
         .unwrap()
-        .strip_prefix("np_session=")
-        .unwrap();
+        .strip_prefix("__Host-np_session=")
+        .expect("cookie should set __Host-np_session");
     assert_eq!(token_value.len(), 44, "session token should be 44 chars");
-    assert!(cookie.contains("HttpOnly"), "cookie should be HttpOnly");
+    let attrs = cookie_attributes(&cookie);
+    for expected in ["HttpOnly", "SameSite=Strict", "Secure", "Path=/"] {
+        assert!(
+            attrs.iter().any(|a| a == expected),
+            "missing {expected}: {cookie}"
+        );
+    }
     assert!(
-        cookie.contains("SameSite=Strict"),
-        "cookie should be SameSite=Strict"
+        !attrs
+            .iter()
+            .any(|a| a.to_ascii_lowercase().starts_with("domain")),
+        "cookie must not set Domain: {cookie}"
     );
+}
+
+/// The unprefixed np_session cookie is ignored, as if no cookie were sent.
+async fn test_legacy_np_session_cookie_not_accepted() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    let without_cookie = client
+        .get(format!("{}/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    let with_legacy = client
+        .get(format!("{}/admin.html", base_url))
+        .header("cookie", format!("np_session={}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_legacy.status(), 401);
+    assert_eq!(with_legacy.status(), without_cookie.status());
+    assert_eq!(
+        with_legacy.text().await.unwrap(),
+        without_cookie.text().await.unwrap()
+    );
+}
+
+/// Logout clears __Host-np_session with the attributes the prefix requires.
+async fn test_logout_clears_host_prefixed_session_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    let resp = client
+        .post(format!("{}/api/auth/logout", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("logout must clear the session cookie")
+        .to_str()
+        .unwrap();
+    assert!(
+        cookie.starts_with("__Host-np_session=;"),
+        "logout should clear __Host-np_session: {cookie}"
+    );
+    let attrs = cookie_attributes(cookie);
+    for expected in ["Secure", "Path=/", "Max-Age=0"] {
+        assert!(
+            attrs.iter().any(|a| a == expected),
+            "missing {expected}: {cookie}"
+        );
+    }
 }
 
 // ============================================================================

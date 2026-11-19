@@ -1,5 +1,5 @@
 // Loads the auth-gated admin dashboard app as an external script.
-// The browser attaches the np_session cookie automatically on same-origin
+// The browser attaches the __Host-np_session cookie automatically on same-origin
 // script loads, and the server validates it (same check as Bearer auth).
 // An external <script src> is required because the CSP forbids inline
 // scripts, so fetching the code and injecting it inline would be blocked.

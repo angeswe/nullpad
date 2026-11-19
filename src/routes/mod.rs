@@ -232,7 +232,7 @@ async fn protected_trusted_js(_session: AuthSession) -> Result<impl IntoResponse
 
 /// GET /admin.html — Admin dashboard (requires valid admin session)
 ///
-/// Validates the `np_session` HttpOnly cookie against Valkey — same session
+/// Validates the `__Host-np_session` HttpOnly cookie against Valkey — same session
 /// check as Bearer-authenticated API calls.
 async fn protected_admin_html(
     AdminSession(_): AdminSession,
