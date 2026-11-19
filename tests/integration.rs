@@ -8,7 +8,6 @@
 //! container leaks — `static` containers never drop, so previous versions leaked
 //! one Docker container per test process.
 
-use axum::serve::ListenerExt;
 use base64::{engine::general_purpose, Engine as _};
 use ed25519_dalek::{Signer, SigningKey};
 #[allow(unused_imports)]
@@ -150,6 +149,16 @@ async fn main() {
         test_stalled_blob_reader_released_by_write_timeout,
         test_pin_attempt_503_does_not_consume_pin_attempt,
         test_admin_delete_during_stream_keeps_streamed_bytes,
+        test_oversized_json_body_returns_413,
+        test_paste_over_default_body_limit_succeeds,
+        test_unfinished_headers_time_out,
+        test_idle_keep_alive_closes_after_header_timeout,
+        test_upload_over_max_upload_bytes_returns_413,
+        test_second_file_field_replaces_first,
+        test_slow_request_times_out_with_408,
+        test_timeout_after_paste_id_claim_still_records_owner,
+        test_concurrency_limit_queues_requests,
+        test_healthz_not_blocked_by_concurrency_limit,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -196,6 +205,13 @@ struct TestServerOverrides {
     max_concurrent_blob_reads: usize,
     /// Seconds a blocked socket write may last before the connection drops.
     write_timeout_secs: u64,
+    /// Time a client may take to send the request headers.
+    header_read_timeout: std::time::Duration,
+    max_upload_bytes: usize,
+    /// Longest time a request may take to be handled.
+    request_timeout: std::time::Duration,
+    /// Requests handled at once; further requests wait for a slot.
+    max_concurrent_requests: usize,
 }
 
 impl Default for TestServerOverrides {
@@ -207,6 +223,10 @@ impl Default for TestServerOverrides {
             trusted_proxy_count: 0,
             max_concurrent_blob_reads: 32,
             write_timeout_secs: 60,
+            header_read_timeout: std::time::Duration::from_secs(30),
+            max_upload_bytes: 52_428_800,
+            request_timeout: std::time::Duration::from_secs(120),
+            max_concurrent_requests: 256,
         }
     }
 }
@@ -253,7 +273,7 @@ async fn spawn_test_server_configured(
         admin_alias: admin_alias.clone(),
         valkey_url: test_valkey_url.clone(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
-        max_upload_bytes: 52_428_800,
+        max_upload_bytes: overrides.max_upload_bytes,
         max_concurrent_blob_reads: overrides.max_concurrent_blob_reads,
         write_timeout_secs: overrides.write_timeout_secs,
         default_ttl_secs: 86400,
@@ -273,6 +293,7 @@ async fn spawn_test_server_configured(
         paste_storage_path: paste_storage_path.clone(),
     };
 
+    let max_upload_bytes = config.max_upload_bytes;
     let state = AppState {
         redis: valkey_manager,
         blob_read_permits: Arc::new(tokio::sync::Semaphore::new(
@@ -282,30 +303,29 @@ async fn spawn_test_server_configured(
         ip_hmac_salt: Arc::new(rand::random()),
     };
 
-    let app = routes::api_router()
-        .fallback_service(ServeDir::new("static"))
-        .layer(axum::middleware::from_fn(security_headers))
-        .with_state(state);
+    let app = routes::api_router(
+        max_upload_bytes,
+        overrides.request_timeout,
+        overrides.max_concurrent_requests,
+    )
+    .fallback_service(ServeDir::new("static"))
+    .layer(axum::middleware::from_fn(security_headers))
+    .with_state(state);
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("Failed to bind");
     let addr = listener.local_addr().unwrap();
-    // Same listener as main.rs. The no-op tap_io keeps ConnectInfo working.
+    // Same listener and serve loop as main.rs.
     let listener = WriteTimeoutListener::new(
         listener,
         std::time::Duration::from_secs(overrides.write_timeout_secs),
-    )
-    .tap_io(|_| {});
-
-    tokio::spawn(async move {
-        axum::serve(
-            listener,
-            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-        )
-        .await
-        .unwrap();
-    });
+    );
+    tokio::spawn(nullpad::listener::serve(
+        listener,
+        app,
+        overrides.header_read_timeout,
+    ));
 
     let base_url = format!("http://{}", addr);
     (base_url, con, admin_key, admin_alias, paste_storage_path)
@@ -3272,31 +3292,34 @@ async fn test_verify_sets_np_session_cookie() {
 const LARGE_PASTE_BYTES: usize = 40 * 1024 * 1024;
 
 /// Store a non-PIN paste of `len` bytes straight through the storage layer
-/// and return its ID. The test router keeps axum's default 2 MB request body
-/// limit, so a paste this large cannot be created over HTTP here.
+/// and return its ID.
 async fn store_large_paste(
     con: &mut redis::aio::ConnectionManager,
     storage_path: &std::path::Path,
     len: usize,
 ) -> String {
     let id = nanoid::nanoid!(12);
-    let paste = nullpad::models::StoredPaste {
-        meta: nullpad::models::StoredPasteMeta {
-            id: id.clone(),
-            encrypted_metadata: general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
-            paste_type: nullpad::models::PasteType::default(),
-            filename: None,
-            content_type: None,
-            burn_after_reading: false,
-            created_at: 0,
-            owner_id: None,
-            has_pin: false,
-            pin_verifier: None,
-            content_sha256: None,
-        },
-        encrypted_content: vec![0x5a; len],
+    let meta = nullpad::models::StoredPasteMeta {
+        id: id.clone(),
+        encrypted_metadata: general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
+        paste_type: nullpad::models::PasteType::default(),
+        filename: None,
+        content_type: None,
+        burn_after_reading: false,
+        created_at: 0,
+        owner_id: None,
+        has_pin: false,
+        pin_verifier: None,
+        content_sha256: None,
     };
-    storage::paste::store_paste(con, storage_path, &paste, 3600, 604800)
+    let mut upload = storage::blob::BlobUpload::create(storage_path)
+        .await
+        .expect("Failed to create upload");
+    upload
+        .write(&vec![0x5a; len])
+        .await
+        .expect("Failed to write upload");
+    storage::paste::store_paste(con, storage_path, &meta, upload, 3600, 604800)
         .await
         .expect("Failed to store large paste");
     id
@@ -3503,4 +3526,423 @@ async fn test_admin_delete_during_stream_keeps_streamed_bytes() {
 
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+// ============================================================================
+// Request Body Limit Tests
+// ============================================================================
+
+/// Larger than axum's default 2 MB body limit, smaller than max_upload_bytes.
+const OVER_DEFAULT_LIMIT_BYTES: usize = 3 * 1024 * 1024;
+
+async fn test_oversized_json_body_returns_413() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let mut stream = tokio::net::TcpStream::connect(base_url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+
+    // Declare a 3 MB JSON body but send only one byte over the limit. The
+    // server has then read all sent bytes when it answers, so closing the
+    // connection cannot reset it before the response is read. A client that
+    // sends the full 3 MB gets a broken pipe instead of the response.
+    let head = format!(
+        "POST /api/auth/challenge HTTP/1.1\r\nHost: localhost\r\n\
+         Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        OVER_DEFAULT_LIMIT_BYTES
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream
+        .write_all(&vec![b' '; routes::MAX_JSON_BODY_BYTES + 1])
+        .await
+        .unwrap();
+
+    let mut status_line = [0u8; 12];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut status_line),
+    )
+    .await
+    .expect("no response within 5 s")
+    .unwrap();
+    assert_eq!(&status_line, b"HTTP/1.1 413");
+}
+
+async fn test_paste_over_default_body_limit_succeeds() {
+    let (base_url, _con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let content = vec![0x5a; OVER_DEFAULT_LIMIT_BYTES];
+
+    let resp = create_paste(
+        &client, &base_url, "text", &content, false, 3600, None, false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_meta, stored) = parse_paste_frame(&resp.bytes().await.unwrap());
+    assert_eq!(stored, content);
+}
+
+async fn test_unfinished_headers_time_out() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            header_read_timeout: std::time::Duration::from_secs(1),
+            ..Default::default()
+        })
+        .await;
+    let mut stream = tokio::net::TcpStream::connect(base_url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n")
+        .await
+        .unwrap();
+
+    let mut response = Vec::new();
+    let closed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut response),
+    )
+    .await;
+    assert!(
+        closed.is_ok(),
+        "connection with unfinished headers was still open after 5 s"
+    );
+}
+
+async fn test_idle_keep_alive_closes_after_header_timeout() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            header_read_timeout: std::time::Duration::from_secs(1),
+            ..Default::default()
+        })
+        .await;
+    let mut stream = tokio::net::TcpStream::connect(base_url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .await
+        .unwrap();
+
+    // The request is complete and keep-alive, so only the header read timeout
+    // for the next request can close the connection.
+    let mut response = Vec::new();
+    let closed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_to_end(&mut response),
+    )
+    .await;
+    assert!(
+        closed.is_ok(),
+        "idle keep-alive connection was still open after 5 s"
+    );
+    assert!(response.starts_with(b"HTTP/1.1 200"));
+}
+
+/// All files with a `.tmp` extension under `dir`, at any depth.
+fn temp_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            found.extend(temp_files(&path));
+        } else if path.extension().is_some_and(|e| e == "tmp") {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Send a multipart body with one field named `field_name`. It declares
+/// `2 * limit` bytes but sends only `limit + 1`, so the server has read every
+/// sent byte when it answers. Returns the status line.
+async fn post_paste_over_limit(base_url: &str, field_name: &str, limit: usize) -> [u8; 12] {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut stream = tokio::net::TcpStream::connect(base_url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    let part_head = format!(
+        "--nullpadboundary\r\nContent-Disposition: form-data; name=\"{}\"; \
+         filename=\"encrypted\"\r\nContent-Type: application/octet-stream\r\n\r\n",
+        field_name
+    );
+    let head = format!(
+        "POST /api/paste HTTP/1.1\r\nHost: localhost\r\n\
+         Content-Type: multipart/form-data; boundary=nullpadboundary\r\n\
+         Content-Length: {}\r\n\r\n",
+        limit * 2
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(part_head.as_bytes()).await.unwrap();
+    stream
+        .write_all(&vec![0x5a; limit + 1 - part_head.len()])
+        .await
+        .unwrap();
+
+    let mut status_line = [0u8; 12];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        stream.read_exact(&mut status_line),
+    )
+    .await
+    .expect("no response within 5 s")
+    .unwrap();
+    status_line
+}
+
+async fn test_upload_over_max_upload_bytes_returns_413() {
+    const LIMIT: usize = 64 * 1024;
+    let (base_url, _con, _admin_key, _admin_alias, storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_upload_bytes: LIMIT,
+            ..Default::default()
+        })
+        .await;
+
+    let status = post_paste_over_limit(&base_url, "file", LIMIT).await;
+    assert_eq!(&status, b"HTTP/1.1 413");
+    assert_eq!(temp_files(&storage), Vec::<std::path::PathBuf>::new());
+
+    // An unknown field is skipped while the next field header is read.
+    let status = post_paste_over_limit(&base_url, "padding", LIMIT).await;
+    assert_eq!(&status, b"HTTP/1.1 413");
+}
+
+async fn test_second_file_field_replaces_first() {
+    let (base_url, _con, _admin_key, _admin_alias, storage) =
+        spawn_test_server_with_storage().await;
+    let client = reqwest::Client::new();
+    let paste_id = nanoid::nanoid!(12);
+    let metadata = serde_json::json!({
+        "paste_id": paste_id,
+        "encrypted_metadata": general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
+        "paste_type": "text",
+        "ttl_secs": 3600,
+        "burn_after_reading": false,
+        "has_pin": false,
+    });
+    let form = multipart::Form::new()
+        .text("metadata", metadata.to_string())
+        .part("file", multipart::Part::bytes(vec![0x11; 1024]))
+        .part("file", multipart::Part::bytes(vec![0x22; 2048]));
+
+    let resp = client
+        .post(format!("{}/api/paste", base_url))
+        .multipart(form)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(temp_files(&storage), Vec::<std::path::PathBuf>::new());
+
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, paste_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_meta, stored) = parse_paste_frame(&resp.bytes().await.unwrap());
+    assert_eq!(stored, vec![0x22; 2048]);
+}
+
+/// Open a connection that sends the headers and one byte of a 100-byte JSON
+/// body, then waits. The request holds a concurrency slot until it ends.
+async fn start_stalled_request(base_url: &str) -> tokio::net::TcpStream {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stream = tokio::net::TcpStream::connect(base_url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            b"POST /api/auth/challenge HTTP/1.1\r\nHost: localhost\r\n\
+              Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{",
+        )
+        .await
+        .unwrap();
+    // Give the server time to route the request and take a slot.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    stream
+}
+
+async fn test_slow_request_times_out_with_408() {
+    use tokio::io::AsyncReadExt;
+
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            request_timeout: std::time::Duration::from_secs(1),
+            ..Default::default()
+        })
+        .await;
+    let mut stream = start_stalled_request(&base_url).await;
+
+    let mut response = Vec::new();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let mut buf = [0u8; 1024];
+        while !response.windows(4).any(|w| w == b"\r\n\r\n") {
+            let n = stream.read(&mut buf).await.unwrap();
+            assert!(n > 0, "connection closed before the response headers");
+            response.extend_from_slice(&buf[..n]);
+        }
+    })
+    .await
+    .expect("no response within 5 s");
+    let head = String::from_utf8_lossy(&response).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 408"), "got: {}", head);
+    assert!(
+        head.contains("x-content-type-options: nosniff"),
+        "408 response lacks security headers: {}",
+        head
+    );
+}
+
+/// The request timeout fires after SET NX is sent, while a paused Valkey holds
+/// it. The paste must still be stored in full and listed under its owner.
+async fn test_timeout_after_paste_id_claim_still_records_owner() {
+    use redis::AsyncCommands;
+    use tokio::io::AsyncWriteExt;
+
+    let (base_url, mut con, admin_key, admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            request_timeout: std::time::Duration::from_secs(1),
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+    let token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    let paste_id = nanoid::nanoid!(12);
+    let metadata = serde_json::json!({
+        "paste_id": paste_id,
+        "encrypted_metadata": general_purpose::STANDARD.encode(b"encrypted-file-metadata"),
+        "paste_type": "text",
+        "ttl_secs": 3600,
+        "burn_after_reading": false,
+        "has_pin": false,
+    });
+    let body = format!(
+        "--b\r\nContent-Disposition: form-data; name=\"metadata\"\r\n\r\n{}\r\n\
+         --b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"encrypted\"\r\n\
+         Content-Type: application/octet-stream\r\n\r\ncontent\r\n--b--\r\n",
+        metadata
+    );
+    let mut stream = tokio::net::TcpStream::connect(base_url.trim_start_matches("http://"))
+        .await
+        .unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /api/paste HTTP/1.1\r\nHost: localhost\r\n\
+                 Authorization: Bearer {}\r\n\
+                 Content-Type: multipart/form-data; boundary=b\r\n\
+                 Content-Length: {}\r\n\r\n",
+                token,
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .await
+        .unwrap();
+    // SET NX is sent at about 800 ms and held by the pause. The 1 s request
+    // timeout drops the handler at 1000 ms. Writes resume at about 1150 ms,
+    // inside the 500 ms Valkey response timeout of the server's connection.
+    // `con` shares the server's Valkey connection, so UNPAUSE on it would queue
+    // behind the held SET NX.
+    let mut control = redis::Client::open(get_valkey_url())
+        .unwrap()
+        .get_multiplexed_async_connection()
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    redis::cmd("CLIENT")
+        .arg("PAUSE")
+        .arg(2000)
+        .arg("WRITE")
+        .query_async::<()>(&mut control)
+        .await
+        .unwrap();
+    stream.write_all(body.as_bytes()).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
+    redis::cmd("CLIENT")
+        .arg("UNPAUSE")
+        .query_async::<()>(&mut control)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    let stored: bool = con.exists(format!("paste:{}", paste_id)).await.unwrap();
+    assert!(stored, "SET NX never ran; the timeout landed before it");
+    let listed: bool = con.sismember("user_pastes:admin", &paste_id).await.unwrap();
+    assert!(listed, "paste stored but missing from user_pastes");
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, paste_id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_concurrency_limit_queues_requests() {
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_concurrent_requests: 1,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+    let stalled = start_stalled_request(&base_url).await;
+
+    let queued = client
+        .get(format!("{}/api/config", base_url))
+        .timeout(std::time::Duration::from_secs(1))
+        .send()
+        .await;
+    assert!(
+        queued.is_err_and(|e| e.is_timeout()),
+        "request was handled while the only slot was taken"
+    );
+
+    drop(stalled);
+    let resp = client
+        .get(format!("{}/api/config", base_url))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_healthz_not_blocked_by_concurrency_limit() {
+    let (base_url, _con, _admin_key, _admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_concurrent_requests: 1,
+            ..Default::default()
+        })
+        .await;
+    let _stalled = start_stalled_request(&base_url).await;
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/healthz", base_url))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .expect("healthz waited for a concurrency slot");
+    assert_eq!(resp.status(), 200);
 }

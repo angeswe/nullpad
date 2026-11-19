@@ -110,14 +110,6 @@ pub struct StoredPasteMeta {
     pub content_sha256: Option<String>,
 }
 
-/// Full paste data (metadata + content) for API operations.
-/// Used when creating/fetching pastes - combines metadata from Valkey with content from disk.
-#[derive(Debug, Clone)]
-pub struct StoredPaste {
-    pub meta: StoredPasteMeta,
-    pub encrypted_content: Vec<u8>,
-}
-
 // ============================================================================
 // Auth Models
 // ============================================================================

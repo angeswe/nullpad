@@ -2,14 +2,12 @@
 
 use crate::auth::middleware::{AdminSession, AppState, AuthSession};
 use crate::error::AppError;
-use crate::models::{
-    CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPaste, StoredPasteMeta,
-};
+use crate::models::{CreatePasteResponse, GetPasteResponse, PasteMetadata, StoredPasteMeta};
 use crate::storage;
 use crate::storage::blob::{BlobReadGuard, OpenedBlob};
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Multipart, Path, State},
+    extract::{multipart::MultipartError, ConnectInfo, Multipart, Path, State},
     http::{header, HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -65,7 +63,7 @@ pub async fn create_paste(
     .await?;
 
     let mut metadata: Option<PasteMetadata> = None;
-    let mut encrypted_content: Option<Vec<u8>> = None;
+    let mut upload: Option<storage::blob::BlobUpload> = None;
     let mut field_count: u32 = 0;
     const MAX_MULTIPART_FIELDS: u32 = 4;
     // Legitimate metadata JSON is under ~6 KB (encrypted_metadata is capped at
@@ -73,11 +71,25 @@ pub async fn create_paste(
     // field is never fully buffered.
     const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 
+    let too_large = || {
+        AppError::PayloadTooLarge(format!(
+            "File too large: exceeds limit of {} bytes",
+            state.config.max_upload_bytes
+        ))
+    };
+    let multipart_error = |context: &str, e: MultipartError| {
+        if e.status() == StatusCode::PAYLOAD_TOO_LARGE {
+            too_large()
+        } else {
+            AppError::BadRequest(format!("{}: {}", context, e))
+        }
+    };
+
     // Parse multipart form (capped at MAX_MULTIPART_FIELDS to prevent DoS)
     while let Some(mut field) = multipart
         .next_field()
         .await
-        .map_err(|e| AppError::BadRequest(format!("Invalid multipart: {}", e)))?
+        .map_err(|e| multipart_error("Invalid multipart", e))?
     {
         field_count += 1;
         if field_count > MAX_MULTIPART_FIELDS {
@@ -96,7 +108,7 @@ pub async fn create_paste(
                 while let Some(chunk) = field
                     .chunk()
                     .await
-                    .map_err(|e| AppError::BadRequest(format!("Failed to read metadata: {}", e)))?
+                    .map_err(|e| multipart_error("Failed to read metadata", e))?
                 {
                     if data.len() + chunk.len() > MAX_METADATA_FIELD_BYTES {
                         return Err(AppError::BadRequest(format!(
@@ -112,21 +124,31 @@ pub async fn create_paste(
                     })?);
             }
             "file" => {
-                encrypted_content = Some(
-                    field
-                        .bytes()
-                        .await
-                        .map_err(|e| AppError::BadRequest(format!("Failed to read file: {}", e)))?
-                        .to_vec(),
-                );
+                let mut file = storage::blob::BlobUpload::create(&state.config.paste_storage_path)
+                    .await
+                    .map_err(|e| AppError::Internal(format!("Failed to create upload: {}", e)))?;
+                while let Some(chunk) = field
+                    .chunk()
+                    .await
+                    .map_err(|e| multipart_error("Failed to read file", e))?
+                {
+                    if file.bytes_written() + chunk.len() as u64
+                        > state.config.max_upload_bytes as u64
+                    {
+                        return Err(too_large());
+                    }
+                    file.write(&chunk).await.map_err(|e| {
+                        AppError::Internal(format!("Failed to write upload: {}", e))
+                    })?;
+                }
+                upload = Some(file);
             }
             _ => {}
         }
     }
 
     let metadata = metadata.ok_or_else(|| AppError::BadRequest("Missing metadata".to_string()))?;
-    let encrypted_content =
-        encrypted_content.ok_or_else(|| AppError::BadRequest("Missing file".to_string()))?;
+    let upload = upload.ok_or_else(|| AppError::BadRequest("Missing file".to_string()))?;
 
     // Validate client-generated paste ID
     super::validate_id(&metadata.paste_id, "paste ID", 12)?;
@@ -187,15 +209,6 @@ pub async fn create_paste(
         ));
     }
 
-    // Check file size
-    if encrypted_content.len() > state.config.max_upload_bytes {
-        return Err(AppError::BadRequest(format!(
-            "File too large: {} bytes exceeds limit of {} bytes",
-            encrypted_content.len(),
-            state.config.max_upload_bytes
-        )));
-    }
-
     // Use config default if client omitted ttl_secs.
     // ttl_secs=0 means "forever" (no expiration) — admin only to prevent Valkey memory exhaustion.
     let requested_ttl = metadata.ttl_secs.unwrap_or(state.config.default_ttl_secs);
@@ -228,65 +241,87 @@ pub async fn create_paste(
     // Use client-generated paste ID (validated above)
     let paste_id = metadata.paste_id;
 
-    // Create stored paste (metadata + content)
-    let paste = StoredPaste {
-        meta: StoredPasteMeta {
-            id: paste_id.clone(),
-            encrypted_metadata: metadata.encrypted_metadata,
-            paste_type: metadata.paste_type,
-            filename: None,
-            content_type: None,
-            burn_after_reading: metadata.burn_after_reading,
-            created_at: crate::util::now_secs(),
-            owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
-            has_pin: metadata.has_pin,
-            // Only store a verifier that passed the has_pin checks above.
-            pin_verifier: if metadata.has_pin {
-                metadata.pin_verifier
-            } else {
-                None
-            },
-            // store_paste computes and records the blob hash.
-            content_sha256: None,
+    let meta = StoredPasteMeta {
+        id: paste_id.clone(),
+        encrypted_metadata: metadata.encrypted_metadata,
+        paste_type: metadata.paste_type,
+        filename: None,
+        content_type: None,
+        burn_after_reading: metadata.burn_after_reading,
+        created_at: crate::util::now_secs(),
+        owner_id: auth_session.as_ref().map(|s| s.user_id.clone()),
+        has_pin: metadata.has_pin,
+        // Only store a verifier that passed the has_pin checks above.
+        pin_verifier: if metadata.has_pin {
+            metadata.pin_verifier
+        } else {
+            None
         },
-        encrypted_content,
+        // store_paste computes and records the blob hash.
+        content_sha256: None,
     };
 
-    // Store paste (metadata to Valkey via SETNX, then content to disk)
-    storage::paste::store_paste(
-        &mut con,
-        &state.config.paste_storage_path,
-        &paste,
-        ttl_secs,
-        state.config.max_ttl_secs,
-    )
+    // A request timeout or client disconnect drops this handler. The store runs
+    // in its own task so it is never cut off between the SETNX and user_pastes.
+    let config = state.config.clone();
+    let task_meta = meta.clone();
+    tokio::spawn(async move {
+        let result = async {
+            // Store paste (metadata to Valkey via SETNX, then content to disk)
+            storage::paste::store_paste(
+                &mut con,
+                &config.paste_storage_path,
+                &task_meta,
+                upload,
+                ttl_secs,
+                config.max_ttl_secs,
+            )
+            .await
+            .map_err(|e| {
+                // store_paste returns UnexpectedReturnType with detail "conflict"
+                // when the paste ID already exists (SETNX failed).
+                if e.kind() == redis::ErrorKind::UnexpectedReturnType
+                    && e.detail() == Some("conflict")
+                {
+                    AppError::Conflict("Paste ID already exists".to_string())
+                } else {
+                    AppError::from(e)
+                }
+            })?;
+
+            // On first upload, atomically update user TTL from idle to active.
+            // Uses SCARD + TTL comparison to avoid race conditions between concurrent uploads.
+            if let Some(ref user_id) = task_meta.owner_id {
+                storage::paste::activate_user_on_first_upload(
+                    &mut con,
+                    user_id,
+                    config.user_idle_ttl_secs,
+                    config.user_active_ttl_secs,
+                )
+                .await?;
+            }
+            Ok::<(), AppError>(())
+        }
+        .await;
+        match &result {
+            Err(AppError::Conflict(_)) => {
+                tracing::debug!("Paste store rejected: ID already exists")
+            }
+            Err(e) => tracing::error!(error = %e, "Paste store failed"),
+            Ok(()) => {}
+        }
+        result
+    })
     .await
     .map_err(|e| {
-        // store_paste returns UnexpectedReturnType with detail "conflict"
-        // when the paste ID already exists (SETNX failed).
-        if e.kind() == redis::ErrorKind::UnexpectedReturnType && e.detail() == Some("conflict") {
-            AppError::Conflict("Paste ID already exists".to_string())
-        } else {
-            AppError::from(e)
-        }
-    })?;
-
-    // On first upload, atomically update user TTL from idle to active.
-    // Uses SCARD + TTL comparison to avoid race conditions between concurrent uploads.
-    if let Some(ref session) = auth_session {
-        storage::paste::activate_user_on_first_upload(
-            &mut con,
-            &session.user_id,
-            state.config.user_idle_ttl_secs,
-            state.config.user_active_ttl_secs,
-        )
-        .await?;
-    }
+        tracing::error!(is_panic = e.is_panic(), "Paste store task failed");
+        AppError::Internal("Paste store task failed".to_string())
+    })??;
 
     tracing::info!(
         action = "paste_created",
         paste_id = %paste_id,
-        burn = paste.meta.burn_after_reading,
+        burn = meta.burn_after_reading,
         ttl = ttl_secs,
         "Paste created"
     );

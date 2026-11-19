@@ -6,8 +6,10 @@ edition = "2021"
 [dependencies]
 # Web framework
 axum = { version = "0.8.8", features = ["multipart"] }
-tower = "0.5.3"
-tower-http = { version = "0.7.0", features = ["fs", "cors"] }
+tower = { version = "0.5.3", features = ["limit"] }
+tower-http = { version = "0.7.0", features = ["fs", "cors", "timeout"] }
+hyper = { version = "1.9", features = ["server", "http1"] }
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 
 # Async runtime
 tokio = { version = "1.52", features = ["full"] }
