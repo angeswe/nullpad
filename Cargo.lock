@@ -1541,6 +1541,8 @@ dependencies = [
  "ed25519-dalek",
  "futures",
  "hmac",
+ "hyper",
+ "hyper-util",
  "nanoid",
  "rand 0.10.3",
  "redis",

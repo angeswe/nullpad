@@ -8,7 +8,7 @@ use crate::auth::middleware::{AdminSession, AppState, AuthSession};
 use crate::error::AppError;
 use crate::util::is_valid_nanoid;
 use axum::{
-    extract::State,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::get,
@@ -19,6 +19,9 @@ use axum::{
 use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
+use tower::limit::GlobalConcurrencyLimitLayer;
+use tower_http::timeout::TimeoutLayer;
 
 /// Paths to protected files served via auth-gated route handlers.
 /// These files must NOT be placed under `static/` where ServeDir could serve them directly.
@@ -35,6 +38,10 @@ pub const PROTECTED_PATHS: [&str; 4] = [
     "/js/admin.js",
     "/js/trusted.js",
 ];
+
+/// Body limit for every route except `POST /api/paste`. The JSON request
+/// bodies (alias, signature, invite token, PIN verifier) are well under 1 KB.
+pub const MAX_JSON_BODY_BYTES: usize = 16 * 1024;
 
 /// Check a rate limit key and return a RateLimited error if exceeded.
 ///
@@ -240,10 +247,17 @@ async fn protected_trusted_html(_session: AuthSession) -> Result<impl IntoRespon
 }
 
 /// Build the API router with all endpoints.
-pub fn api_router() -> Router<AppState> {
+///
+/// A request that runs longer than `request_timeout` gets 408. At most
+/// `max_concurrent_requests` requests are handled at once; further requests
+/// wait for a slot. `/healthz` is exempt from both, so slow uploads that hold
+/// every slot cannot make the container health check fail.
+pub fn api_router(
+    max_upload_bytes: usize,
+    request_timeout: Duration,
+    max_concurrent_requests: usize,
+) -> Router<AppState> {
     Router::new()
-        // Health check
-        .route("/healthz", get(healthz))
         // Public config
         .route("/api/config", get(server_config))
         // Protected JS files (matched before ServeDir fallback)
@@ -253,7 +267,10 @@ pub fn api_router() -> Router<AppState> {
         .route("/admin.html", get(protected_admin_html))
         .route("/trusted.html", get(protected_trusted_html))
         // Paste endpoints
-        .route("/api/paste", post(paste::create_paste))
+        .route(
+            "/api/paste",
+            post(paste::create_paste).layer(DefaultBodyLimit::max(max_upload_bytes)),
+        )
         .route(
             "/api/paste/{id}",
             get(paste::get_paste)
@@ -276,6 +293,14 @@ pub fn api_router() -> Router<AppState> {
         )
         .route("/api/users", get(admin::list_users))
         .route("/api/users/{id}", axum::routing::delete(admin::revoke_user))
+        .layer(DefaultBodyLimit::max(MAX_JSON_BODY_BYTES))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            request_timeout,
+        ))
+        .layer(GlobalConcurrencyLimitLayer::new(max_concurrent_requests))
+        // Added after the layers above, so they do not apply to it.
+        .route("/healthz", get(healthz))
 }
 
 #[cfg(test)]
