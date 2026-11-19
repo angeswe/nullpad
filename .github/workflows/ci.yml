@@ -69,6 +69,17 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --locked -- -D warnings
 
+  dependabot-config:
+    name: Validate dependabot.yml
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: pipx run check-jsonschema==0.39.0 --builtin-schema vendor.dependabot .github/dependabot.yml
+
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
