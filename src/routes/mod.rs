@@ -27,6 +27,15 @@ const PROTECTED_TRUSTED_HTML: &str = "protected/trusted.html";
 const PROTECTED_ADMIN_JS: &str = "protected/js/admin.js";
 const PROTECTED_TRUSTED_JS: &str = "protected/js/trusted.js";
 
+/// URL paths of the auth-gated routes registered in `api_router`.
+/// `security_headers` sends `no-store, private` for these; add every new gated route here.
+pub const PROTECTED_PATHS: [&str; 4] = [
+    "/admin.html",
+    "/trusted.html",
+    "/js/admin.js",
+    "/js/trusted.js",
+];
+
 /// Check a rate limit key and return a RateLimited error if exceeded.
 ///
 /// Wraps `check_rate_limit` with standard error mapping. The optional `warn_context`
