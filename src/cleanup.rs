@@ -10,9 +10,9 @@ use std::path::Path;
 use std::time::Duration;
 use tokio::fs;
 
-/// Maximum files to process per cleanup cycle to bound Valkey load.
+/// Files per Valkey pipeline, and the pause between pipelines, to bound Valkey load.
 const CLEANUP_BATCH_SIZE: usize = 50;
-const CLEANUP_MAX_FILES_PER_CYCLE: usize = 1000;
+const CLEANUP_BATCH_PAUSE: Duration = Duration::from_millis(10);
 
 /// Stale .tmp files older than this are deleted (1 hour).
 const STALE_TMP_SECS: u64 = 3600;
@@ -42,14 +42,16 @@ fn is_valid_paste_id(id: &str) -> bool {
 }
 
 /// Scan storage directory and delete orphaned files.
-async fn cleanup_orphaned_files<C>(redis: &mut C, storage_path: &Path) -> Result<(), CleanupError>
+pub async fn cleanup_orphaned_files<C>(
+    redis: &mut C,
+    storage_path: &Path,
+) -> Result<(), CleanupError>
 where
     C: AsyncCommands,
 {
     let mut deleted_count: u64 = 0;
     let mut checked_count: u64 = 0;
     let mut tmp_deleted_count: u64 = 0;
-    let mut total_files: usize = 0;
 
     let now = now_secs();
 
@@ -59,7 +61,7 @@ where
     // Iterate through shard directories (e.g., /data/pastes/ab/, /data/pastes/cd/)
     let mut shard_dirs = fs::read_dir(storage_path).await?;
 
-    'outer: while let Some(shard_entry) = shard_dirs.next_entry().await? {
+    while let Some(shard_entry) = shard_dirs.next_entry().await? {
         let shard_path = shard_entry.path();
         if !shard_path.is_dir() {
             continue;
@@ -121,16 +123,6 @@ where
                 continue;
             }
 
-            // Check per-cycle cap
-            total_files += 1;
-            if total_files > CLEANUP_MAX_FILES_PER_CYCLE {
-                tracing::info!(
-                    cap = CLEANUP_MAX_FILES_PER_CYCLE,
-                    "Cleanup: per-cycle cap reached, deferring remaining files"
-                );
-                break 'outer;
-            }
-
             pending_files.push((paste_id, file_path));
 
             // Process batch when full
@@ -140,8 +132,7 @@ where
                 checked_count += batch_checked;
                 deleted_count += batch_deleted;
 
-                // Yield between batches to avoid starving other tasks
-                tokio::task::yield_now().await;
+                tokio::time::sleep(CLEANUP_BATCH_PAUSE).await;
             }
         }
     }

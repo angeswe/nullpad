@@ -15,7 +15,7 @@ use ed25519_dalek::{Signer, SigningKey};
 use futures::FutureExt;
 use hmac::{Hmac, KeyInit, Mac};
 use nullpad::{
-    auth::middleware::AppState, config::Config, listener::WriteTimeoutListener,
+    auth::middleware::AppState, cleanup, config::Config, listener::WriteTimeoutListener,
     middleware::security_headers, routes, storage,
 };
 use reqwest::multipart;
@@ -150,6 +150,7 @@ async fn main() {
         test_stalled_blob_reader_released_by_write_timeout,
         test_pin_attempt_503_does_not_consume_pin_attempt,
         test_admin_delete_during_stream_keeps_streamed_bytes,
+        test_cleanup_reclaims_all_orphans_beyond_cap,
     ];
 
     // Explicitly remove the container (ContainerAsync has no Drop cleanup).
@@ -3503,4 +3504,54 @@ async fn test_admin_delete_during_stream_keeps_streamed_bytes() {
 
     let resp = client.get(&url).send().await.unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// Live blobs are never removed, so they keep their place in directory order.
+/// With more live blobs than one cleanup cycle used to examine, orphans past
+/// that point must still be reclaimed.
+async fn test_cleanup_reclaims_all_orphans_beyond_cap() {
+    use redis::AsyncCommands;
+    let mut con = redis::Client::open(get_valkey_url())
+        .unwrap()
+        .get_connection_manager()
+        .await
+        .unwrap();
+    let storage_path =
+        std::env::temp_dir().join(format!("nullpad_cleanup_test_{}", nanoid::nanoid!(8)));
+    let blob_path = |id: &str| storage_path.join(&id[..2]).join(id);
+
+    let live_ids: Vec<String> = (0..1200).map(|_| nanoid::nanoid!(10)).collect();
+    let orphan_ids: Vec<String> = (0..200).map(|_| nanoid::nanoid!(10)).collect();
+    for id in live_ids.iter().chain(&orphan_ids) {
+        std::fs::create_dir_all(storage_path.join(&id[..2])).unwrap();
+        std::fs::write(blob_path(id), b"ciphertext").unwrap();
+    }
+    for id in &live_ids {
+        let _: () = con
+            .set_ex(format!("paste:{}", id), "1", 3600)
+            .await
+            .unwrap();
+    }
+
+    for _ in 0..3 {
+        cleanup::cleanup_orphaned_files(&mut con, &storage_path)
+            .await
+            .unwrap();
+    }
+
+    let orphans_left = orphan_ids
+        .iter()
+        .filter(|id| blob_path(id).exists())
+        .count();
+    let live_missing = live_ids.iter().filter(|id| !blob_path(id).exists()).count();
+    for id in &live_ids {
+        let _: () = con.del(format!("paste:{}", id)).await.unwrap();
+    }
+    let _ = std::fs::remove_dir_all(&storage_path);
+
+    assert_eq!(
+        orphans_left, 0,
+        "orphans past the per-cycle cap were not reclaimed"
+    );
+    assert_eq!(live_missing, 0, "cleanup deleted live blobs");
 }
