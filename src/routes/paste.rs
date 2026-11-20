@@ -134,6 +134,7 @@ pub async fn create_paste(
     const MAX_METADATA_FIELD_BYTES: usize = 16 * 1024;
 
     let too_large = || {
+        tracing::debug!(action = "upload_rejected", "Upload over the size limit");
         AppError::PayloadTooLarge(format!(
             "File too large: exceeds limit of {} bytes",
             max_blob_bytes
