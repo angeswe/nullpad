@@ -135,16 +135,15 @@
      * Strip the V1 frame if present and well-formed. Returns null otherwise so
      * the caller can fall back to the legacy v0 path (return bytes as-is).
      *
-     * A legacy v0 plaintext whose first byte happens to be 0x01 followed by a
-     * 4-byte run that decodes to a length > body would mistakenly enter this
-     * function. By returning null on that mismatch rather than throwing, we
-     * keep legacy binary pastes (e.g. files starting with 0x01) decryptable
-     * instead of surfacing as the generic "Invalid key or PIN" error that the
-     * decrypt-retry chain in view.js would otherwise remap a throw into.
-     * The residual collision case — first byte 0x01 AND a 4-byte length value
-     * that happens to be <= body — silently truncates the legacy plaintext;
-     * this is the unavoidable migration cost of an in-band version sniff and
-     * affects only pre-existing binary pastes.
+     * A plaintext is V1 only if byte 0 is 0x01, the 4-byte length fits in the
+     * body, and every byte after the data is zero (V1 padding is all zeros).
+     * Returning null rather than throwing keeps legacy binary pastes that start
+     * with 0x01 decryptable instead of surfacing as the generic "Invalid key or
+     * PIN" error that the decrypt-retry chain in view.js would remap a throw
+     * into. The residual collision case is a legacy plaintext with first byte
+     * 0x01, a fitting length, and an all-zero tail after that length: it is
+     * silently truncated. This is the migration cost of an in-band version
+     * sniff and affects only pre-existing binary pastes.
      */
     function unframeV1OrNull(decryptedBytes) {
         if (decryptedBytes.length < V1_HEADER_LEN) return null;
@@ -156,6 +155,9 @@
         ).getUint32(0, true);
         const bodyLen = decryptedBytes.length - V1_HEADER_LEN;
         if (length > bodyLen) return null;
+        for (let i = V1_HEADER_LEN + length; i < decryptedBytes.length; i++) {
+            if (decryptedBytes[i] !== 0) return null;
+        }
         return decryptedBytes.subarray(V1_HEADER_LEN, V1_HEADER_LEN + length);
     }
 

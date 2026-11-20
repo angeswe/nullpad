@@ -101,9 +101,21 @@ test('v0 legacy plaintext starting with 0x01 and a length larger than the body i
   assertSameBytes(await NullpadCrypto.decrypt(await rawEncrypt(legacy, key), key), legacy);
 });
 
-test('v0 legacy plaintext starting with 0x01 and a length within the body is truncated as if it were v1', async () => {
+test('v0 legacy plaintext starting with 0x01, a fitting length and a non-zero tail is returned unchanged', async () => {
   const key = NullpadCrypto.generateKey();
   const legacy = new Uint8Array([0x01, 0x01, 0x00, 0x00, 0x00, 0x41, 0x42]);
+  assertSameBytes(await NullpadCrypto.decrypt(await rawEncrypt(legacy, key), key), legacy);
+});
+
+test('v0 legacy plaintext that starts 01 00 00 00 00 is returned unchanged', async () => {
+  const key = NullpadCrypto.generateKey();
+  const legacy = new Uint8Array([0x01, 0x00, 0x00, 0x00, 0x00, 0x07, 0x07]);
+  assertSameBytes(await NullpadCrypto.decrypt(await rawEncrypt(legacy, key), key), legacy);
+});
+
+test('v0 legacy plaintext with a fitting length and an all-zero tail is truncated as if it were v1', async () => {
+  const key = NullpadCrypto.generateKey();
+  const legacy = new Uint8Array([0x01, 0x01, 0x00, 0x00, 0x00, 0x41, 0x00]);
   assertSameBytes(await NullpadCrypto.decrypt(await rawEncrypt(legacy, key), key), new Uint8Array([0x41]));
 });
 
