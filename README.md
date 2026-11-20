@@ -93,7 +93,7 @@ See `.env.example` for all available options. Key environment variables:
 - `secrets/valkey_password` — Valkey password file (required in Docker). Use hex or alphanumeric characters only: it is written into a Valkey config line and into `VALKEY_URL`. It is not an environment variable, so `docker compose config`, `docker inspect`, and `ps` do not show it.
   **Upgrading from a release that used `VALKEY_PASSWORD`:** write the old value to `secrets/valkey_password` (step 3b above), then delete the `VALKEY_PASSWORD` and `VALKEY_URL` lines from `.env`. Compose refuses to start while the file is missing. A leftover `VALKEY_PASSWORD` in `.env` still reaches both containers' environment and shows in `docker inspect`.
 - `VALKEY_MAXMEMORY` — Valkey memory limit in Docker (default: "2gb")
-- `MAX_UPLOAD_BYTES` — Max encrypted blob size for logged-in uploads (default: 52428800 / 50MB). The largest file that fits is this value minus 34 bytes (see Size padding)
+- `MAX_UPLOAD_BYTES` — Largest encrypted blob a logged-in user may upload (default: 52428800 / 50MB). The largest file that fits is this value minus 34 bytes (see Size padding). The upload request may be up to 64 KiB larger, for the multipart framing and metadata. A reverse proxy body limit must be at least `MAX_UPLOAD_BYTES` + 65536.
 - `ANON_MAX_BYTES` — Max blob size for anonymous uploads (default: 262172, the 256 KiB padding bucket plus 28 bytes AES-GCM overhead). Must be <= `MAX_UPLOAD_BYTES`, or the server refuses to start
 - `ANON_MAX_PASTES_PER_IP_PER_DAY` — Anonymous pastes one IP may attempt per day (default: 100)
 - `MAX_CONCURRENT_BLOB_READS` — Paste bodies streamed at once; further reads get 503 until a slot frees (default: 32, min 1)
