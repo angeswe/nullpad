@@ -3,7 +3,7 @@
 # Stage 1: Build
 # Pin base images by digest for reproducible builds.
 # To update: docker pull rust:slim-bookworm && docker inspect --format='{{index .RepoDigests 0}}' rust:slim-bookworm
-FROM rust:slim-bookworm@sha256:24707e70a4f1e23d9a7b25202ec43126d28a52294b96aad5c670df1fd1f1d400 AS builder
+FROM rust:slim-bookworm@sha256:7c7d4eb4d05b7781187a327809466cfddf29753f6defdc3d19a0e291951b7a37 AS builder
 
 WORKDIR /build
 
