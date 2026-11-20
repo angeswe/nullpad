@@ -50,7 +50,7 @@ for (const [size, bucket] of [
   [1023, 4096],
   [1024, 4096],
   [1025, 4096],
-  [MiB, 4 * MiB]
+  [MiB, 2 * MiB]
 ]) {
   test(`content of ${size} bytes encrypts to ${bucket} + 28 bytes and decrypts to the same bytes`, async () => {
     const key = NullpadCrypto.generateKey();
@@ -108,13 +108,30 @@ test('v0 legacy plaintext starting with 0x01 and a length within the body is tru
 });
 
 test('contentPadTarget clamps the bucket to the cap', () => {
-  assert.equal(NullpadCrypto.contentPadTarget(5 * MiB + 5, 10 * MiB), 10 * MiB - 28);
+  assert.equal(NullpadCrypto.contentPadTarget(9 * MiB + 5, 10 * MiB), 10 * MiB - 28);
 });
 
 test('contentPadTarget keeps ladder buckets below the cap', () => {
   assert.equal(NullpadCrypto.contentPadTarget(100, 10 * MiB), 1024);
   assert.equal(NullpadCrypto.contentPadTarget(70000, 262172), 262144);
   assert.equal(NullpadCrypto.contentPadTarget(262143, 262172), 262144);
+});
+
+test('contentPadTarget steps by 2 above 1 MiB', () => {
+  assert.equal(NullpadCrypto.contentPadTarget(1048576, 52428800), 2097152);
+  assert.equal(NullpadCrypto.contentPadTarget(2097152, 52428800), 4194304);
+  assert.equal(NullpadCrypto.contentPadTarget(16777216, 52428800), 33554432);
+  assert.equal(NullpadCrypto.contentPadTarget(33554432, 52428800), 52428772);
+});
+
+test('v1 plaintext padded to a size outside the current ladder still decrypts', async () => {
+  const key = NullpadCrypto.generateKey();
+  const original = randomBytes(10);
+  const plaintext = new Uint8Array(3000);
+  plaintext[0] = 0x01;
+  new DataView(plaintext.buffer).setUint32(1, original.length, true);
+  plaintext.set(original, 5);
+  assertSameBytes(await NullpadCrypto.decrypt(await rawEncrypt(plaintext, key), key), original);
 });
 
 test('contentPadTarget returns null at cap - 28 and above', () => {

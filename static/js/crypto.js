@@ -177,8 +177,10 @@
     // input whose framed length exactly equals a bucket boundary is pushed to the
     // next bucket — this prevents a no-padding side channel.
     //
-    // Buckets: 1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB, 4MiB, 16MiB, each clamped
-    // to maxBlobBytes - AES_GCM_OVERHEAD (28 bytes). maxBlobBytes is the server's
+    // Buckets: 4x steps up to 1MiB (1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB), then
+    // 2x steps above (2MiB, 4MiB, 8MiB, 16MiB, 32MiB). The top bucket is
+    // maxBlobBytes - AES_GCM_OVERHEAD (28 bytes): every bucket is clamped to it,
+    // and content above the last ladder bucket pads to it. maxBlobBytes is the server's
     // cap for this user (from /api/config), so padded plaintext + 12-byte IV +
     // 16-byte GCM tag never exceeds it. Inputs with a framed length >=
     // maxBlobBytes - 28 must be rejected before encryption.
@@ -192,7 +194,7 @@
     // Smallest cap: an empty V1 frame must still be strictly below the top bucket.
     const MIN_BLOB_BYTES = AES_GCM_OVERHEAD + V1_HEADER_LEN + 1;
 
-    const CONTENT_LADDER = [1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216];
+    const CONTENT_LADDER = [1024, 4096, 16384, 65536, 262144, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432];
 
     /**
      * Pad framedBytes to targetLen with zero bytes.
