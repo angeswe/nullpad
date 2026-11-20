@@ -188,10 +188,9 @@
       // 5. Encrypt content with paste ID as AAD, padded to the content bucket ladder.
       // Bucket selection uses "strictly greater than framed length" so equal-to-bucket
       // inputs are pushed to the next bucket, preventing a no-padding side channel.
-      const encrypted = await NullpadCrypto.encrypt(
+      const encryptedBytes = await NullpadCrypto.encryptBytes(
         contentBytes, encryptionKey, pasteId, { pad: 'content', maxBlobBytes: cap.bytes }
       );
-      const encryptedBytes = NullpadCrypto.base64Decode(encrypted);
 
       // 6. Encrypt filename and content_type to prevent metadata leakage.
       // Padded to the next multiple of 512 strictly greater than the framed length,

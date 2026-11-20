@@ -77,6 +77,48 @@ for (const metadata of ['', 'a', '{"filename":"report.pdf","mime":"application/p
   });
 }
 
+test('encryptBytes returns a Uint8Array of bucket + 28 bytes that decrypt accepts', async () => {
+  const key = NullpadCrypto.generateKey();
+  const original = randomBytes(100);
+  const blob = await NullpadCrypto.encryptBytes(original, key, 'abcdefghijkl', { pad: 'content', maxBlobBytes: 52428800 });
+  assert.equal(Object.prototype.toString.call(blob), '[object Uint8Array]');
+  assert.equal(blob.length, 1052);
+  assertSameBytes(await NullpadCrypto.decrypt(blob, key, 'abcdefghijkl'), original);
+});
+
+test('encrypt returns the base64 of the same layout', async () => {
+  const key = NullpadCrypto.generateKey();
+  const metadata = '{"filename":"report.pdf","mime":"application/pdf"}';
+  const encrypted = await NullpadCrypto.encrypt(metadata, key, 'abcdefghijkl', { pad: 'metadata' });
+  assert.equal(NullpadCrypto.base64Decode(encrypted).length, 540);
+  assert.equal(new TextDecoder().decode(await NullpadCrypto.decrypt(encrypted, key, 'abcdefghijkl')), metadata);
+});
+
+test('encrypt without a pad mode throws TypeError', async () => {
+  const key = NullpadCrypto.generateKey();
+  await assert.rejects(NullpadCrypto.encrypt('x', key, 'abcdefghijkl'), { name: 'TypeError' });
+  await assert.rejects(NullpadCrypto.encrypt('x', key, 'abcdefghijkl', {}), { name: 'TypeError' });
+});
+
+test('encrypt with pad none throws', async () => {
+  await assert.rejects(
+    NullpadCrypto.encrypt('x', NullpadCrypto.generateKey(), 'abcdefghijkl', { pad: 'none' }),
+    { message: /Unknown padding mode/ }
+  );
+});
+
+test('encryptBytes pad errors do not name encrypt()', async () => {
+  const key = NullpadCrypto.generateKey();
+  await assert.rejects(
+    NullpadCrypto.encryptBytes('x', key, 'abcdefghijkl', {}),
+    { name: 'TypeError', message: 'options.pad is required' }
+  );
+  await assert.rejects(
+    NullpadCrypto.encryptBytes('x', key, 'abcdefghijkl', { pad: 'none' }),
+    { message: 'Unknown padding mode: none' }
+  );
+});
+
 test('v1 plaintext is version byte 0x01, little-endian length, data, then zero padding', async () => {
   const key = NullpadCrypto.generateKey();
   const original = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
