@@ -32,8 +32,9 @@
   // State
   let currentFile = null;
   let clipboardDirty = false;
-  let maxUploadBytes = null; // loaded from /api/config on init
-  let anonMaxBytes = null; // loaded from /api/config on init
+  let config = null; // /api/config body, loaded on init
+
+  const LIMITS_UNKNOWN = 'Could not load server limits; size limits shown may be inaccurate. Reload to retry.';
 
   // ============================================================================
   // File Upload Handling (trusted users only - public page has no file upload)
@@ -88,6 +89,15 @@
     return (bytes / (1024 * 1024)).toFixed(2) + ' MB';
   }
 
+  function isAnonymous() {
+    return typeof NullpadAuth === 'undefined' || !NullpadAuth.getAuthHeader();
+  }
+
+  function tooLargeMessage(size, maxContent, limitsGuessed) {
+    const msg = `Content too large (${formatFileSize(size)}). Maximum is ${formatFileSize(maxContent)}.`;
+    return limitsGuessed ? `${msg} ${LIMITS_UNKNOWN}` : msg;
+  }
+
   // ============================================================================
   // Form Submission
   // ============================================================================
@@ -102,14 +112,14 @@
       return;
     }
 
-    // Check file size before encrypting (limit sourced from server at init)
-    if (currentFile && maxUploadBytes !== null && currentFile.size > maxUploadBytes) {
-      const sizeMB = (currentFile.size / (1024 * 1024)).toFixed(1);
-      const limitMB = (maxUploadBytes / (1024 * 1024)).toFixed(0);
+    const cap = NullpadUtils.blobCap(config, isAnonymous());
+    const maxContent = NullpadCrypto.maxContentBytes(cap.bytes);
+
+    if (currentFile && currentFile.size > maxContent) {
       const errEl = document.createElement('div');
       errEl.className = 'status-error';
       errEl.setAttribute('role', 'alert');
-      errEl.textContent = `File too large (${sizeMB}MB). Maximum is ${limitMB}MB.`;
+      errEl.textContent = tooLargeMessage(currentFile.size, maxContent, cap.guessed);
       form.prepend(errEl);
       setTimeout(() => errEl.remove(), 5000);
       return;
@@ -162,27 +172,13 @@
         contentType = NullpadUtils.contentTypeForFile(currentFile.name, currentFile.type);
       } else {
         contentBytes = NullpadCrypto.textEncode(text);
+        if (contentBytes.length > maxContent) {
+          throw new Error(tooLargeMessage(contentBytes.length, maxContent, cap.guessed));
+        }
         // The "Display as" choice travels as the content type inside the encrypted metadata.
         const renderMode = renderModeSelect.value;
         filename = renderMode === 'raw' ? 'paste.txt' : 'paste.md';
         contentType = NullpadUtils.contentTypeForRenderMode(renderMode);
-      }
-
-      // Pre-flight size check: ensure the framed content will fit the top bucket.
-      // contentPadTarget returns null when no bucket can hold the framed length,
-      // which encrypt() would also catch — this early check avoids allocating a
-      // large buffer first.
-      {
-        const { AES_GCM_OVERHEAD, V1_HEADER_LEN, contentPadTarget } = NullpadCrypto;
-        const framedLen = contentBytes.length + V1_HEADER_LEN;
-        const isAnonymous = typeof NullpadAuth === 'undefined' || !NullpadAuth.getAuthHeader();
-        const userCap = isAnonymous ? anonMaxBytes : maxUploadBytes;
-        const serverCap = (userCap !== null ? userCap : 52428800);
-        const topBucket = serverCap - AES_GCM_OVERHEAD;
-        if (contentPadTarget(framedLen) === null || framedLen >= topBucket) {
-          const limit = formatFileSize(serverCap - AES_GCM_OVERHEAD - V1_HEADER_LEN);
-          throw new Error(`Content too large: exceeds maximum supported upload size. Maximum is ${limit}.`);
-        }
       }
 
       // 4. Get the paste ID from the server (used as AAD for AES-GCM binding).
@@ -193,7 +189,7 @@
       // Bucket selection uses "strictly greater than framed length" so equal-to-bucket
       // inputs are pushed to the next bucket, preventing a no-padding side channel.
       const encrypted = await NullpadCrypto.encrypt(
-        contentBytes, encryptionKey, pasteId, { pad: 'content' }
+        contentBytes, encryptionKey, pasteId, { pad: 'content', maxBlobBytes: cap.bytes }
       );
       const encryptedBytes = NullpadCrypto.base64Decode(encrypted);
 
@@ -413,6 +409,26 @@
   // Initialization
   // ============================================================================
 
+  async function loadConfig() {
+    let res;
+    try {
+      res = await fetch('/api/config');
+    } catch (e) {
+      console.warn('Failed to fetch server config:', e.message);
+      return null;
+    }
+    if (!res.ok) {
+      console.warn('Failed to fetch server config: HTTP', res.status);
+      return null;
+    }
+    try {
+      return await res.json();
+    } catch (e) {
+      console.warn('Server config is not valid JSON:', e.message);
+      return null;
+    }
+  }
+
   async function init() {
     // Clear clipboard and sensitive data on page unload. Registered first so
     // the cleanup does not depend on any DOM lookup or fetch below succeeding.
@@ -427,24 +443,16 @@
       currentFile = null;
     });
 
-    // Fetch server config to keep the client-side size pre-flight in sync with
-    // the server limit. On failure we fall back to the 50MiB default constant
-    // (same value baked into the crypto module). This is deliberate: the pre-flight
-    // is best-effort UX only — the server enforces the real limit authoritatively
-    // and any 413/400 rejection during upload surfaces through the existing error
-    // path in handleSubmit (the !response.ok branch throws and shows an inline error).
-    try {
-      const res = await fetch('/api/config');
-      if (res.ok) {
-        const cfg = await res.json();
-        if (typeof cfg.max_upload_bytes === 'number') {
-          maxUploadBytes = cfg.max_upload_bytes;
-        }
-        if (typeof cfg.anon_max_bytes === 'number') {
-          anonMaxBytes = cfg.anon_max_bytes;
-        }
-      }
-    } catch (e) { console.warn('Failed to fetch server config:', e.message); }
+    // The server cap sets the top padding bucket. Without it NullpadUtils.blobCap
+    // guesses the server defaults, so the user is told the limits may be wrong.
+    config = await loadConfig();
+    if (NullpadUtils.blobCap(config, isAnonymous()).guessed) {
+      const noticeEl = document.createElement('div');
+      noticeEl.className = 'status-warning';
+      noticeEl.setAttribute('role', 'status');
+      noticeEl.textContent = LIMITS_UNKNOWN;
+      form.prepend(noticeEl);
+    }
 
     setupFileUpload();
     form.addEventListener('submit', handleSubmit);

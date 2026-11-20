@@ -177,13 +177,11 @@
     // input whose framed length exactly equals a bucket boundary is pushed to the
     // next bucket — this prevents a no-padding side channel.
     //
-    // Buckets: 1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB, 4MiB, 16MiB, MAX_CONTENT_BUCKET
-    //
-    // MAX_CONTENT_BUCKET = MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD (28 bytes) so that
-    // padded plaintext (bucket size) + 12-byte IV + 16-byte GCM tag never exceeds
-    // the server's MAX_UPLOAD_BYTES limit (default 52,428,800). Inputs with a framed
-    // length ≥ MAX_CONTENT_BUCKET must be rejected with a client-side error before
-    // encryption rather than producing an oversized blob.
+    // Buckets: 1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB, 4MiB, 16MiB, each clamped
+    // to maxBlobBytes - AES_GCM_OVERHEAD (28 bytes). maxBlobBytes is the server's
+    // cap for this user (from /api/config), so padded plaintext + 12-byte IV +
+    // 16-byte GCM tag never exceeds it. Inputs with a framed length >=
+    // maxBlobBytes - 28 must be rejected before encryption.
     //
     // The length prefix in the V1 frame already tells the decoder where real data
     // ends — unframeV1OrNull() strips trailing padding on decrypt with no changes.
@@ -191,26 +189,10 @@
     // AES-GCM overhead: 12-byte IV + 16-byte authentication tag.
     const AES_GCM_OVERHEAD = 28;
 
-    // Default server upload cap. Fetched from /api/config at runtime in create.js;
-    // this constant is a safe fallback for the crypto module's own checks.
-    const DEFAULT_MAX_UPLOAD_BYTES = 52428800; // 50 MiB
+    // Smallest cap: an empty V1 frame must still be strictly below the top bucket.
+    const MIN_BLOB_BYTES = AES_GCM_OVERHEAD + V1_HEADER_LEN + 1;
 
-    // Maximum framed plaintext that, after AES-GCM encryption, fits the default cap.
-    // = DEFAULT_MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD
-    const MAX_CONTENT_BUCKET = DEFAULT_MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD; // 52,428,772
-
-    // Content padding bucket ladder (bytes). All values < MAX_CONTENT_BUCKET.
-    const CONTENT_BUCKETS = [
-        1024,           // 1 KiB
-        4096,           // 4 KiB
-        16384,          // 16 KiB
-        65536,          // 64 KiB
-        262144,         // 256 KiB
-        1048576,        // 1 MiB
-        4194304,        // 4 MiB
-        16777216,       // 16 MiB
-        MAX_CONTENT_BUCKET
-    ];
+    const CONTENT_LADDER = [1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216];
 
     /**
      * Pad framedBytes to targetLen with zero bytes.
@@ -239,17 +221,30 @@
     }
 
     /**
-     * Select the content padding target: first bucket strictly greater than
-     * framedLen. Returns null if no bucket can hold the framed data (caller
-     * must reject the upload before encryption).
+     * First ladder bucket strictly greater than framedLen, clamped to maxBlobBytes - 28.
+     * null when framedLen >= maxBlobBytes - 28.
      * @param {number} framedLen
+     * @param {number} maxBlobBytes - Largest encrypted blob the server takes
      * @returns {number|null}
+     * @throws {TypeError} if maxBlobBytes is not an integer from MIN_BLOB_BYTES to 0xFFFFFFFF
      */
-    function contentPadTarget(framedLen) {
-        for (const bucket of CONTENT_BUCKETS) {
-            if (bucket > framedLen) return bucket;
+    function contentPadTarget(framedLen, maxBlobBytes) {
+        if (!Number.isInteger(maxBlobBytes) || maxBlobBytes < MIN_BLOB_BYTES || maxBlobBytes > 0xFFFFFFFF) {
+            throw new TypeError(`maxBlobBytes must be an integer from ${MIN_BLOB_BYTES} to 4294967295`);
         }
-        return null; // input too large for any bucket
+        const topBucket = maxBlobBytes - AES_GCM_OVERHEAD;
+        if (framedLen >= topBucket) return null;
+        const bucket = CONTENT_LADDER.find((size) => size > framedLen);
+        return bucket === undefined ? topBucket : Math.min(bucket, topBucket);
+    }
+
+    /**
+     * Largest content in bytes that contentPadTarget still accepts for maxBlobBytes.
+     * @param {number} maxBlobBytes
+     * @returns {number}
+     */
+    function maxContentBytes(maxBlobBytes) {
+        return maxBlobBytes - AES_GCM_OVERHEAD - V1_HEADER_LEN - 1;
     }
 
     // ============================================================================
@@ -266,10 +261,12 @@
      * @param {'metadata'|'content'|'none'} [options.pad='none'] - Padding mode:
      *   'metadata' pads framed plaintext to the next multiple of 512 (>= framed+1),
      *   'content'  pads to the first bucket from the ladder strictly greater than
-     *              framed length,
+     *              framed length, clamped to options.maxBlobBytes - 28,
      *   'none'     no padding (legacy / default).
+     * @param {number} [options.maxBlobBytes] - Server blob cap; required when pad='content'
      * @returns {Promise<string>} Base64-encoded (IV + ciphertext)
      * @throws {Error} if pad='content' and framed length exceeds the top bucket
+     * @throws {TypeError} if pad='content' and maxBlobBytes is missing or invalid
      */
     async function encrypt(plaintext, keyBase64url, aad, options) {
         if (options !== undefined && options !== null && typeof options !== 'object') {
@@ -293,7 +290,7 @@
             const target = metadataPadTarget(framedBytes.length);
             paddedBytes = padTo(framedBytes, target);
         } else if (padMode === 'content') {
-            const target = contentPadTarget(framedBytes.length);
+            const target = contentPadTarget(framedBytes.length, options.maxBlobBytes);
             if (target === null) {
                 throw new Error(
                     'Content too large: exceeds maximum supported upload size.'
@@ -462,13 +459,10 @@
         encrypt,
         decrypt,
 
-        // Padding helpers (used by create.js for pre-flight size checks)
+        // Padding helpers (maxContentBytes sets create.js's size limit)
         contentPadTarget,
+        maxContentBytes,
         metadataPadTarget,
-
-        // Framing/overhead constants (exported so create.js avoids duplicating them)
-        AES_GCM_OVERHEAD,
-        V1_HEADER_LEN,
 
         // Helpers
         base64urlEncode,

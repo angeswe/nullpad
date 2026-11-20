@@ -176,6 +176,30 @@
     return id;
   }
 
+  // Mirror the defaults in src/config.rs, for when /api/config gives no usable cap.
+  const DEFAULT_ANON_MAX_BYTES = 262144 + 28; // the 256 KiB padding bucket plus AES-GCM IV and tag
+  const DEFAULT_MAX_UPLOAD_BYTES = 52428800;
+
+  /**
+   * Largest encrypted blob the server takes from this user.
+   * A cap must be an integer from 34 to 0xFFFFFFFF, the range NullpadCrypto.contentPadTarget takes.
+   * @param {{max_upload_bytes?: number, anon_max_bytes?: number}|null} config  /api/config body, or null
+   * @param {boolean} isAnonymous
+   * @returns {{bytes: number, guessed: boolean}} guessed is true when bytes is a default,
+   *   because config is null or its cap is invalid (an invalid cap is also logged).
+   */
+  function blobCap(config, isAnonymous) {
+    const field = isAnonymous ? 'anon_max_bytes' : 'max_upload_bytes';
+    const fallback = { bytes: isAnonymous ? DEFAULT_ANON_MAX_BYTES : DEFAULT_MAX_UPLOAD_BYTES, guessed: true };
+    if (!config) return fallback;
+    const value = config[field];
+    if (Number.isInteger(value) && value >= 34 && value <= 0xFFFFFFFF) {
+      return { bytes: value, guessed: false };
+    }
+    console.warn(`Server config ${field} is not an integer from 34 to 4294967295:`, value);
+    return fallback;
+  }
+
   const NullpadUtils = Object.freeze({
     sanitizeFilename,
     shouldRenderMarkdown,
@@ -186,7 +210,8 @@
     pasteViewUrl,
     hasBurnHint,
     parsePasteFrame,
-    reservePasteId
+    reservePasteId,
+    blobCap
   });
 
   Object.defineProperty(window, 'NullpadUtils', {
