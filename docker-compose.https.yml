@@ -5,6 +5,8 @@ services:
   # cookies, and break crypto.subtle — defeating the point of the override.
   nullpad:
     ports: !reset []
+    # PUBLIC_ORIGIN still comes from .env. Set it to https://<host-ip>:3016,
+    # or every login fails with 401.
     environment:
       - TRUSTED_PROXY_COUNT=1
 

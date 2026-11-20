@@ -140,6 +140,9 @@ async fn main() {
         test_challenge_alias_limit_is_per_requester,
         test_other_requester_does_not_invalidate_pending_nonce,
         test_verify_weak_stored_pubkey_returns_401,
+        test_admin_login_rejects_stale_valkey_pubkey,
+        test_admin_login_uses_config_pubkey_after_restore,
+        test_admin_role_with_other_id_refused,
         test_rate_limiting_returns_429,
         test_admin_endpoints_require_auth,
         test_admin_create_and_list_invites,
@@ -151,7 +154,15 @@ async fn main() {
         test_admin_cannot_delete_self,
         test_security_headers_on_api,
         test_activate_user_on_first_upload,
+        test_upsert_admin_fails_on_alias_owned_by_user,
+        test_upsert_admin_keeps_old_alias_owned_by_other,
+        test_delete_user_keeps_alias_owned_by_other,
+        test_activate_user_keeps_alias_ttl_owned_by_other,
         test_challenge_nonce_single_use,
+        test_verify_rejects_bare_nonce_signature,
+        test_verify_accepts_bound_message_signature,
+        test_verify_rejects_bound_message_for_other_origin,
+        test_verify_rejects_relay_with_spoofed_host,
         test_concurrent_burn_after_reading_race,
         test_max_sessions_per_user,
         test_forever_paste_requires_auth,
@@ -173,7 +184,9 @@ async fn main() {
         test_protected_pages_are_no_store,
         test_protected_pages_unauthenticated_no_store,
         test_public_pages_keep_no_cache,
-        test_verify_sets_np_session_cookie,
+        test_login_sets_host_prefixed_session_cookie,
+        test_legacy_np_session_cookie_not_accepted,
+        test_logout_clears_host_prefixed_session_cookie,
         test_stored_blob_preserves_bucket_size,
         test_unreadable_blob_returns_500_not_404,
         test_pin_verifier_rejected_when_has_pin_false,
@@ -325,11 +338,18 @@ async fn spawn_test_server_configured(
         .await
         .expect("Failed to init paste storage");
 
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("Failed to bind");
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{}", addr);
+
     let config = Config {
         admin_pubkey,
         admin_alias: admin_alias.clone(),
         valkey_url: test_valkey_url.clone(),
         bind_addr: "127.0.0.1:0".parse().unwrap(),
+        public_origin: base_url.clone(),
         max_upload_bytes: overrides.max_upload_bytes,
         anon_max_bytes: overrides.anon_max_bytes,
         anon_max_pastes_per_ip_per_day: overrides.anon_max_pastes_per_ip_per_day,
@@ -372,10 +392,6 @@ async fn spawn_test_server_configured(
     .layer(axum::middleware::from_fn(security_headers))
     .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("Failed to bind");
-    let addr = listener.local_addr().unwrap();
     // Same listener and serve loop as main.rs.
     let listener = WriteTimeoutListener::new(
         listener,
@@ -387,7 +403,6 @@ async fn spawn_test_server_configured(
         overrides.header_read_timeout,
     ));
 
-    let base_url = format!("http://{}", addr);
     (base_url, con, admin_key, admin_alias, paste_storage_path)
 }
 
@@ -474,7 +489,11 @@ async fn admin_login(
     signing_key: &SigningKey,
 ) -> String {
     let (challenge_id, nonce) = request_challenge(client, base_url, alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(signing_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        signing_key
+            .sign(&bound_message(base_url, alias, &nonce))
+            .to_bytes(),
+    );
     let (status, body) = post_verify(client, base_url, alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 200);
     let body: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -1740,7 +1759,11 @@ async fn test_verify_malformed_signature_keeps_pending_challenge() {
     .await;
     assert_eq!(status, 401);
 
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 200);
 }
@@ -1751,7 +1774,11 @@ async fn test_verify_malformed_challenge_id_returns_401() {
     let expected = unknown_alias_verify_response(&client, &base_url).await;
 
     let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
     let suffixed = format!("{challenge_id}:x");
     let malformed = [
         "",
@@ -1800,7 +1827,11 @@ async fn test_other_requester_does_not_invalidate_pending_nonce() {
     let attacker = send_challenge(&client, &base_url, &admin_alias, Some("10.0.2.2")).await;
     assert_eq!(attacker.status(), 200);
 
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 200);
 }
@@ -1845,6 +1876,74 @@ async fn test_verify_weak_stored_pubkey_returns_401() {
     )
     .await;
     assert_eq!(response, expected);
+}
+
+async fn test_admin_login_rejects_stale_valkey_pubkey() {
+    let (base_url, mut con, _admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (old_key, old_pubkey) = test_keypair();
+    nullpad::storage::user::upsert_admin(&mut con, &old_pubkey, &admin_alias)
+        .await
+        .unwrap();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(
+        old_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
+    let (status, _body) =
+        post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
+}
+
+async fn test_admin_login_uses_config_pubkey_after_restore() {
+    let (base_url, mut con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (_old_key, old_pubkey) = test_keypair();
+    nullpad::storage::user::upsert_admin(&mut con, &old_pubkey, &admin_alias)
+        .await
+        .unwrap();
+
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    let resp = client
+        .get(format!("{}/api/invites", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+async fn test_admin_role_with_other_id_refused() {
+    use redis::AsyncCommands;
+    let (base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let (other_key, other_pubkey) = test_keypair();
+    let other_admin = nullpad::models::StoredUser {
+        id: "x-admin".to_string(),
+        alias: "xadmin".to_string(),
+        pubkey: other_pubkey,
+        role: nullpad::models::Role::Admin,
+        created_at: nullpad::util::now_secs(),
+    };
+    let _: () = con
+        .set("user:x-admin", serde_json::to_string(&other_admin).unwrap())
+        .await
+        .unwrap();
+    let _: () = con.set("alias:xadmin", "x-admin").await.unwrap();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, "xadmin").await;
+    let sig_b64 = general_purpose::STANDARD.encode(
+        other_key
+            .sign(&bound_message(&base_url, "xadmin", &nonce))
+            .to_bytes(),
+    );
+    let (status, _body) = post_verify(&client, &base_url, "xadmin", &challenge_id, &sig_b64).await;
+
+    let _: () = con.del(&["user:x-admin", "alias:xadmin"]).await.unwrap();
+    assert_eq!(status, 401);
 }
 
 async fn test_rate_limiting_returns_429() {
@@ -2378,6 +2477,129 @@ async fn test_security_headers_on_api() {
     assert!(headers.get("content-security-policy").is_some());
 }
 
+async fn test_upsert_admin_fails_on_alias_owned_by_user() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let token = nanoid::nanoid!(16);
+    let invite = nullpad::models::StoredInvite {
+        token: token.clone(),
+        created_at: nullpad::util::now_secs(),
+    };
+    nullpad::storage::user::store_invite(&mut con, &invite, 3600)
+        .await
+        .unwrap();
+    let (_key, pubkey) = test_keypair();
+    let user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: format!("owned_{}", nanoid::nanoid!(8)),
+        pubkey: pubkey.clone(),
+        role: nullpad::models::Role::Trusted,
+        created_at: nullpad::util::now_secs(),
+    };
+    nullpad::storage::user::consume_invite_and_create_user(&mut con, &token, &user, 3600)
+        .await
+        .unwrap();
+    let alias_key = format!("alias:{}", user.alias);
+
+    let result = nullpad::storage::user::upsert_admin(&mut con, &pubkey, &user.alias).await;
+    let owner: Option<String> = con.get(&alias_key).await.unwrap();
+    let _: () = con
+        .del(&[alias_key.clone(), format!("user:{}", user.id)])
+        .await
+        .unwrap();
+
+    assert!(result.is_err(), "upsert_admin must refuse a user's alias");
+    assert_eq!(owner.as_deref(), Some(user.id.as_str()));
+}
+
+async fn test_upsert_admin_keeps_old_alias_owned_by_other() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, admin_alias) = spawn_test_server().await;
+    let (_key, pubkey) = test_keypair();
+    let old_alias_key = format!("alias:{}", admin_alias);
+    let other_id = nanoid::nanoid!(12);
+    let _: () = con.set(&old_alias_key, &other_id).await.unwrap();
+    let new_alias = format!("testadmin_{}", nanoid::nanoid!(6));
+
+    let result = nullpad::storage::user::upsert_admin(&mut con, &pubkey, &new_alias).await;
+    let owner: Option<String> = con.get(&old_alias_key).await.unwrap();
+    let _: () = con.del(&old_alias_key).await.unwrap();
+
+    assert!(result.is_ok(), "upsert_admin must succeed: {:?}", result);
+    assert_eq!(owner.as_deref(), Some(other_id.as_str()));
+}
+
+async fn test_delete_user_keeps_alias_owned_by_other() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let (_key, pubkey) = test_keypair();
+    let user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: format!("shared_{}", nanoid::nanoid!(8)),
+        pubkey,
+        role: nullpad::models::Role::Trusted,
+        created_at: nullpad::util::now_secs(),
+    };
+    let alias_key = format!("alias:{}", user.alias);
+    let _: () = con
+        .set(
+            format!("user:{}", user.id),
+            serde_json::to_string(&user).unwrap(),
+        )
+        .await
+        .unwrap();
+    let _: () = con.set(&alias_key, "admin").await.unwrap();
+
+    nullpad::storage::user::delete_user(&mut con, &user.id)
+        .await
+        .unwrap();
+    let owner: Option<String> = con.get(&alias_key).await.unwrap();
+    let _: () = con.del(&alias_key).await.unwrap();
+
+    assert_eq!(owner.as_deref(), Some("admin"));
+}
+
+async fn test_activate_user_keeps_alias_ttl_owned_by_other() {
+    use redis::AsyncCommands;
+    let (_base_url, mut con, _admin_key, _admin_alias) = spawn_test_server().await;
+    let idle_ttl: u64 = 172800;
+    let active_ttl: u64 = 86400;
+    let (_key, pubkey) = test_keypair();
+    let user = nullpad::models::StoredUser {
+        id: nanoid::nanoid!(12),
+        alias: format!("shared_{}", nanoid::nanoid!(8)),
+        pubkey,
+        role: nullpad::models::Role::Trusted,
+        created_at: nullpad::util::now_secs(),
+    };
+    let user_key = format!("user:{}", user.id);
+    let pastes_key = format!("user_pastes:{}", user.id);
+    let alias_key = format!("alias:{}", user.alias);
+    let _: () = con
+        .set_ex(
+            &user_key,
+            serde_json::to_string(&user).unwrap(),
+            idle_ttl - 30,
+        )
+        .await
+        .unwrap();
+    let _: () = con.sadd(&pastes_key, nanoid::nanoid!(12)).await.unwrap();
+    let _: () = con.set(&alias_key, "admin").await.unwrap();
+
+    nullpad::storage::paste::activate_user_on_first_upload(
+        &mut con, &user.id, idle_ttl, active_ttl,
+    )
+    .await
+    .unwrap();
+    let alias_ttl: i64 = con.ttl(&alias_key).await.unwrap();
+    let _: () = con
+        .del(&[alias_key.clone(), user_key.clone(), pastes_key.clone()])
+        .await
+        .unwrap();
+
+    assert_eq!(alias_ttl, -1);
+}
+
 // ============================================================================
 // User Activation Tests
 // ============================================================================
@@ -2519,7 +2741,11 @@ async fn test_challenge_nonce_single_use() {
     let client = reqwest::Client::new();
 
     let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let sig_b64 = general_purpose::STANDARD.encode(
+        admin_key
+            .sign(&bound_message(&base_url, &admin_alias, &nonce))
+            .to_bytes(),
+    );
 
     // First verification should succeed
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
@@ -2528,6 +2754,68 @@ async fn test_challenge_nonce_single_use() {
     // Second verification with same signature should fail (nonce consumed)
     let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
     assert_eq!(status, 401);
+}
+
+fn bound_message(origin: &str, alias: &str, nonce: &[u8]) -> Vec<u8> {
+    format!(
+        "nullpad-auth-v1|{}|{}|{}",
+        origin,
+        alias,
+        general_purpose::STANDARD.encode(nonce)
+    )
+    .into_bytes()
+}
+
+async fn test_verify_rejects_bare_nonce_signature() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
+}
+
+async fn test_verify_accepts_bound_message_signature() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let message = bound_message(&base_url, &admin_alias, &nonce);
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&message).to_bytes());
+    let (status, body) =
+        post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 200);
+    let body: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(!body["token"].as_str().unwrap().is_empty());
+}
+
+async fn test_verify_rejects_bound_message_for_other_origin() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let message = bound_message("https://other.example", &admin_alias, &nonce);
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&message).to_bytes());
+    let (status, _) = post_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+    assert_eq!(status, 401);
+}
+
+async fn test_verify_rejects_relay_with_spoofed_host() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+
+    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
+    let message = bound_message("http://relay.example", &admin_alias, &nonce);
+    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&message).to_bytes());
+    let resp = client
+        .post(format!("{}/api/auth/verify", base_url))
+        .header(reqwest::header::HOST, "relay.example")
+        .json(&serde_json::json!({"alias": admin_alias, "challenge_id": challenge_id, "signature": sig_b64}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
 }
 
 // ============================================================================
@@ -3524,10 +3812,10 @@ async fn test_protected_html_with_session_cookie() {
     // Login to get a real session token
     let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
 
-    // Admin can access /admin.html via np_session cookie
+    // Admin can access /admin.html via __Host-np_session cookie
     let resp = client
         .get(format!("{}/admin.html", base_url))
-        .header("cookie", format!("np_session={}", admin_token))
+        .header("cookie", format!("__Host-np_session={}", admin_token))
         .send()
         .await
         .unwrap();
@@ -3543,7 +3831,7 @@ async fn test_protected_html_with_session_cookie() {
     // Admin can also access /trusted.html
     let resp = client
         .get(format!("{}/trusted.html", base_url))
-        .header("cookie", format!("np_session={}", admin_token))
+        .header("cookie", format!("__Host-np_session={}", admin_token))
         .send()
         .await
         .unwrap();
@@ -3603,7 +3891,7 @@ async fn test_protected_pages_are_no_store() {
     for path in routes::PROTECTED_PATHS {
         let resp = client
             .get(format!("{}{}", base_url, path))
-            .header("cookie", format!("np_session={}", admin_token))
+            .header("cookie", format!("__Host-np_session={}", admin_token))
             .send()
             .await
             .unwrap();
@@ -4145,43 +4433,119 @@ async fn test_meta_with_null_content_hash_is_not_served() {
     );
 }
 
-/// Login verify endpoint sets np_session cookie with correct attributes.
-async fn test_verify_sets_np_session_cookie() {
-    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap();
-
-    let (challenge_id, nonce) = request_challenge(&client, &base_url, &admin_alias).await;
-    let sig_b64 = general_purpose::STANDARD.encode(admin_key.sign(&nonce).to_bytes());
-    let resp = send_verify(&client, &base_url, &admin_alias, &challenge_id, &sig_b64).await;
+async fn login_set_cookie(
+    client: &reqwest::Client,
+    base_url: &str,
+    alias: &str,
+    key: &SigningKey,
+) -> String {
+    let (challenge_id, nonce) = request_challenge(client, base_url, alias).await;
+    let sig_b64 = general_purpose::STANDARD
+        .encode(key.sign(&bound_message(base_url, alias, &nonce)).to_bytes());
+    let resp = send_verify(client, base_url, alias, &challenge_id, &sig_b64).await;
     assert_eq!(resp.status(), 200);
-
-    // Check Set-Cookie header contains session token, not role
-    let cookie = resp
-        .headers()
+    resp.headers()
         .get("set-cookie")
-        .expect("verify response must set np_session cookie")
+        .expect("verify response must set the session cookie")
         .to_str()
-        .unwrap();
-    assert!(
-        cookie.starts_with("np_session="),
-        "cookie should set np_session"
-    );
-    // Token is 44 chars of base64
+        .unwrap()
+        .to_string()
+}
+
+fn cookie_attributes(cookie: &str) -> Vec<String> {
+    cookie
+        .split(';')
+        .skip(1)
+        .map(|a| a.trim().to_string())
+        .collect()
+}
+
+/// Login verify endpoint sets __Host-np_session cookie with correct attributes.
+/// The test server is plain HTTP with no proxy headers, so this also shows the
+/// cookie is Secure when the request carries no HTTPS signal.
+async fn test_login_sets_host_prefixed_session_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    assert!(base_url.starts_with("http://"));
+    let client = reqwest::Client::new();
+    let cookie = login_set_cookie(&client, &base_url, &admin_alias, &admin_key).await;
+
     let token_value = cookie
         .split(';')
         .next()
         .unwrap()
-        .strip_prefix("np_session=")
-        .unwrap();
+        .strip_prefix("__Host-np_session=")
+        .expect("cookie should set __Host-np_session");
     assert_eq!(token_value.len(), 44, "session token should be 44 chars");
-    assert!(cookie.contains("HttpOnly"), "cookie should be HttpOnly");
+    let attrs = cookie_attributes(&cookie);
+    for expected in ["HttpOnly", "SameSite=Strict", "Secure", "Path=/"] {
+        assert!(
+            attrs.iter().any(|a| a == expected),
+            "missing {expected}: {cookie}"
+        );
+    }
     assert!(
-        cookie.contains("SameSite=Strict"),
-        "cookie should be SameSite=Strict"
+        !attrs
+            .iter()
+            .any(|a| a.to_ascii_lowercase().starts_with("domain")),
+        "cookie must not set Domain: {cookie}"
     );
+}
+
+/// The unprefixed np_session cookie is ignored, as if no cookie were sent.
+async fn test_legacy_np_session_cookie_not_accepted() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    let without_cookie = client
+        .get(format!("{}/admin.html", base_url))
+        .send()
+        .await
+        .unwrap();
+    let with_legacy = client
+        .get(format!("{}/admin.html", base_url))
+        .header("cookie", format!("np_session={}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(with_legacy.status(), 401);
+    assert_eq!(with_legacy.status(), without_cookie.status());
+    assert_eq!(
+        with_legacy.text().await.unwrap(),
+        without_cookie.text().await.unwrap()
+    );
+}
+
+/// Logout clears __Host-np_session with the attributes the prefix requires.
+async fn test_logout_clears_host_prefixed_session_cookie() {
+    let (base_url, _con, admin_key, admin_alias) = spawn_test_server().await;
+    let client = reqwest::Client::new();
+    let admin_token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+
+    let resp = client
+        .post(format!("{}/api/auth/logout", base_url))
+        .header("Authorization", format!("Bearer {}", admin_token))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 204);
+    let cookie = resp
+        .headers()
+        .get("set-cookie")
+        .expect("logout must clear the session cookie")
+        .to_str()
+        .unwrap();
+    assert!(
+        cookie.starts_with("__Host-np_session=;"),
+        "logout should clear __Host-np_session: {cookie}"
+    );
+    let attrs = cookie_attributes(cookie);
+    for expected in ["Secure", "Path=/", "Max-Age=0"] {
+        assert!(
+            attrs.iter().any(|a| a == expected),
+            "missing {expected}: {cookie}"
+        );
+    }
 }
 
 // ============================================================================
