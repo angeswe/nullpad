@@ -113,6 +113,34 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - Key derivation: Argon2id (m=19456, t=2, p=1) — OWASP recommended params
 - Keys never leave the browser or touch the server
 
+**Size padding**
+
+The browser pads content before it encrypts it, so the server learns only a size range.
+
+- Inside AES-GCM, the plaintext is framed as `[version byte 0x01][length, u32 little-endian][data][zero padding]`.
+- The framed plaintext is padded to the first bucket that is strictly larger than it. A frame that exactly fills a bucket goes to the next bucket.
+- Buckets: 1 KiB, 4 KiB, 16 KiB, 64 KiB, 256 KiB, 1 MiB, 2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB. Above 32 MiB, the bucket is the user's cap minus 28 bytes.
+- No bucket is larger than the user's cap minus 28 bytes. A bucket above that limit is lowered to it.
+- The stored blob is the bucket plus 28 bytes: a 12-byte IV and a 16-byte GCM tag.
+- The largest content that fits is the cap minus 34 bytes.
+- The cap is the server's limit for that user: `ANON_MAX_BYTES` for anonymous uploads, `MAX_UPLOAD_BYTES` for logged-in uploads. The browser reads both from `/api/config`.
+- The encrypted filename and content type use the same frame. They are padded to the next multiple of 512 bytes that is strictly larger than the frame.
+
+**What the server can see**
+
+The server stores this for each paste:
+
+- The blob size, which shows the bucket and so a size range
+- The size of the encrypted metadata blob
+- The paste ID
+- `paste_type` (`text` or `file`)
+- The TTL
+- The burn-after-reading flag
+- Whether a PIN is set, and the PIN verifier (`HMAC-SHA256(derived_key, paste_id)`)
+- The creation time
+- The owner's user ID, for logged-in uploads
+- A SHA-256 hash of the stored blob. The blob is the IV, ciphertext, and tag, so this hashes ciphertext, not plaintext.
+
 **Authentication**
 
 - Ed25519 challenge-response (no passwords)
@@ -214,7 +242,7 @@ These routes serve the web client. Paste and auth requests expect payloads that 
 ### Public
 
 - `GET /healthz` — Health check (returns Valkey connectivity status)
-- `GET /api/config` — Server limits for the client (max upload size)
+- `GET /api/config` — Server limits for the client: `max_upload_bytes` (blob cap for logged-in users) and `anon_max_bytes` (blob cap for anonymous users)
 - `POST /api/paste/reserve` — Get a new paste ID, valid for one upload within 10 minutes (rate limited)
 - `POST /api/paste` — Create encrypted paste under a reserved ID
 - `GET /api/paste/{id}` — Retrieve paste (deletes if burn-after-reading)
