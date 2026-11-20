@@ -17,9 +17,9 @@ function loadRealCrypto() {
   return sandbox.NullpadCrypto;
 }
 
-function loadNullpadUtils() {
+function loadNullpadUtils(consoleImpl = console) {
   const src = fs.readFileSync(path.join(ROOT, 'static', 'js', 'utils.js'), 'utf8');
-  const sandbox = { window: {}, URLSearchParams };
+  const sandbox = { window: {}, URLSearchParams, console: consoleImpl };
   vm.runInNewContext(src, sandbox);
   return sandbox.window.NullpadUtils;
 }
@@ -154,4 +154,4 @@ function loadViewJs(locationOverrides, sandboxOverrides) {
   return { elements, createdElements, fetchCalls, consoleCalls, historyCalls, windowListeners, reloadCalls };
 }
 
-module.exports = { loadNullpadUtils, loadRealCrypto, loadViewJs };
+module.exports = { loadNullpadUtils, loadRealCrypto, loadViewJs, makeElement };

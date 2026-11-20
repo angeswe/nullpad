@@ -14,14 +14,17 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 
+const warnings = [];
+
 function loadNullpadUtils() {
   const src = fs.readFileSync(path.join(__dirname, '..', '..', 'static', 'js', 'utils.js'), 'utf8');
   const window = {};
+  const console = { warn: (...args) => warnings.push(args) };
   // URLSearchParams is a WHATWG global, not part of the ECMAScript globals a
   // fresh vm context gets by default, but hasBurnHint (like view.js's own
   // parseUrl) relies on it — pass Node's implementation through.
   // TextDecoder is also a WHATWG global; parsePasteFrame uses it.
-  vm.runInNewContext(src, { window, URLSearchParams, TextDecoder });
+  vm.runInNewContext(src, { window, URLSearchParams, TextDecoder, console });
   return window.NullpadUtils;
 }
 
@@ -33,7 +36,8 @@ const {
   shareUrl,
   pasteViewUrl,
   hasBurnHint,
-  parsePasteFrame
+  parsePasteFrame,
+  blobCap
 } = loadNullpadUtils();
 
 test('shouldRenderMarkdown returns true for text/markdown', () => {
@@ -288,3 +292,41 @@ test('parsePasteFrame keeps the JSON parse error', () => {
     return true;
   });
 });
+
+// The fallback caps must match the server defaults in src/config.rs.
+function configRsDefault(envVar) {
+  const src = fs.readFileSync(path.join(__dirname, '..', '..', 'src', 'config.rs'), 'utf8');
+  const match = src.match(new RegExp(`parse_env_or_default\\("${envVar}", ([0-9_]+)\\)`));
+  assert.ok(match, `no default for ${envVar} in config.rs`);
+  return Number(match[1].replace(/_/g, ''));
+}
+
+test('blobCap returns anon_max_bytes for anonymous and max_upload_bytes for logged-in', () => {
+  const config = { max_upload_bytes: 10485760, anon_max_bytes: 100000 };
+  assert.deepEqual({ ...blobCap(config, true) }, { bytes: 100000, guessed: false });
+  assert.deepEqual({ ...blobCap(config, false) }, { bytes: 10485760, guessed: false });
+});
+
+test('blobCap accepts caps from 34 to 2^32 - 1', () => {
+  assert.equal(blobCap({ anon_max_bytes: 34 }, true).bytes, 34);
+  assert.equal(blobCap({ max_upload_bytes: 0xFFFFFFFF }, false).bytes, 0xFFFFFFFF);
+});
+
+test('blobCap without config guesses the config.rs defaults and does not warn', () => {
+  warnings.length = 0;
+  assert.deepEqual({ ...blobCap(null, true) }, { bytes: configRsDefault('ANON_MAX_BYTES'), guessed: true });
+  assert.deepEqual({ ...blobCap(null, false) }, { bytes: configRsDefault('MAX_UPLOAD_BYTES'), guessed: true });
+  assert.equal(warnings.length, 0);
+});
+
+for (const bad of [undefined, null, '10485760', NaN, -1, 1.5, 33, 2 ** 32]) {
+  test(`blobCap treats a config cap of ${String(bad)} as a guess and warns with the value`, () => {
+    warnings.length = 0;
+    assert.deepEqual({ ...blobCap({ anon_max_bytes: bad, max_upload_bytes: bad }, true) },
+      { bytes: configRsDefault('ANON_MAX_BYTES'), guessed: true });
+    assert.deepEqual({ ...blobCap({ anon_max_bytes: bad, max_upload_bytes: bad }, false) },
+      { bytes: configRsDefault('MAX_UPLOAD_BYTES'), guessed: true });
+    assert.equal(warnings.length, 2);
+    assert.ok(Object.is(warnings[0][warnings[0].length - 1], bad), 'warning must carry the offending value');
+  });
+}

@@ -13,7 +13,7 @@ const PASTE_ID = 'abcdefghijkl';
 async function viewPasteEncryptedWith(aad) {
   const NullpadCrypto = loadRealCrypto();
   const key = NullpadCrypto.generateKey();
-  const content = NullpadCrypto.base64Decode(await NullpadCrypto.encrypt('hello', key, aad));
+  const content = await NullpadCrypto.encryptBytes('hello', key, aad, { pad: 'content', maxBlobBytes: 52428800 });
   const view = loadViewJs(
     { search: `?id=${PASTE_ID}`, hash: `#${key}` },
     {

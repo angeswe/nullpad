@@ -96,8 +96,8 @@ See `.env.example` for all available options. Key environment variables:
 - `secrets/valkey_password` — Valkey password file (required in Docker). Use hex or alphanumeric characters only: it is written into a Valkey config line and into `VALKEY_URL`. It is not an environment variable, so `docker compose config`, `docker inspect`, and `ps` do not show it.
   **Upgrading from a release that used `VALKEY_PASSWORD`:** write the old value to `secrets/valkey_password` (step 3b above), then delete the `VALKEY_PASSWORD` and `VALKEY_URL` lines from `.env`. Compose refuses to start while the file is missing. A leftover `VALKEY_PASSWORD` in `.env` still reaches both containers' environment and shows in `docker inspect`.
 - `VALKEY_MAXMEMORY` — Valkey memory limit in Docker (default: "2gb")
-- `MAX_UPLOAD_BYTES` — Largest encrypted blob a logged-in user may upload (default: 52428800 / 50MB). The upload request may be up to 64 KiB larger, for the multipart framing and metadata. A reverse proxy body limit must be at least `MAX_UPLOAD_BYTES` + 65536.
-- `ANON_MAX_BYTES` — Max blob size for anonymous uploads (default: 262172, the 256 KiB padding bucket plus 28 bytes AES-GCM overhead)
+- `MAX_UPLOAD_BYTES` — Largest encrypted blob a logged-in user may upload (default: 52428800 / 50MB). The largest file that fits is this value minus 34 bytes (see Size padding). The upload request may be up to 64 KiB larger, for the multipart framing and metadata. A reverse proxy body limit must be at least `MAX_UPLOAD_BYTES` + 65536.
+- `ANON_MAX_BYTES` — Max blob size for anonymous uploads (default: 262172, the 256 KiB padding bucket plus 28 bytes AES-GCM overhead). Must be <= `MAX_UPLOAD_BYTES`, or the server refuses to start
 - `ANON_MAX_PASTES_PER_IP_PER_DAY` — Anonymous pastes one IP may attempt per day (default: 100)
 - `MAX_CONCURRENT_BLOB_READS` — Paste bodies streamed at once; further reads get 503 until a slot frees (default: 32, min 1)
 - `WRITE_TIMEOUT_SECS` — Seconds a socket write may stay blocked before the connection is dropped (default: 60, min 1)
@@ -115,6 +115,34 @@ Rate limiting, session lifetimes, and challenge timeouts are also configurable. 
 - Content: AES-256-GCM via Web Crypto API
 - Key derivation: Argon2id (m=19456, t=2, p=1) — OWASP recommended params
 - Keys never leave the browser or touch the server
+
+**Size padding**
+
+The browser pads content before it encrypts it, so the server learns only a size range.
+
+- Inside AES-GCM, the plaintext is framed as `[version byte 0x01][length, u32 little-endian][data][zero padding]`.
+- The framed plaintext is padded to the first bucket that is strictly larger than it. A frame that exactly fills a bucket goes to the next bucket.
+- Buckets: 1 KiB, 4 KiB, 16 KiB, 64 KiB, 256 KiB, 1 MiB, 2 MiB, 4 MiB, 8 MiB, 16 MiB, 32 MiB. Above 32 MiB, the bucket is the user's cap minus 28 bytes.
+- No bucket is larger than the user's cap minus 28 bytes. A bucket above that limit is lowered to it.
+- The stored blob is the bucket plus 28 bytes: a 12-byte IV and a 16-byte GCM tag.
+- The largest content that fits is the cap minus 34 bytes.
+- The cap is the server's limit for that user: `ANON_MAX_BYTES` for anonymous uploads, `MAX_UPLOAD_BYTES` for logged-in uploads. The browser reads both from `/api/config`.
+- The encrypted filename and content type use the same frame. They are padded to the next multiple of 512 bytes that is strictly larger than the frame.
+
+**What the server can see**
+
+The server stores this for each paste:
+
+- The blob size, which shows the bucket and so a size range
+- The size of the encrypted metadata blob
+- The paste ID
+- `paste_type` (`text` or `file`)
+- The TTL
+- The burn-after-reading flag
+- Whether a PIN is set, and the PIN verifier (`HMAC-SHA256(derived_key, paste_id)`)
+- The creation time
+- The owner's user ID, for logged-in uploads
+- A SHA-256 hash of the stored blob. The blob is the IV, ciphertext, and tag, so this hashes ciphertext, not plaintext.
 
 **Authentication**
 
@@ -217,7 +245,7 @@ These routes serve the web client. Paste and auth requests expect payloads that 
 ### Public
 
 - `GET /healthz` — Health check (returns Valkey connectivity status)
-- `GET /api/config` — Server limits for the client (max upload size)
+- `GET /api/config` — Server limits for the client: `max_upload_bytes` (blob cap for logged-in users) and `anon_max_bytes` (blob cap for anonymous users)
 - `POST /api/paste/reserve` — Get a new paste ID, valid for one upload within 10 minutes (rate limited)
 - `POST /api/paste` — Create encrypted paste under a reserved ID
 - `GET /api/paste/{id}` — Retrieve paste (deletes if burn-after-reading)
@@ -238,7 +266,7 @@ These routes serve the web client. Paste and auth requests expect payloads that 
 
 ## File Types
 
-- **Public pastes**: The page offers text/markdown pastes only. The server cannot tell text from a file, because it sees only ciphertext, so it limits anonymous uploads by size (`ANON_MAX_BYTES`, default about 256 KiB) and count (`ANON_MAX_PASTES_PER_IP_PER_DAY` per IP, default 100). TTL up to 7 days
+- **Public pastes**: The page offers text/markdown pastes only. The server stores `paste_type` (`text` or `file`) as the client sends it, but cannot check that it matches the content, because it sees only ciphertext, so it limits anonymous uploads by size (`ANON_MAX_BYTES`, default about 256 KiB) and count (`ANON_MAX_PASTES_PER_IP_PER_DAY` per IP, default 100). TTL up to 7 days
 - **Trusted users**: Any file type via drag & drop after registration, TTL up to 7 days
 - **Display mode**: Each text paste is created as either rendered Markdown or raw text (for `.env` files, logs, code). The choice is stored inside the encrypted metadata, so the server never sees it. Uploaded files open rendered only when they are Markdown files (`text/markdown`, or a `.md`/`.markdown` name when the browser reports no type). Recipients can always toggle between views.
 

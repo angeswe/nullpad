@@ -121,11 +121,16 @@
     const VERSION_V1 = 0x01;
     const V1_HEADER_LEN = 5; // 1 byte version + 4 bytes length
 
-    /** Wrap raw plaintext bytes in the V1 frame: [0x01][length LE u32][data]. */
-    function frameV1(plaintextBytes) {
-        const out = new Uint8Array(V1_HEADER_LEN + plaintextBytes.length);
+    /**
+     * One allocation: header, data, zero padding.
+     * Caller ensures targetLen >= V1_HEADER_LEN + plaintextBytes.length.
+     * @param {Uint8Array} plaintextBytes
+     * @param {number} targetLen
+     * @returns {Uint8Array}
+     */
+    function frameAndPad(plaintextBytes, targetLen) {
+        const out = new Uint8Array(targetLen);
         out[0] = VERSION_V1;
-        // 4-byte little-endian length prefix
         new DataView(out.buffer).setUint32(1, plaintextBytes.length, true);
         out.set(plaintextBytes, V1_HEADER_LEN);
         return out;
@@ -135,16 +140,15 @@
      * Strip the V1 frame if present and well-formed. Returns null otherwise so
      * the caller can fall back to the legacy v0 path (return bytes as-is).
      *
-     * A legacy v0 plaintext whose first byte happens to be 0x01 followed by a
-     * 4-byte run that decodes to a length > body would mistakenly enter this
-     * function. By returning null on that mismatch rather than throwing, we
-     * keep legacy binary pastes (e.g. files starting with 0x01) decryptable
-     * instead of surfacing as the generic "Invalid key or PIN" error that the
-     * decrypt-retry chain in view.js would otherwise remap a throw into.
-     * The residual collision case — first byte 0x01 AND a 4-byte length value
-     * that happens to be <= body — silently truncates the legacy plaintext;
-     * this is the unavoidable migration cost of an in-band version sniff and
-     * affects only pre-existing binary pastes.
+     * A plaintext is V1 only if byte 0 is 0x01, the 4-byte length fits in the
+     * body, and every byte after the data is zero (V1 padding is all zeros).
+     * Returning null rather than throwing keeps legacy binary pastes that start
+     * with 0x01 decryptable instead of surfacing as the generic "Invalid key or
+     * PIN" error that the decrypt-retry chain in view.js would remap a throw
+     * into. The residual collision case is a legacy plaintext with first byte
+     * 0x01, a fitting length, and an all-zero tail after that length: it is
+     * silently truncated. This is the migration cost of an in-band version
+     * sniff and affects only pre-existing binary pastes.
      */
     function unframeV1OrNull(decryptedBytes) {
         if (decryptedBytes.length < V1_HEADER_LEN) return null;
@@ -156,6 +160,9 @@
         ).getUint32(0, true);
         const bodyLen = decryptedBytes.length - V1_HEADER_LEN;
         if (length > bodyLen) return null;
+        for (let i = V1_HEADER_LEN + length; i < decryptedBytes.length; i++) {
+            if (decryptedBytes[i] !== 0) return null;
+        }
         return decryptedBytes.subarray(V1_HEADER_LEN, V1_HEADER_LEN + length);
     }
 
@@ -177,13 +184,13 @@
     // input whose framed length exactly equals a bucket boundary is pushed to the
     // next bucket — this prevents a no-padding side channel.
     //
-    // Buckets: 1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB, 4MiB, 16MiB, MAX_CONTENT_BUCKET
-    //
-    // MAX_CONTENT_BUCKET = MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD (28 bytes) so that
-    // padded plaintext (bucket size) + 12-byte IV + 16-byte GCM tag never exceeds
-    // the server's MAX_UPLOAD_BYTES limit (default 52,428,800). Inputs with a framed
-    // length ≥ MAX_CONTENT_BUCKET must be rejected with a client-side error before
-    // encryption rather than producing an oversized blob.
+    // Buckets: 4x steps up to 1MiB (1KiB, 4KiB, 16KiB, 64KiB, 256KiB, 1MiB), then
+    // 2x steps above (2MiB, 4MiB, 8MiB, 16MiB, 32MiB). The top bucket is
+    // maxBlobBytes - AES_GCM_OVERHEAD (28 bytes): every bucket is clamped to it,
+    // and content above the last ladder bucket pads to it. maxBlobBytes is the server's
+    // cap for this user (from /api/config), so padded plaintext + 12-byte IV +
+    // 16-byte GCM tag never exceeds it. Inputs with a framed length >=
+    // maxBlobBytes - 28 must be rejected before encryption.
     //
     // The length prefix in the V1 frame already tells the decoder where real data
     // ends — unframeV1OrNull() strips trailing padding on decrypt with no changes.
@@ -191,40 +198,10 @@
     // AES-GCM overhead: 12-byte IV + 16-byte authentication tag.
     const AES_GCM_OVERHEAD = 28;
 
-    // Default server upload cap. Fetched from /api/config at runtime in create.js;
-    // this constant is a safe fallback for the crypto module's own checks.
-    const DEFAULT_MAX_UPLOAD_BYTES = 52428800; // 50 MiB
+    // Smallest cap: an empty V1 frame must still be strictly below the top bucket.
+    const MIN_BLOB_BYTES = AES_GCM_OVERHEAD + V1_HEADER_LEN + 1;
 
-    // Maximum framed plaintext that, after AES-GCM encryption, fits the default cap.
-    // = DEFAULT_MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD
-    const MAX_CONTENT_BUCKET = DEFAULT_MAX_UPLOAD_BYTES - AES_GCM_OVERHEAD; // 52,428,772
-
-    // Content padding bucket ladder (bytes). All values < MAX_CONTENT_BUCKET.
-    const CONTENT_BUCKETS = [
-        1024,           // 1 KiB
-        4096,           // 4 KiB
-        16384,          // 16 KiB
-        65536,          // 64 KiB
-        262144,         // 256 KiB
-        1048576,        // 1 MiB
-        4194304,        // 4 MiB
-        16777216,       // 16 MiB
-        MAX_CONTENT_BUCKET
-    ];
-
-    /**
-     * Pad framedBytes to targetLen with zero bytes.
-     * Caller is responsible for ensuring targetLen >= framedBytes.length.
-     * @param {Uint8Array} framedBytes
-     * @param {number} targetLen
-     * @returns {Uint8Array}
-     */
-    function padTo(framedBytes, targetLen) {
-        if (targetLen === framedBytes.length) return framedBytes;
-        const out = new Uint8Array(targetLen); // zero-filled by default
-        out.set(framedBytes, 0);
-        return out;
-    }
+    const CONTENT_LADDER = [1024, 4096, 16384, 65536, 262144, 1048576, 2097152, 4194304, 8388608, 16777216, 33554432];
 
     /**
      * Select the metadata padding target: smallest multiple of 512 strictly
@@ -239,17 +216,30 @@
     }
 
     /**
-     * Select the content padding target: first bucket strictly greater than
-     * framedLen. Returns null if no bucket can hold the framed data (caller
-     * must reject the upload before encryption).
+     * First ladder bucket strictly greater than framedLen, clamped to maxBlobBytes - 28.
+     * null when framedLen >= maxBlobBytes - 28.
      * @param {number} framedLen
+     * @param {number} maxBlobBytes - Largest encrypted blob the server takes
      * @returns {number|null}
+     * @throws {TypeError} if maxBlobBytes is not an integer from MIN_BLOB_BYTES to 0xFFFFFFFF
      */
-    function contentPadTarget(framedLen) {
-        for (const bucket of CONTENT_BUCKETS) {
-            if (bucket > framedLen) return bucket;
+    function contentPadTarget(framedLen, maxBlobBytes) {
+        if (!Number.isInteger(maxBlobBytes) || maxBlobBytes < MIN_BLOB_BYTES || maxBlobBytes > 0xFFFFFFFF) {
+            throw new TypeError(`maxBlobBytes must be an integer from ${MIN_BLOB_BYTES} to 4294967295`);
         }
-        return null; // input too large for any bucket
+        const topBucket = maxBlobBytes - AES_GCM_OVERHEAD;
+        if (framedLen >= topBucket) return null;
+        const bucket = CONTENT_LADDER.find((size) => size > framedLen);
+        return bucket === undefined ? topBucket : Math.min(bucket, topBucket);
+    }
+
+    /**
+     * Largest content in bytes that contentPadTarget still accepts for maxBlobBytes.
+     * @param {number} maxBlobBytes
+     * @returns {number}
+     */
+    function maxContentBytes(maxBlobBytes) {
+        return maxBlobBytes - AES_GCM_OVERHEAD - V1_HEADER_LEN - 1;
     }
 
     // ============================================================================
@@ -262,55 +252,44 @@
      * @param {string|Uint8Array} plaintext - Data to encrypt
      * @param {string} keyBase64url - Encryption key as base64url string
      * @param {string} [aad] - Optional Additional Authenticated Data (e.g. paste ID)
-     * @param {object} [options]
-     * @param {'metadata'|'content'|'none'} [options.pad='none'] - Padding mode:
+     * @param {object} options
+     * @param {'metadata'|'content'} options.pad - Padding mode:
      *   'metadata' pads framed plaintext to the next multiple of 512 (>= framed+1),
      *   'content'  pads to the first bucket from the ladder strictly greater than
-     *              framed length,
-     *   'none'     no padding (legacy / default).
-     * @returns {Promise<string>} Base64-encoded (IV + ciphertext)
-     * @throws {Error} if pad='content' and framed length exceeds the top bucket
+     *              framed length, clamped to options.maxBlobBytes - 28.
+     * @param {number} [options.maxBlobBytes] - Server blob cap; required when pad='content'
+     * @returns {Promise<Uint8Array>} IV (12) + ciphertext + tag (16)
+     * @throws {TypeError} if options.pad is missing, or pad='content' and maxBlobBytes is missing or invalid
+     * @throws {Error} if the pad mode is unknown, or pad='content' and framed length exceeds the top bucket
      */
-    async function encrypt(plaintext, keyBase64url, aad, options) {
-        if (options !== undefined && options !== null && typeof options !== 'object') {
-            throw new TypeError('encrypt(): options must be an object');
+    async function encryptBytes(plaintext, keyBase64url, aad, options) {
+        if (!options || typeof options !== 'object' || options.pad === undefined) {
+            throw new TypeError('options.pad is required');
         }
-        const padMode = (options && options.pad !== undefined) ? options.pad : 'none';
 
-        // Convert plaintext to bytes if it's a string
         const plaintextBytes = typeof plaintext === 'string'
             ? textEncode(plaintext)
             : plaintext;
+        const framedLen = V1_HEADER_LEN + plaintextBytes.length;
 
-        // Frame with version byte + length prefix before encryption so the
-        // decoder can strip future padding back to the real data length.
-        const framedBytes = frameV1(plaintextBytes);
-
-        // Apply padding after framing. The length prefix lets the decoder ignore
-        // the trailing zero bytes during decryption — no decrypt changes needed.
-        let paddedBytes;
-        if (padMode === 'metadata') {
-            const target = metadataPadTarget(framedBytes.length);
-            paddedBytes = padTo(framedBytes, target);
-        } else if (padMode === 'content') {
-            const target = contentPadTarget(framedBytes.length);
+        let target;
+        if (options.pad === 'metadata') {
+            target = metadataPadTarget(framedLen);
+        } else if (options.pad === 'content') {
+            target = contentPadTarget(framedLen, options.maxBlobBytes);
             if (target === null) {
                 throw new Error(
                     'Content too large: exceeds maximum supported upload size.'
                 );
             }
-            paddedBytes = padTo(framedBytes, target);
-        } else if (padMode === 'none') {
-            paddedBytes = framedBytes;
         } else {
-            throw new Error(`encrypt(): Unknown padding mode: ${padMode}`);
+            throw new Error(`Unknown padding mode: ${options.pad}`);
         }
+        const paddedBytes = frameAndPad(plaintextBytes, target);
 
-        // Decode key
         const keyBytes = base64urlDecode(keyBase64url);
 
         try {
-            // Import key for AES-GCM
             const cryptoKey = await crypto.subtle.importKey(
                 'raw',
                 keyBytes,
@@ -319,34 +298,36 @@
                 ['encrypt']
             );
 
-            // Generate random 12-byte IV
             const iv = new Uint8Array(12);
             crypto.getRandomValues(iv);
 
-            // Build AES-GCM params with optional AAD
             const params = { name: 'AES-GCM', iv: iv };
             if (aad) {
                 params.additionalData = textEncode(aad);
             }
 
-            // Encrypt with AES-GCM
             const ciphertext = await crypto.subtle.encrypt(
                 params,
                 cryptoKey,
                 paddedBytes
             );
 
-            // Concatenate IV + ciphertext
             const ciphertextBytes = new Uint8Array(ciphertext);
             const combined = new Uint8Array(iv.length + ciphertextBytes.length);
             combined.set(iv, 0);
             combined.set(ciphertextBytes, iv.length);
-
-            // Return as standard base64
-            return base64Encode(combined);
+            return combined;
         } finally {
             keyBytes.fill(0);
         }
+    }
+
+    /**
+     * Base64 of encryptBytes(). Used for encrypted_metadata.
+     * @returns {Promise<string>}
+     */
+    async function encrypt(plaintext, keyBase64url, aad, options) {
+        return base64Encode(await encryptBytes(plaintext, keyBase64url, aad, options));
     }
 
     // ============================================================================
@@ -460,15 +441,13 @@
 
         // Encryption/Decryption
         encrypt,
+        encryptBytes,
         decrypt,
 
-        // Padding helpers (used by create.js for pre-flight size checks)
+        // Padding helpers (maxContentBytes sets create.js's size limit)
         contentPadTarget,
+        maxContentBytes,
         metadataPadTarget,
-
-        // Framing/overhead constants (exported so create.js avoids duplicating them)
-        AES_GCM_OVERHEAD,
-        V1_HEADER_LEN,
 
         // Helpers
         base64urlEncode,
