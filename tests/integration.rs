@@ -211,6 +211,7 @@ async fn main() {
         test_unfinished_headers_time_out,
         test_idle_keep_alive_closes_after_header_timeout,
         test_upload_over_max_upload_bytes_returns_413,
+        test_auth_upload_at_max_upload_bytes_succeeds_over_returns_413,
         test_second_file_field_replaces_first,
         test_slow_request_times_out_with_408,
         test_timeout_after_paste_id_claim_still_records_owner,
@@ -2219,6 +2220,20 @@ async fn test_paste_id_never_logged() {
         .unwrap();
     assert_eq!(resp.status(), 500);
 
+    const ANON_MAX_BYTES: usize = 262_172;
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        &vec![0x5a; ANON_MAX_BYTES + 1],
+        false,
+        3600,
+        None,
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 413);
+
     let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
     for expected in [
         "Paste created",
@@ -2226,10 +2241,17 @@ async fn test_paste_id_never_logged() {
         "Admin deleted paste",
         "blob missing on disk",
         "Failed to read blob",
+        "Upload over the size limit",
     ] {
         assert!(
             logs.contains(expected),
             "expected log line {expected:?} not captured"
+        );
+    }
+    for line in logs.lines().filter(|l| l.contains("upload_rejected")) {
+        assert!(
+            !line.contains(&ANON_MAX_BYTES.to_string()),
+            "upload size limit appears in log line: {line}"
         );
     }
     for id in &ids {
@@ -4985,10 +5007,10 @@ fn temp_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     found
 }
 
-/// Send a multipart body with one field named `field_name`. It declares
-/// `2 * limit` bytes but sends only `limit + 1`, so the server has read every
-/// sent byte when it answers. Returns the status line.
-async fn post_paste_over_limit(base_url: &str, field_name: &str, limit: usize) -> [u8; 12] {
+/// Send a multipart body with one field named `field_name`. It sends
+/// `data_len` bytes after the part header but declares twice that, so the
+/// server has read every sent byte when it answers. Returns the status line.
+async fn post_paste_over_limit(base_url: &str, field_name: &str, data_len: usize) -> [u8; 12] {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     let mut stream = tokio::net::TcpStream::connect(base_url.trim_start_matches("http://"))
@@ -5003,14 +5025,11 @@ async fn post_paste_over_limit(base_url: &str, field_name: &str, limit: usize) -
         "POST /api/paste HTTP/1.1\r\nHost: localhost\r\n\
          Content-Type: multipart/form-data; boundary=nullpadboundary\r\n\
          Content-Length: {}\r\n\r\n",
-        limit * 2
+        data_len * 2
     );
     stream.write_all(head.as_bytes()).await.unwrap();
     stream.write_all(part_head.as_bytes()).await.unwrap();
-    stream
-        .write_all(&vec![0x5a; limit + 1 - part_head.len()])
-        .await
-        .unwrap();
+    stream.write_all(&vec![0x5a; data_len]).await.unwrap();
 
     let mut status_line = [0u8; 12];
     tokio::time::timeout(
@@ -5028,17 +5047,74 @@ async fn test_upload_over_max_upload_bytes_returns_413() {
     let (base_url, _con, _admin_key, _admin_alias, storage) =
         spawn_test_server_configured(TestServerOverrides {
             max_upload_bytes: LIMIT,
+            anon_max_bytes: LIMIT,
             ..Default::default()
         })
         .await;
 
-    let status = post_paste_over_limit(&base_url, "file", LIMIT).await;
+    let status = post_paste_over_limit(&base_url, "file", LIMIT + 1).await;
     assert_eq!(&status, b"HTTP/1.1 413");
     assert_eq!(temp_files(&storage), Vec::<std::path::PathBuf>::new());
 
     // An unknown field is skipped while the next field header is read.
-    let status = post_paste_over_limit(&base_url, "padding", LIMIT).await;
+    let status = post_paste_over_limit(
+        &base_url,
+        "padding",
+        LIMIT + routes::MULTIPART_OVERHEAD_BYTES + 1,
+    )
+    .await;
     assert_eq!(&status, b"HTTP/1.1 413");
+}
+
+async fn test_auth_upload_at_max_upload_bytes_succeeds_over_returns_413() {
+    const LIMIT: usize = 64 * 1024;
+    let (base_url, _con, admin_key, admin_alias, _storage) =
+        spawn_test_server_configured(TestServerOverrides {
+            max_upload_bytes: LIMIT,
+            ..Default::default()
+        })
+        .await;
+    let client = reqwest::Client::new();
+    let token = admin_login(&client, &base_url, &admin_alias, &admin_key).await;
+    let at_cap: Vec<u8> = (0..LIMIT).map(|i| i as u8).collect();
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        &at_cap,
+        false,
+        3600,
+        Some(&token),
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let id = resp.json::<serde_json::Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = client
+        .get(format!("{}/api/paste/{}", base_url, id))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let (_meta, stored) = parse_paste_frame(&resp.bytes().await.unwrap());
+    assert_eq!(stored, at_cap);
+
+    let resp = create_paste(
+        &client,
+        &base_url,
+        "text",
+        &vec![0x5a; LIMIT + 1],
+        false,
+        3600,
+        Some(&token),
+        false,
+    )
+    .await;
+    assert_eq!(resp.status(), 413);
 }
 
 async fn test_second_file_field_replaces_first() {
