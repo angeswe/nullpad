@@ -43,6 +43,10 @@ pub const PROTECTED_PATHS: [&str; 4] = [
 /// bodies (alias, signature, invite token, PIN verifier) are well under 1 KB.
 pub const MAX_JSON_BODY_BYTES: usize = 16 * 1024;
 
+/// Bytes a `POST /api/paste` body may use on top of the blob:
+/// multipart boundaries, part headers and the metadata field.
+pub const MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;
+
 /// Check a rate limit key and return a RateLimited error if exceeded.
 ///
 /// Wraps `check_rate_limit` with standard error mapping. The optional `warn_context`
@@ -270,7 +274,9 @@ pub fn api_router(
         // Paste endpoints
         .route(
             "/api/paste",
-            post(paste::create_paste).layer(DefaultBodyLimit::max(max_upload_bytes)),
+            post(paste::create_paste).layer(DefaultBodyLimit::max(
+                max_upload_bytes.saturating_add(MULTIPART_OVERHEAD_BYTES),
+            )),
         )
         .route("/api/paste/reserve", post(paste::reserve_paste))
         .route(
