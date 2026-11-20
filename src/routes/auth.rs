@@ -1,6 +1,6 @@
 //! Auth API endpoints.
 
-use crate::auth::middleware::{AppState, AuthSession};
+use crate::auth::middleware::{cleared_session_cookie, session_cookie, AppState, AuthSession};
 use crate::auth::session::{
     generate_challenge_id, generate_challenge_nonce, generate_session_token, is_valid_challenge_id,
 };
@@ -29,49 +29,26 @@ fn auth_failed(log_message: &str) -> AppError {
     unauthorized()
 }
 
-fn signature_verdict(result: Result<bool, AppError>) -> Result<(), AppError> {
+fn signature_verdict(
+    result: Result<bool, AppError>,
+    expected_origin: &str,
+) -> Result<(), AppError> {
     match result {
         Ok(true) => Ok(()),
-        Ok(false) => Err(auth_failed("Invalid signature")),
+        Ok(false) => {
+            tracing::warn!(
+                action = "auth_failed",
+                expected_origin,
+                "Invalid signature. If every login fails, PUBLIC_ORIGIN may not match the origin in the browser address bar"
+            );
+            Err(unauthorized())
+        }
         Err(AppError::BadRequest(_)) => Err(auth_failed("Signature verification rejected input")),
         Err(e) => {
             tracing::error!(action = "auth_failed", error = %e, "Signature verification error");
             Err(unauthorized())
         }
     }
-}
-
-/// Check if the incoming request arrived over HTTPS.
-///
-/// Only trusts `X-Forwarded-Proto` / `Forwarded` headers when `trusted_proxy_count > 0`
-/// (i.e. we know a reverse proxy is setting them). Without a trusted proxy, these headers
-/// are client-spoofable and must be ignored.
-///
-/// Returns `false` for direct HTTP connections (no trusted proxy).
-fn is_https(headers: &HeaderMap, trusted_proxy_count: usize) -> bool {
-    if trusted_proxy_count == 0 {
-        return false;
-    }
-    if let Some(proto) = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-    {
-        let entries: Vec<&str> = proto.split(',').map(str::trim).collect();
-        return entries[entries.len().saturating_sub(trusted_proxy_count)]
-            .eq_ignore_ascii_case("https");
-    }
-    if let Some(fwd) = headers.get("forwarded").and_then(|v| v.to_str().ok()) {
-        // RFC 7239: comma separates proxy entries, semicolon separates params within an entry.
-        // Only check the first (client-facing) entry.
-        if let Some(first_entry) = fwd.split(',').next() {
-            return first_entry.split(';').any(|param| {
-                let trimmed = param.trim();
-                trimmed.eq_ignore_ascii_case("proto=https")
-                    || trimmed.eq_ignore_ascii_case("proto=\"https\"")
-            });
-        }
-    }
-    false
 }
 
 /// POST /api/auth/challenge — Request challenge nonce
@@ -178,12 +155,28 @@ pub async fn verify_challenge(
         .await?
         .ok_or_else(|| AppError::Unauthorized("Authentication failed".to_string()))?;
 
-    // Verify signature (nonce is base64-encoded bytes)
-    let nonce_bytes = general_purpose::STANDARD
-        .decode(&challenge.nonce)
-        .map_err(|e| AppError::Internal(format!("Invalid nonce encoding: {}", e)))?;
+    let origin = &state.config.public_origin;
+    let message = format!("nullpad-auth-v1|{origin}|{}|{}", req.alias, challenge.nonce);
 
-    signature_verdict(verify_signature(&user.pubkey, &nonce_bytes, &req.signature))?;
+    let pubkey = if user.role == Role::Admin {
+        if user.id != "admin" {
+            return Err(auth_failed("Admin role on a non-admin record"));
+        }
+        if user.pubkey != state.config.admin_pubkey {
+            tracing::warn!(
+                action = "admin_pubkey_mismatch",
+                "Stored admin pubkey differs from config; using config"
+            );
+        }
+        &state.config.admin_pubkey
+    } else {
+        &user.pubkey
+    };
+
+    signature_verdict(
+        verify_signature(pubkey, message.as_bytes(), &req.signature),
+        origin,
+    )?;
 
     // Generate session token
     let token = generate_session_token();
@@ -209,15 +202,7 @@ pub async fn verify_challenge(
     // Set HttpOnly session cookie for browser navigation to protected pages.
     // The same token is returned in JSON for JS to store in sessionStorage (API calls).
     let role_str = user.role.to_string();
-    let secure = if is_https(&headers, state.config.trusted_proxy_count) {
-        "; Secure"
-    } else {
-        ""
-    };
-    let cookie = format!(
-        "np_session={}; HttpOnly; SameSite=Strict{}; Path=/; Max-Age={}",
-        token, secure, state.config.session_ttl_secs
-    );
+    let cookie = session_cookie(&token, state.config.session_ttl_secs);
 
     Ok((
         [(axum::http::header::SET_COOKIE, cookie)],
@@ -302,7 +287,6 @@ pub async fn register(
 pub async fn logout(
     session: AuthSession,
     State(state): State<AppState>,
-    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let mut con = state.redis.clone();
 
@@ -311,15 +295,7 @@ pub async fn logout(
     tracing::info!(action = "logout", user_id = %session.user_id, "User logged out");
 
     // Clear the session cookie on logout.
-    let secure = if is_https(&headers, state.config.trusted_proxy_count) {
-        "; Secure"
-    } else {
-        ""
-    };
-    let clear_cookie = format!(
-        "np_session=; HttpOnly; SameSite=Strict{}; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT",
-        secure
-    );
+    let clear_cookie = cleared_session_cookie();
 
     Ok((
         StatusCode::NO_CONTENT,
@@ -360,9 +336,12 @@ mod tests {
     #[test]
     fn test_signature_verdict_rejected_pubkey_returns_uniform_401() {
         let (result, logs) = capture_logs(|| {
-            signature_verdict(Err(AppError::BadRequest(
-                "Invalid public key format".to_string(),
-            )))
+            signature_verdict(
+                Err(AppError::BadRequest(
+                    "Invalid public key format".to_string(),
+                )),
+                "https://paste.example",
+            )
         });
         assert!(
             matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
@@ -374,8 +353,12 @@ mod tests {
 
     #[test]
     fn test_signature_verdict_internal_error_returns_uniform_401() {
-        let (result, logs) =
-            capture_logs(|| signature_verdict(Err(AppError::Internal("boom".to_string()))));
+        let (result, logs) = capture_logs(|| {
+            signature_verdict(
+                Err(AppError::Internal("boom".to_string())),
+                "https://paste.example",
+            )
+        });
         assert!(
             matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
         );
@@ -386,48 +369,18 @@ mod tests {
 
     #[test]
     fn test_signature_verdict_wrong_signature_returns_uniform_401() {
-        let (result, logs) = capture_logs(|| signature_verdict(Ok(false)));
+        let (result, logs) = capture_logs(|| signature_verdict(Ok(false), "https://paste.example"));
         assert!(
             matches!(result, Err(AppError::Unauthorized(msg)) if msg == "Authentication failed")
         );
+        assert!(logs.contains("WARN"));
         assert!(logs.contains("auth_failed"));
+        assert!(logs.contains("https://paste.example"));
+        assert!(logs.contains("PUBLIC_ORIGIN"));
     }
 
     #[test]
     fn test_signature_verdict_valid_signature_is_ok() {
-        assert!(signature_verdict(Ok(true)).is_ok());
-    }
-
-    fn proto_headers(proto: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-proto", proto.parse().unwrap());
-        headers
-    }
-
-    #[test]
-    fn test_is_https_single_value() {
-        assert!(is_https(&proto_headers("https"), 1));
-        assert!(!is_https(&proto_headers("http"), 1));
-        assert!(!is_https(&proto_headers("https"), 0));
-    }
-
-    #[test]
-    fn test_is_https_comma_joined_two_proxies() {
-        assert!(is_https(&proto_headers("https, https"), 2));
-        assert!(is_https(&proto_headers("https,http"), 2));
-        assert!(!is_https(&proto_headers("http, https"), 2));
-    }
-
-    #[test]
-    fn test_is_https_fewer_entries_than_proxies_uses_leftmost() {
-        assert!(is_https(&proto_headers("https"), 2));
-        assert!(!is_https(&proto_headers("http"), 2));
-    }
-
-    #[test]
-    fn test_is_https_spoofed_leftmost_entry_ignored() {
-        assert!(!is_https(&proto_headers("https, http"), 1));
-        assert!(is_https(&proto_headers("http, https"), 1));
-        assert!(!is_https(&proto_headers("https, http, https"), 2));
+        assert!(signature_verdict(Ok(true), "https://paste.example").is_ok());
     }
 }

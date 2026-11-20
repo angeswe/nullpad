@@ -13,6 +13,9 @@ pub struct Config {
 
     // Server
     pub bind_addr: SocketAddr,
+    /// Origin browsers load the site from, e.g. `https://paste.example`. Bound into
+    /// every signed login message, so a signature made for another site fails here.
+    pub public_origin: String,
 
     // Limits
     pub max_upload_bytes: usize,
@@ -62,6 +65,7 @@ impl std::fmt::Debug for Config {
             .field("admin_alias", &self.admin_alias)
             .field("valkey_url", &"[REDACTED]")
             .field("bind_addr", &self.bind_addr)
+            .field("public_origin", &self.public_origin)
             .field("max_upload_bytes", &self.max_upload_bytes)
             .field("anon_max_bytes", &self.anon_max_bytes)
             .field(
@@ -175,6 +179,14 @@ impl Config {
         let bind_addr = bind_addr_str
             .parse::<SocketAddr>()
             .map_err(|e| ConfigError::ParseError("BIND_ADDR".to_string(), e.to_string()))?;
+        let public_origin = env::var("PUBLIC_ORIGIN")
+            .map_err(|_| ConfigError::MissingVar("PUBLIC_ORIGIN".to_string()))?;
+        if !is_bare_origin(&public_origin) {
+            return Err(ConfigError::InvalidValue(
+                "PUBLIC_ORIGIN".to_string(),
+                "must be http:// or https:// followed by the lowercase host and an optional non-default port, with no path or trailing slash, exactly as window.location.origin shows it".to_string(),
+            ));
+        }
 
         // Limits
         let max_upload_bytes = parse_env_or_default("MAX_UPLOAD_BYTES", 52_428_800)?;
@@ -246,6 +258,7 @@ impl Config {
             admin_alias,
             valkey_url,
             bind_addr,
+            public_origin,
             max_upload_bytes,
             anon_max_bytes,
             anon_max_pastes_per_ip_per_day,
@@ -268,6 +281,31 @@ impl Config {
             paste_storage_path,
         })
     }
+}
+
+/// Accepts only the form a browser reports as `window.location.origin`:
+/// lowercase host, and a port only when it is not the scheme's default.
+fn is_bare_origin(value: &str) -> bool {
+    let (authority, default_port) = if let Some(rest) = value.strip_prefix("https://") {
+        (rest, 443)
+    } else if let Some(rest) = value.strip_prefix("http://") {
+        (rest, 80)
+    } else {
+        return false;
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !authority.ends_with(']') => (host, Some(port)),
+        _ => (authority, None),
+    };
+    let port_ok = port.is_none_or(|p| {
+        p.parse::<u16>()
+            .is_ok_and(|n| n != default_port && n.to_string() == p)
+    });
+    !host.is_empty()
+        && port_ok
+        && !host.contains(['/', '?', '#', '@'])
+        && !host.chars().any(char::is_whitespace)
+        && !host.chars().any(|c| c.is_ascii_uppercase())
 }
 
 /// Helper function to parse environment variable with a default value
@@ -322,6 +360,7 @@ mod tests {
         env::remove_var("WRITE_TIMEOUT_SECS");
         env::remove_var("ANON_MAX_BYTES");
         env::remove_var("ANON_MAX_PASTES_PER_IP_PER_DAY");
+        env::set_var("PUBLIC_ORIGIN", "https://paste.example");
     }
 
     #[test]
@@ -659,6 +698,60 @@ mod tests {
                 matches!(err, ConfigError::ParseError(ref s, _) if s == key),
                 "expected ParseError for {}, got {:?}",
                 key,
+                err
+            );
+        }
+        clear_test_env();
+    }
+
+    #[test]
+    fn public_origin_accepts_bare_origin() {
+        let _guard = lock_test();
+        for origin in [
+            "https://paste.example",
+            "http://localhost:3000",
+            "https://192.168.1.10:3016",
+            "http://[::1]:3000",
+        ] {
+            clear_test_env();
+            env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+            env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+            env::set_var("PUBLIC_ORIGIN", origin);
+            assert_eq!(Config::from_env().unwrap().public_origin, origin);
+        }
+        clear_test_env();
+    }
+
+    #[test]
+    fn public_origin_rejects_non_origin_values() {
+        let _guard = lock_test();
+        for origin in [
+            "",
+            "paste.example",
+            "ftp://paste.example",
+            "https://",
+            "https://paste.example/",
+            "https://paste.example/login",
+            "https://paste.example?x",
+            "https://user@paste.example",
+            "https://paste.example:443",
+            "http://x:80",
+            "https://Paste.Example",
+            "https://paste.example:abc",
+            "https://paste.example:",
+            "https://paste.example:03000",
+            "https://paste.example:70000",
+            "https://:3000",
+        ] {
+            clear_test_env();
+            env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+            env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+            env::set_var("PUBLIC_ORIGIN", origin);
+            let err = Config::from_env().unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidValue(ref s, _) if s == "PUBLIC_ORIGIN"),
+                "expected InvalidValue for PUBLIC_ORIGIN={:?}, got {:?}",
+                origin,
                 err
             );
         }

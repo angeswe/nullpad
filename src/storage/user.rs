@@ -71,6 +71,7 @@ where
     // Atomic: read user to get alias, delete both user and alias keys
     // KEYS[1] = user:{id}
     // ARGV[1] = alias key prefix ("alias:")
+    // ARGV[2] = user id
     let script = redis::Script::new(
         r#"
         local user_json = redis.call('GET', KEYS[1])
@@ -80,7 +81,10 @@ where
         redis.call('DEL', KEYS[1])
         local user = cjson.decode(user_json)
         if type(user.alias) == 'string' then
-            redis.call('DEL', ARGV[1] .. user.alias)
+            local alias_key = ARGV[1] .. user.alias
+            if redis.call('GET', alias_key) == ARGV[2] then
+                redis.call('DEL', alias_key)
+            end
         end
         return 1
         "#,
@@ -89,11 +93,17 @@ where
     let result: i32 = script
         .key(&user_key)
         .arg("alias:")
+        .arg(id)
         .invoke_async(con)
         .await?;
 
     Ok(result == 1)
 }
+
+const ADMIN_OWNER_ID: &str = "admin";
+
+/// `upsert_admin` script result: the new alias key belongs to another user.
+const ALIAS_TAKEN: i32 = -1;
 
 /// Upsert the admin user (permanent, no TTL).
 ///
@@ -109,7 +119,7 @@ where
     C: AsyncCommands,
 {
     let user = StoredUser {
-        id: "admin".to_string(),
+        id: ADMIN_OWNER_ID.to_string(),
         alias: alias.to_string(),
         pubkey: pubkey.to_string(),
         role: Role::Admin,
@@ -122,33 +132,53 @@ where
     let json = serde_json::to_string(&user).map_err(super::json_serialize_err)?;
 
     // Atomic upsert: read old admin, delete stale alias, write new admin + alias
-    // Alias key prefix passed as ARGV[3] to avoid hardcoding in Lua
+    // KEYS[1] = user:admin, KEYS[2] = alias:{new alias}
+    // ARGV[1] = admin JSON, ARGV[2] = new alias, ARGV[3] = alias key prefix,
+    // ARGV[4] = admin owner id, ARGV[5] = ALIAS_TAKEN
+    // Returns: ALIAS_TAKEN = KEYS[2] owned by another user, nothing written;
+    // 0 = admin created; 1 = admin updated, alias unchanged; 2 = alias changed.
     let script = redis::Script::new(
         r#"
+        local owner = redis.call('GET', KEYS[2])
+        if owner and owner ~= ARGV[4] then
+            return tonumber(ARGV[5])
+        end
         local old_json = redis.call('GET', KEYS[1])
         local result = 0
         if old_json then
             result = 1
             local old_user = cjson.decode(old_json)
             if type(old_user.alias) == 'string' and old_user.alias ~= ARGV[2] then
-                redis.call('DEL', ARGV[3] .. old_user.alias)
+                local old_alias_key = ARGV[3] .. old_user.alias
+                if redis.call('GET', old_alias_key) == ARGV[4] then
+                    redis.call('DEL', old_alias_key)
+                end
                 result = 2
             end
         end
         redis.call('SET', KEYS[1], ARGV[1])
-        redis.call('SET', KEYS[2], 'admin')
+        redis.call('SET', KEYS[2], ARGV[4])
         return result
         "#,
     );
 
-    script
+    let result: i32 = script
         .key(user_key)
         .key(&new_alias_key)
         .arg(&json)
         .arg(alias)
         .arg("alias:")
-        .invoke_async::<i32>(con)
+        .arg(ADMIN_OWNER_ID)
+        .arg(ALIAS_TAKEN)
+        .invoke_async(con)
         .await?;
+
+    if result == ALIAS_TAKEN {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::UnexpectedReturnType,
+            "ADMIN_ALIAS is already registered to another user",
+        )));
+    }
 
     Ok(())
 }
