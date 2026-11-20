@@ -180,6 +180,12 @@ impl Config {
         let max_upload_bytes = parse_env_or_default("MAX_UPLOAD_BYTES", 52_428_800)?;
         // The 256 KiB padding bucket plus 28 bytes of AES-GCM IV and tag.
         let anon_max_bytes = parse_env_or_default("ANON_MAX_BYTES", 262_172)?;
+        if anon_max_bytes > max_upload_bytes {
+            return Err(ConfigError::InvalidValue(
+                "ANON_MAX_BYTES".to_string(),
+                format!("must be <= MAX_UPLOAD_BYTES ({})", max_upload_bytes),
+            ));
+        }
         let anon_max_pastes_per_ip_per_day =
             parse_env_or_default("ANON_MAX_PASTES_PER_IP_PER_DAY", 100)?;
         let max_concurrent_blob_reads = parse_env_or_default("MAX_CONCURRENT_BLOB_READS", 32)?;
@@ -662,6 +668,25 @@ mod tests {
                 err
             );
         }
+        clear_test_env();
+    }
+
+    #[test]
+    fn anon_max_bytes_above_max_upload_bytes_rejected() {
+        let _guard = lock_test();
+        clear_test_env();
+        env::set_var("ADMIN_PUBKEY", TEST_PUBKEY_B64);
+        env::set_var("VALKEY_URL", "redis://127.0.0.1:6379");
+        env::set_var("MAX_UPLOAD_BYTES", "1000");
+        env::set_var("ANON_MAX_BYTES", "1001");
+        let err = Config::from_env().unwrap_err();
+        assert!(
+            matches!(err, ConfigError::InvalidValue(ref s, _) if s == "ANON_MAX_BYTES"),
+            "expected InvalidValue for ANON_MAX_BYTES, got {:?}",
+            err
+        );
+        env::set_var("ANON_MAX_BYTES", "1000");
+        assert!(Config::from_env().is_ok());
         clear_test_env();
     }
 }
