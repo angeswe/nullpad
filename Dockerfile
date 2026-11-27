@@ -21,7 +21,7 @@ RUN cargo build --release --locked
 
 # Stage 2: Runtime
 # To update: docker pull debian:bookworm-slim && docker inspect --format='{{index .RepoDigests 0}}' debian:bookworm-slim
-FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
+FROM debian:bookworm-slim@sha256:e67eeead736ff7bbe258ef088bff683635c561b1fcfefad0806c1df4ab49ce0e
 
 # Install runtime dependencies and apply security updates
 # curl is needed for Docker healthcheck (hits /healthz)
